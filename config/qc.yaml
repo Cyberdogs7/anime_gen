@@ -1,0 +1,8 @@
+# QC thresholds - calibrated empirically at M1. See DESIGN.md §9 Stage 8.
+anchor_ssim_min: 0.35      # Layer 0: rendered first/last frame vs fed keyframes
+composite_min: 0.60        # Layer 1: vision-judge composite floor
+identity_min: 0.40         # Layer 1: identity hard-fail floor
+artifact_retake: true      # retake when the artifacts axis reports issues
+judge_frames: 5            # frames sampled per shot (start, 25, 50, 75, end)
+lip_sync_check: true       # sample dialogue-peak frames; degrade to ffmpeg_mux on fail
+boundary_ssim_min: 0.15    # cross-cut SSIM below this flags a jump cut for review

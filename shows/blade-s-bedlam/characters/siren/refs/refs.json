@@ -1,0 +1,11 @@
+{
+  "status": "real",
+  "refs": [
+    "siren_ref_01.png",
+    "siren_mech_01.png"
+  ],
+  "variants": {
+    "base": "siren_ref_01.png",
+    "mech frame": "siren_mech_01.png"
+  }
+}

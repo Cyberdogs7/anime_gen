@@ -1,0 +1,18 @@
+# Remote machine management (DESIGN.md §7.7, §18). This machine is the controller.
+# Token-gated HTTP control plane on each node's agent (default port 8123).
+# This file is machine-specific - copy to config/remotes.yaml and fill in.
+# NOTE: keep the structure FLAT (controller/worker/renderer at top level) - a
+# nested `remotes:` key collides with the config section name.
+# NEVER commit real tokens.
+controller:
+  token: ""              # shared secret the agent requires (Bearer). Empty = allow (dev only)
+
+worker:                  # node B (LLM / TTS / Krea 2 / assembly)
+  host: "192.168.50.173"
+  port: 8123
+  token: ""              # falls back to controller.token
+
+renderer:                # node A (H3)
+  host: "127.0.0.1"
+  port: 8123
+  token: ""

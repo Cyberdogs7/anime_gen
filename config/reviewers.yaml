@@ -1,0 +1,12 @@
+# Writers'-room script reviewers. See DESIGN.md §9 Stage 2a.
+max_revisions: 2
+roles:
+  - slop              # AI-tell detection (repetition, filler, on-the-nose dialogue, cliches)
+  - continuity        # cross-check vs continuity/state.json, sheets, scene registry, timeline
+  - fan_service       # maturity delivery vs bible.mature_spec (the creative floor)
+# optional: - structure   # (pacing/three-act review) - add later, list is extensible
+
+thresholds:
+  slop_block: 0.45         # per-scene slop score above this forces a revision note
+  continuity_block: true   # any HIGH-severity continuity note forces a revision
+  fanservice_quota_miss: true  # under-quota service scenes force a revision

@@ -1,0 +1,12 @@
+{
+  "status": "real",
+  "refs": [
+    "rose_ref_01.png",
+    "rose_mech_01.png"
+  ],
+  "seed": 807664972306492680,
+  "variants": {
+    "base": "rose_ref_01.png",
+    "mech frame": "rose_mech_01.png"
+  }
+}

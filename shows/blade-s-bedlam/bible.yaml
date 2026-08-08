@@ -1,0 +1,91 @@
+title: Blade's Bedlam
+logline: In a rain-drenched mega-city, a battle-hardened mercenary finds himself in
+  the crosshairs of a deadly romance as four beautiful armorer-mercs fight for his
+  affection and survival.
+genre:
+- Gritty Survival
+- Romantic-Comedy
+tone:
+- Action-Packed
+- Witty
+- Tense
+world:
+  setting: A rain-drenched mega-city, filled with towering skyscrapers, neon lights,
+    and a vast slum sprawl. The city is overrun by bio-mechs - synthetic lifeforms
+    that wreak havoc on the population.
+  rules:
+  - The only way to survive in this city is through strength and cunning.
+  - Technology is king; those who master it have the power.
+  established_facts:
+  - Bio-mechs are a constant threat, originating from unknown sources.
+  - The city's government has been corrupted by powerful corporations that exploit
+    the populace for profit.
+overall_plotline:
+  id: blades_romance
+  name: Blade's Romance
+  characters:
+  - Blade
+  - Lily
+  - Ivy
+  - Rose
+  - Dahlia
+  summary: A battle-hardened mercenary, Blade, finds himself the center of a deadly
+    romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - fight
+    for his affection while they all struggle to survive in their rain-drenched city.
+plotlines:
+- id: lilys_rivalry
+  name: Lily's Rivalry
+  characters:
+  - Lily
+  - Ivy
+  status: active
+  summary: Lily and Ivy, two of the most skilled armorer-mercs in the city, constantly
+    compete against each other for Blade's attention. Their rivalry fuels their desire
+    to create the best hardsuits for him.
+- id: roses_secrets
+  name: Rose's Secrets
+  characters:
+  - Rose
+  - Dahlia
+  status: dormant
+  summary: While Rose and Dahlia are close allies, they each hold secrets from the
+    other that could change their dynamic forever. As these secrets come to light,
+    it will test their friendship and loyalty.
+style_guide: The show's visual look is a blend of modern anime aesthetics with gritty
+  realism, featuring detailed line art and vibrant colors for characters, contrasted
+  against dark, rain-soaked cityscapes and the metallic sheen of hardsuits.
+runtime_target_s: 1320
+mature_spec:
+  quotient: ecchi
+  quotas:
+    service_scenes_per_episode:
+    - 0
+    - 2
+    reward_scenes_per_arc: 4
+  escalation:
+    schedule: The level of ecchi content will gradually increase over the course of
+      the series.
+  tone_boundaries:
+  - Full nudity and explicit sexual acts are permissible.
+  - Sexual innuendo is standard; non-consensual sex (rape) is a recurring threat/plot
+    element.
+  characters:
+    Blade: primary
+    Lily: support
+    Ivy: support
+    Rose: support
+    Dahlia: support
+  scene_types:
+  - Service scenes
+  - Reward scenes
+cast:
+- name: Blade
+  role: Mercenary
+- name: Lily
+  role: Armorer-Merc
+- name: Ivy
+  role: Armorer-Merc
+- name: Rose
+  role: Armorer-Merc
+- name: Dahlia
+  role: Armorer-Merc

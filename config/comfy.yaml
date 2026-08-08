@@ -1,0 +1,33 @@
+# ComfyUI instances. See DESIGN.md §7.1, §10.1, §10.3.
+nodes:
+  worker:                  # node B - Krea 2 image gen
+    url: "http://127.0.0.1:8188"
+    api_key: null
+  renderer:                # node A - H3 video gen (renderer agent talks to its loopback ComfyUI)
+    url: "http://127.0.0.1:8188"
+    api_key: null
+
+checkpoints:
+  krea2: "krea2TurboNSFWAIO_v10.safetensors"
+  krea2_clip: "qwen3vl_4b_fp8_scaled.safetensors"
+  krea2_clip_type: "krea2"
+  krea2_vae: "qwen_image_vae.safetensors"
+  krea2_lora: "fedor_bypass.safetensors"
+  h3_fl2va: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+  h3_ref2va: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+  h3_clip: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+  h3_turbo_lora: "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors"
+  h3_video_vae: "minimax_h3_video_vae_fp16.safetensors"
+  h3_audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
+
+manage_lifecycle: true     # serve/renderer start & stop their local ComfyUI
+startup_retries: 30
+fp32_vae: true             # H3 grey/NaN fix; see DESIGN.md §19
+
+# H3 sampling defaults (validated A/B: Spectrum + res_multistep at 8 steps,
+# no visual difference vs sa_solver, ~25% faster). See cache/ab_*.mp4.
+h3:
+  spectrum: true           # SpectrumApplyMiniMaxH3 forecast acceleration
+  first_block_cache: false # FirstBlockCache (no gain at 8 steps; needs ~20 steps)
+  sampler: "res_multistep" # Spectrum-compatible; "sa_solver" otherwise
+  steps: 8

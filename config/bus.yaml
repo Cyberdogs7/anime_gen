@@ -1,0 +1,5 @@
+# Event bus transport. See DESIGN.md §6.4.
+provider: memory           # memory | redis   (memory = in-process broker, no deps; redis = Redis Streams)
+url: "redis://127.0.0.1:6379"
+password: null             # set when the broker is reachable from the renderer node
+group_prefix: "studio"

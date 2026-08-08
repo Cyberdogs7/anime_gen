@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Studio Dashboard</title>
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#1a1d24; --line:#2a2f3a; --text:#e6e6e6;
+          --dim:#9aa3b2; --ok:#34c77b; --bad:#ff5c5c; --warn:#e0b84c; --accent:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:#0d0f13;
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header select, header button { background:#1c2028; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:6px 10px; font-size:13px; }
+  .tabs { display:flex; gap:8px; margin-left:auto; }
+  .tab { padding:7px 14px; border-radius:6px; cursor:pointer; background:#1c2028; border:1px solid var(--line); }
+  .tab.active { background:var(--accent); color:#0d0f13; font-weight:600; }
+  main { max-width:1100px; margin:0 auto; padding:18px 16px 60px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-bottom:16px; overflow:hidden; }
+  .card h2 { margin:0; padding:12px 16px; font-size:15px; border-bottom:1px solid var(--line); display:flex;
+             align-items:center; gap:10px; }
+  .badge { font-size:11px; padding:2px 9px; border-radius:20px; font-weight:600; text-transform:uppercase; }
+  .badge.approved { background:rgba(52,199,123,.16); color:var(--ok); }
+  .badge.pending { background:rgba(224,184,76,.16); color:var(--warn); }
+  .badge.rejected { background:rgba(255,92,92,.16); color:var(--bad); }
+  .badge.stub { background:rgba(154,163,178,.16); color:var(--dim); }
+  .card pre { margin:0; padding:12px 16px; overflow:auto; max-height:340px; font:12px/1.5 Consolas,monospace;
+              color:#c8d2e0; white-space:pre-wrap; word-break:break-word; }
+  .card .body { padding:12px 16px; }
+  .actions { display:flex; gap:10px; padding:12px 16px; border-top:1px solid var(--line); align-items:center; }
+  button.btn { border:0; border-radius:6px; padding:8px 16px; font-size:13px; cursor:pointer; font-weight:600; }
+  .btn.approve { background:var(--ok); color:#07130b; }
+  .btn.reject { background:var(--bad); color:#1a0505; }
+  .btn.ghost { background:#262b35; color:var(--text); }
+  .char-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; padding:12px 16px; }
+  .char { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .char h3 { margin:0 0 6px; font-size:14px; }
+  .char-ref { width:100%; border-radius:8px; margin:8px 0 4px; display:block; }
+  .voice-sample { width:100%; margin:4px 0 8px; }
+  .scene-ref { width:100%; border-radius:8px; margin:6px 0 10px; display:block; }
+  .scene { margin:4px 0 12px; }
+  .shot-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; margin-top:8px; }
+  .shot { border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .shot-img { width:100%; border-radius:6px; display:block; }
+  .shot-empty { height:100px; display:flex; align-items:center; justify-content:center; border:1px dashed var(--line); border-radius:6px; }
+  .shot-meta { font-size:11px; color:var(--dim); margin:4px 0; }
+  .shot-costumes { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+  .shot-dlg { font-size:12px; margin:2px 0; }
+  .obj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+  .obj { text-align:center; }
+  .kv { color:var(--dim); font-size:12px; }
+  .kv b { color:var(--text); font-weight:600; }
+  .notes { width:100%; margin-top:4px; background:#161a21; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:6px 8px; font:inherit; }
+  .scenes .kv { margin:4px 0; }
+  .muted { color:var(--dim); }
+  .ep-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .ep-row .spacer { flex:1; }
+  .rev { border-left:3px solid var(--line); margin:8px 0; padding:6px 10px; background:#161a21; border-radius:4px; }
+  .rev.fail { border-color:var(--bad); } .rev.pass { border-color:var(--ok); }
+  .rev b { font-size:12px; }
+  .hide { display:none; }
+  .flash { position:fixed; right:16px; bottom:16px; background:#262b35; border:1px solid var(--line);
+           border-radius:8px; padding:10px 14px; max-width:420px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,.5); }
+  .busybar { position:fixed; top:0; left:0; right:0; z-index:40; background:var(--warn); color:#0d0f13;
+             text-align:center; padding:8px; font-weight:600; }
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; z-index:30; }
+  #modal.hide { display:none !important; }
+  .modal-card { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(760px,92vw);
+                max-height:86vh; overflow:auto; padding:16px; }
+  .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:15px; }
+  #modal textarea { width:100%; background:#161a21; color:var(--text); border:1px solid var(--line); border-radius:8px;
+                    padding:8px; font:inherit; margin-bottom:10px; }
+  .prop { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:12px; background:#161a21; }
+  .prop h3 { margin:0 0 4px; font-size:15px; }
+  .prop .log { font-style:italic; color:#d8dde6; margin:4px 0; }
+  .prop .kv { margin:2px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Studio · human approval &amp; review</h1>
+  <select id="showSel"></select>
+  <button class="btn approve" onclick="newShow()">New show</button>
+  <button class="btn reject" onclick="deleteShow()">Delete</button>
+  <button class="ghost btn" onclick="refresh()">Refresh</button>
+  <div class="tabs">
+    <div class="tab active" id="tab-setup" onclick="showTab('setup')">Setup</div>
+    <div class="tab" id="tab-story" onclick="showTab('story')">Story</div>
+  </div>
+</header>
+<div id="busy" class="hide busybar"></div>
+<main>
+  <div id="view-setup"></div>
+  <div id="view-story" class="hide"></div>
+</main>
+<div id="modal" class="hide">
+  <div class="modal-card">
+    <div class="modal-head">
+      <b>New show — proposals from the script team</b>
+      <button class="ghost btn" onclick="closeModal()">✕</button>
+    </div>
+    <textarea id="guidance" rows="3"
+      placeholder="Prompt guidance for the script team (tone, setting, characters, inspirations…). Leave blank for zero-input pitches."></textarea>
+    <button class="btn approve" onclick="generateProposals()">Generate proposals</button>
+    <div id="props"></div>
+    <div class="actions" style="border-top:1px solid var(--line);padding-top:10px">
+      <button class="ghost btn" onclick="closeModal()">Close (Esc)</button>
+    </div>
+  </div>
+</div>
+<script>
+let SHOW = "", EPISODES = [];
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  try { return await r.json(); }
+  catch (e) { return { ok: false, error: `bad response (${r.status}) ${r.statusText}` }; }
+}
+async function refresh() {
+  const data = await api("/api/shows");
+  const sel = document.getElementById("showSel");
+  sel.innerHTML = "";
+  for (const s of data.shows) {
+    const o = document.createElement("option");
+    o.value = s.id; o.textContent = s.id;
+    sel.appendChild(o);
+  }
+  if (data.shows.length && (!SHOW || !data.shows.find(s => s.id === SHOW))) SHOW = data.shows[0].id;
+  sel.value = SHOW;
+  loadAll();
+}
+async function newShow() {
+  document.getElementById("modal").classList.remove("hide");
+}
+function closeModal() {
+  document.getElementById("modal").classList.add("hide");
+  document.getElementById("props").innerHTML = "";
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+document.getElementById("modal").addEventListener("click", e => {
+  if (e.target && e.target.id === "modal") closeModal();
+});
+async function generateProposals() {
+  const g = document.getElementById("guidance").value;
+  const box = document.getElementById("props");
+  box.innerHTML = '<p class="muted">The script team is pitching… (usually 20–60s)</p>';
+  try {
+    const res = await api("/api/proposals", { method: "POST", headers: { "Content-Type": "application/json" },
+                                              body: JSON.stringify({ guidance: g }) });
+    if (!res.ok || !res.proposals) { box.innerHTML = `<p class="muted">error: ${esc(res.error || "no proposals")}</p>`; return; }
+    window._props = res.proposals;
+    let h = "";
+    res.proposals.forEach((p, i) => {
+      h += `<div class="prop"><h3>${i + 1}. ${esc(p.title)}</h3>
+        <div class="log">${esc(p.logline || "")}</div>
+        <div class="kv"><b>Premise:</b> ${esc(p.premise || "")}</div>
+        <div class="kv"><b>Genre:</b> ${esc((p.genre || []).join(", "))} &nbsp; <b>Tone:</b> ${esc((p.tone || []).join(", "))}</div>
+        <div class="kv"><b>Hook:</b> ${esc(p.hook || "")}</div>
+        <div class="actions" style="border-top:0;padding:8px 0 0"><button class="btn approve" onclick="pickProposal(${i})">Use this proposal</button></div>
+      </div>`;
+    });
+    box.innerHTML = h;
+  } catch (e) { box.innerHTML = `<p class="muted">request failed: ${esc(e.message)}</p>`; }
+}
+async function pickProposal(i) {
+  const p = window._props[i];
+  try {
+    if (!p) return;
+    const res = await api("/api/shows", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ proposal: p }) });
+    flash(res.show_id ? `show '${res.show_id}' created from "${p.title}"` : `error: ${res.error || "create failed"}`);
+    if (res.show_id) SHOW = res.show_id;
+  } catch (e) {
+    flash(`error: ${e.message || "create failed"}`);
+  } finally {
+    closeModal();
+    await refresh();
+  }
+}
+async function deleteShow() {
+  if (!SHOW) return;
+  if (!confirm(`Delete show '${SHOW}' entirely? Removes its folder and all database records. This cannot be undone.`)) return;
+  const res = await api("/api/show/" + SHOW, { method: "DELETE" });
+  flash(res.ok ? `deleted ${SHOW}` : `error: ${res.error || "delete failed"}`);
+  SHOW = "";
+  await refresh();
+}
+function showTab(name) {
+  document.getElementById("tab-setup").classList.toggle("active", name === "setup");
+  document.getElementById("tab-story").classList.toggle("active", name === "story");
+  document.getElementById("view-setup").classList.toggle("hide", name !== "setup");
+  document.getElementById("view-story").classList.toggle("hide", name !== "story");
+}
+function badge(status) {
+  if (!status) return '<span class="badge pending">pending</span>';
+  return `<span class="badge ${status}">${status}</span>`;
+}
+function isStubBible(b) {
+  return !b || !(b.world || b.cast || (b.arcs && b.arcs.length));
+}
+function regenNote(obj) {
+  const n = obj && obj.rejected_notes;
+  return n ? `<div class="kv" style="color:var(--warn)">↻ regenerated from your rejection: <b>${esc(n)}</b></div>` : "";
+}
+function askNotes() {
+  const n = prompt("Notes (leave blank to skip):", "");
+  return n === null ? null : n;
+}
+async function act(url, payload, busyMsg) {
+  const busy = document.getElementById("busy");
+  if (busyMsg && busy) { busy.dataset.busy = "1"; busy.textContent = busyMsg; busy.classList.remove("hide"); }
+  const poll = setInterval(async () => {
+    try {
+      const a = await api(`/api/show/${SHOW}/activity`);
+      if (a && a.detail && busy) busy.textContent = a.detail;
+    } catch (e) { /* dashboard is mid-request; ignore */ }
+  }, 1500);
+  try {
+    const res = await api(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                                 body: JSON.stringify(payload) });
+    flash(res.messages ? res.messages.join(" · ") : (res.error || "done"));
+  } catch (e) {
+    flash(`error: ${e.message || "request failed"}`);
+  } finally {
+    clearInterval(poll);
+    if (busy) { busy.dataset.busy = ""; busy.classList.add("hide"); }
+    await loadAll();
+  }
+}
+function flash(msg) {
+  let f = document.getElementById("flash");
+  if (!f) { f = document.createElement("div"); f.id = "flash"; f.className = "flash";
+            document.body.appendChild(f); }
+  f.textContent = msg;
+  clearTimeout(f._t);
+  f._t = setTimeout(() => f.remove(), 3200);
+}
+function actRow(step, char, label) {
+  return `<div class="actions">
+    <button class="btn approve" onclick="doApprove('${step}','${char||''}')">Approve ${label}</button>
+    <button class="btn reject" onclick="doReject('${step}','${char||''}')">Reject</button>
+  </div>`;
+}
+async function doApprove(step, char) {
+  const notes = askNotes(); if (notes === null) return;
+  const next = step === "concept" ? "bible" : step === "bible" ? "characters" :
+               step === "character" ? "next character/step" : step === "scenes" ? "completing bootstrap" : "next step";
+  await act(`/api/show/${SHOW}/approve`, { step, char, notes },
+            `Approved — generating ${next} (may take 1–3 min)…`);
+}
+async function genEpisode(n) {
+  await act(`/api/show/${SHOW}/generate`, { episode: n },
+            `Writing episode ${n} (may take a few minutes)…`);
+  showTab('story');
+}
+
+async function doReject(step, char) {
+  const notes = askNotes(); if (notes === null) return;
+  if (step === "refs" || step === "voice") {
+    const card = [...document.querySelectorAll(".char")]
+      .find(c => c.querySelector("h3") && c.querySelector("h3").textContent === char);
+    if (card) {
+      const busyMsg = step === "refs" ? "Regenerating image…" : "Regenerating voice…";
+      const holder = document.createElement("div");
+      holder.className = "kv muted";
+      holder.textContent = busyMsg;
+      if (step === "refs") {
+        card.querySelectorAll("img.char-ref").forEach(i => i.remove());
+        card.insertBefore(holder, card.querySelector(".actions"));
+      } else {
+        card.querySelectorAll("audio.voice-sample").forEach(a => a.remove());
+        card.appendChild(holder);
+      }
+    }
+  }
+  await act(`/api/show/${SHOW}/reject`, { step, char, notes },
+            "Rejected — regenerating with your notes (may take 1–3 min)…");
+}
+
+// ---------------- Setup (Gate 0) ----------------
+async function loadSetup() {
+  const d = await api(`/api/show/${SHOW}`);
+  const el = document.getElementById("view-setup");
+  if (!d.show_id) { el.innerHTML = '<p class="muted">show not found</p>'; return; }
+  let html = "";
+  html += card("Concept", badge(d.bootstrap.concept.status),
+               (regenNote(d.bootstrap.concept) || "") +
+               (d.concept ? `<pre>${esc(JSON.stringify(d.concept, null, 2))}</pre>` : '<p class="muted">no concept yet</p>'),
+               actRow("concept", "", "concept"));
+  const bibleBody = !d.bible ? '<p class="muted">no bible yet</p>'
+    : isStubBible(d.bible)
+      ? '<p class="muted">Bible not generated yet — it generates after the concept is approved (takes a couple of minutes).</p>'
+      : `<pre>${esc(JSON.stringify(d.bible, null, 2))}</pre>`;
+  html += card("Bible", badge(d.bootstrap.bible.status),
+               (regenNote(d.bootstrap.bible) || "") + bibleBody,
+               actRow("bible", "", "bible"));
+  let charHtml = '<div class="char-grid">';
+  for (const c of d.characters) {
+    const cc = c.content || {};
+    charHtml += `<div class="char"><h3>${esc(c.name)}</h3>
+      <div class="kv">Role: <b>${esc(cc.role || "—")}</b></div>
+      <div class="kv">Proposal: ${badge(c.proposal)} &nbsp; Refs: ${badge(c.refs || (c.ref_images.length ? "ready" : "stub"))} &nbsp; Voice: ${badge(c.voice)}</div>
+      ${(c.ref_images || []).length
+        ? (c.ref_images || []).map(f =>
+          `<img class="char-ref" alt="ref" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(f)}?v=${Date.now()}">`).join("")
+        : (c.refs === "approved" ? "" : '<div class="kv muted">image generating…</div>')}
+      ${c.voice_file
+        ? `<audio class="voice-sample" controls preload="none" src="/api/show/${SHOW}/media/assets/voice/${esc(c.voice_file)}?v=${Date.now()}"></audio>`
+        : (c.voice === "pending" ? '<div class="kv">voice sample generating…</div>' : "")}
+      <div class="actions" style="border-top:0;padding:8px 0 2px">
+        <button class="btn approve" onclick="doApprove('character','${esc(c.name)}')">Approve</button>
+        <button class="btn reject" onclick="doReject('character','${esc(c.name)}')">Reject</button>
+        ${(c.ref_images.length || c.voice_file) ? '<span class="muted" style="font-size:11px">or</span>' : ""}
+        ${c.ref_images.length ? `<button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Reject image</button>` : ""}
+        ${c.voice_file ? `<button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : ""}
+      </div>
+      ${c.rejected_notes ? `<div class="kv">Rejected: <b>${esc(c.rejected_notes)}</b></div>` : ""}
+      <details><summary class="muted">proposal</summary><pre>${esc(JSON.stringify(cc, null, 2))}</pre></details>
+    </div>`;
+  }
+  charHtml += '</div>';
+  html += card("Characters", "", charHtml || '<p class="muted">no characters</p>');
+  let sceneHtml = '<div class="scenes">';
+  for (const [k, v] of Object.entries(d.scenes || {})) {
+    const imgs = (v.ref_images || []).map(f =>
+      `<img class="scene-ref" alt="${esc(k)}" src="/api/show/${SHOW}/media/scenes/${esc(k)}/refs/${esc(f)}?v=${Date.now()}">`).join("");
+    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")}${imgs}</div>`;
+  }
+  sceneHtml += '</div>';
+  html += card("Scenes", badge(d.bootstrap.scenes.status),
+               (regenNote(d.bootstrap.scenes) || "") + sceneHtml || '<p class="muted">no scenes</p>',
+               actRow("scenes", "", "scenes"));
+  if (d.bootstrap.complete) {
+    const prev = d.next_episode > 1 ? `episode ${d.next_episode - 1} generated — review it in the Story tab.` : "generate the first episode (Development plotlines → script → writers' room review).";
+    html += card("Next stage", "",
+                 `<p class="muted">Bootstrap complete — ${prev}</p>`,
+                 `<div class="actions"><button class="btn approve" onclick="genEpisode(${d.next_episode})">Generate episode ${d.next_episode}</button></div>`);
+  }
+  el.innerHTML = html;
+}
+
+// ---------------- Story (Gate 3) ----------------
+// Live pipeline status: always show what's happening right now (background
+// storyboard/consistency jobs, not just button-triggered actions).
+async function pollActivity() {
+  const busy = document.getElementById("busy");
+  try {
+    const a = await api(`/api/show/${SHOW}/activity`);
+    if (a && a.active && busy) {
+      busy.textContent = "● " + (a.detail || "Working…");
+      busy.classList.remove("hide");
+    } else if (busy && !busy.dataset.busy) {
+      busy.classList.add("hide");
+    }
+  } catch (e) { /* show not loaded yet */ }
+}
+setInterval(pollActivity, 3000);
+
+function episodeStatus(d) {
+  const st = d.story || {};
+  const sb = d.storyboard || {};
+  const cons = d.consistency || [];
+  const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
+  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.keyframe).length, 0);
+  const fails = cons.filter(c => c.result !== "pass").length;
+  if (st.status === "rejected") return "Rejected — regenerating";
+  if (st.status === "approved") return "Approved ✓";
+  if (sb.state === "failed") return `Failed: ${sb.detail || "unknown"}`;
+  if (sb.state === "running") return `Generating: ${sb.detail || "storyboard…"}`;
+  if (done < shots) return `Storyboard incomplete (${done}/${shots} keyframes) — not final`;
+  if (fails > 0) return `${fails} shot${fails > 1 ? "s" : ""} still flagged — consistency auto-iterated to its cap`;
+  if (st.status === "pending") return "Awaiting your approval";
+  return "Draft — not yet approved";
+}
+
+async function loadStory() {
+  const el = document.getElementById("view-story");
+  const d = await api(`/api/show/${SHOW}/episodes`);
+  EPISODES = d.episodes || [];
+  if (!EPISODES.length) { el.innerHTML = '<p class="muted">no episodes yet — generate a script first</p>'; return; }
+  let html = '<div class="card"><div class="body">';
+  for (const ep of EPISODES) {
+    const st = ep.story || {};
+    html += `<div class="ep-row">
+      <b>${esc(ep.episode)}</b>
+      <span class="muted">${esc(ep.script_file || "no script")}</span>
+      ${badge(st.status || "pending")}
+      <span class="spacer"></span>
+      <button class="btn approve" onclick="doStoryApprove('${ep.episode}')">Approve</button>
+      <button class="btn reject" onclick="doStoryReject('${ep.episode}')">Reject</button>
+    </div>`;
+  }
+  html += '</div></div>';
+  let anyRunning = false;
+  for (const ep of EPISODES) {
+    const d2 = await api(`/api/show/${SHOW}/ep/${ep.episode}`);
+    if ((d2.storyboard || {}).state === "running") anyRunning = true;
+    html += episodeStoryboard(ep, d2);
+  }
+  el.innerHTML = html;
+  if (anyRunning) setTimeout(loadStory, 4000);
+}
+
+function episodeStoryboard(ep, d) {
+  const st = ep.story || {};
+  const sum = d.summary || {};
+  const consMap = {};
+  (d.consistency || []).forEach(r => { consMap[r.shot] = r.result; });
+  const consCounts = (d.consistency || []).reduce((a, r) => {
+    const k = r.result === "pass" ? "pass" : (r.result === "regenerated" ? "regenerated" : "failed");
+    a[k] = (a[k] || 0) + 1; return a;
+  }, {});
+  let h = card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
+    `<div class="kv">Status: <b>${esc(episodeStatus(d))}</b></div>` +
+    `<div class="kv">Scenes: <b>${sum.scenes || 0}</b> · Shots: <b>${sum.shots || 0}</b> · ` +
+    `Dialogue lines: <b>${sum.dialogue_lines || 0}</b> · Hero shots: <b>${sum.hero_shots || 0}</b></div>` +
+    (consCounts.pass || consCounts.regenerated || consCounts.failed
+      ? `<div class="kv">Consistency: <b>${consCounts.pass || 0} pass</b> · <b>${consCounts.regenerated || 0} regenerated</b> · <b>${consCounts.failed || 0} failed</b></div>` : "") +
+    storyboardControls(d));
+  for (const sc of (d.scenes || [])) {
+    let sh = `<div class="scene"><b>${esc(sc.id)}</b> — ${esc(sc.location || "")} ` +
+             `<span class="muted">${esc(sc.time_of_day || "")}</span>` +
+             `<div class="kv">${esc(sc.summary || "")}</div><div class="shot-grid">`;
+    for (const s of (sc.shots || [])) {
+      const img = s.keyframe
+        ? `<img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/storyboard/${esc(s.keyframe)}?v=${Date.now()}">`
+        : '<div class="muted shot-empty">keyframe pending</div>';
+      const dlg = (s.dialogue || []).map(x =>
+        `<div class="shot-dlg"><b>${esc(x.char)}:</b> ${esc(x.line)}</div>`).join("");
+      const costs = Object.entries(s.costumes || {}).map(([n, l]) =>
+        `<span class="badge ghost" title="costume">${esc(n)}: ${esc(l)}</span>`).join(" ");
+      const consBadge = consMap[s.id] ? ` ${badge(consMap[s.id])}` : "";
+      sh += `<div class="shot">${img}
+        <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}</div>
+        <div class="shot-costumes">${costs}</div>
+        <div class="kv">${esc(s.camera || "")}</div>
+        <div class="kv">${esc(s.action || "")}</div>${dlg}</div>`;
+    }
+    sh += '</div></div>';
+    h += card(esc(sc.id), "", sh);
+  }
+  if ((d.objects || []).length) {
+    const objs = (d.objects || []).map(o =>
+      `<div class="obj"><img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/objects/${esc(o.image)}?v=${Date.now()}">` +
+      `<div class="kv">${esc(o.name)}</div></div>`).join("");
+    h += card("Recurring objects (continuity refs)", "", `<div class="obj-grid">${objs}</div>`);
+  }
+  if ((d.cast || []).length) {
+    const cast = (d.cast || []).map(c => {
+      const variants = (c.variants || []).map(v =>
+        `<div class="obj">${v.image
+          ? `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(v.image)}?v=${Date.now()}">`
+          : '<div class="muted shot-empty">no ref</div>'}
+        <div class="kv"><b>${esc(v.label)}</b></div></div>`).join("");
+      return `<div class="obj"><div class="kv"><b>${esc(c.name)}</b> <span class="muted">${esc(c.role || "")}</span></div>${variants}</div>`;
+    }).join("");
+    h += card("Episode cast (character refs)", "", `<div class="obj-grid">${cast}</div>`);
+  }
+  const rev = Object.keys(d.reviews || {}).sort();
+  if (rev.length) {
+    let rh = "";
+    for (const k of rev) {
+      const r = d.reviews[k] || {};
+      const cls = r.pass ? "pass" : (r.pass === false ? "fail" : "");
+      rh += `<div class="rev ${cls}"><b>${esc(k)}</b> ${r.pass === undefined ? "" : (r.pass ? "PASS" : "FAIL")} score=${r.score ?? ""}<br><span class="muted">${esc(r.summary || "")}</span></div>`;
+    }
+    h += card("Writers' room", "", rh);
+  }
+  if (d.script) {
+    h += card("Script (raw)", "", `<details><summary class="muted">show raw JSON</summary><pre>${esc(JSON.stringify(d.script, null, 2))}</pre></details>`);
+  }
+  return h;
+}
+
+function storyboardControls(d) {
+  const sb = d.storyboard || {};
+  const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
+  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.keyframe).length, 0);
+  if (sb.state === "running") {
+    return `<div class="kv muted">Storyboard generating… ${sb.done || 0}/${sb.total || shots} — ${esc(sb.detail || "")}</div>`;
+  }
+  let h = "";
+  if (shots && done < shots) {
+    h += `<div class="actions"><button class="btn approve" onclick="genStoryboard('${esc(d.episode)}')">Generate storyboard (${done}/${shots} keyframes)</button></div>`;
+  }
+  if (done && shots && done >= shots) {
+    h += `<div class="kv muted">Storyboard complete (${done} keyframes) — consistency review auto-runs</div>`;
+  }
+  return h;
+}
+
+function genStoryboard(ep) {
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  act(`/api/show/${SHOW}/storyboard`, { episode: n },
+      "Starting storyboard generation (background)…");
+}
+
+async function doStoryApprove(ep) {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/ep/${ep}/approve`, { notes });
+}
+async function doStoryReject(ep) {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/ep/${ep}/reject`, { notes });
+}
+
+// ---------------- helpers ----------------
+function card(title, b, content, actions) {
+  return `<div class="card"><h2>${title} ${b||""}</h2>${content}<div class="body">${actions||""}</div></div>`;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c])); }
+async function loadAll() { await loadSetup(); await loadStory(); }
+document.getElementById("showSel").addEventListener("change", e => { SHOW = e.target.value; loadAll(); });
+refresh();
+</script>
+</body>
+</html>

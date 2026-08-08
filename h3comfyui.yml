@@ -1,0 +1,253 @@
+- generic:
+  - generic:
+    - main:
+      - generic:
+        - generic:
+          - text: .. .. ..
+          - generic:
+            - generic [ref=e11]:
+              - group [ref=e15]:
+                - button [pressed] [ref=e16] [cursor=pointer]:
+                  - generic [ref=e18]:
+                    - generic [ref=e19]: Unsaved Workflow
+                    - generic [ref=e20]:
+                      - generic [ref=e21]: •
+                      - button [ref=e22]:
+                        - generic [ref=e23]: 
+              - button [ref=e24] [cursor=pointer]:
+                - generic [ref=e25]: 
+            - generic:
+              - navigation [ref=e27]:
+                - generic [ref=e28]:
+                  - generic [ref=e29]:
+                    - generic [ref=e30] [cursor=pointer]
+                    - button [ref=e35] [cursor=pointer]:
+                      - generic [ref=e36]: Assets
+                    - button [ref=e40] [cursor=pointer]:
+                      - generic [ref=e41]: Nodes
+                    - button [ref=e45] [cursor=pointer]:
+                      - generic [ref=e46]: Models
+                    - button [ref=e50] [cursor=pointer]:
+                      - generic [ref=e51]: Workflows
+                    - button [ref=e55] [cursor=pointer]:
+                      - generic [ref=e56]: Apps
+                    - button [ref=e60] [cursor=pointer]:
+                      - generic [ref=e61]: Templates
+                  - generic [ref=e65]:
+                    - button [ref=e66] [cursor=pointer]:
+                      - generic [ref=e67]:
+                        - generic [ref=e68]: 
+                        - generic [ref=e70]: Help
+                    - button [ref=e71] [cursor=pointer]:
+                      - generic [ref=e72]: Console
+                    - button [ref=e76] [cursor=pointer]:
+                      - generic [ref=e77]: Shortcuts
+                    - button [ref=e81] [cursor=pointer]:
+                      - generic [ref=e82]: Settings
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - group [ref=e86]:
+                            - generic [ref=e87]:
+                              - button [ref=e88] [cursor=pointer]
+                              - button [ref=e91] [cursor=pointer]:
+                                - generic [ref=e93]: Graph
+                          - text: 
+                      - region [ref=e100]:
+                        - generic [ref=e102]:
+                          - generic [ref=e103]: .. .. ..
+                          - generic [ref=e104]:
+                            - generic [ref=e106]:
+                              - textbox [ref=e107]: "1"
+                              - generic [ref=e108]:
+                                - button [ref=e109] [cursor=pointer]
+                                - button [disabled]
+                            - button [ref=e110] [cursor=pointer]: Run
+                            - button [ref=e112] [cursor=pointer]
+                          - button [disabled]
+                          - button [ref=e113] [cursor=pointer]:
+                            - generic [ref=e114]: 0 active
+                            - generic [ref=e115]: Expand job queue
+                  - generic:
+                    - generic:
+                      - toolbar [ref=e116]:
+                        - button [ref=e117] [cursor=pointer]
+                        - button [ref=e123] [cursor=pointer]
+                        - button [ref=e125] [cursor=pointer]:
+                          - generic [ref=e126]: 100%
+                        - button [ref=e130] [cursor=pointer]
+                        - button [ref=e132] [cursor=pointer]
+                      - generic [ref=e135]:
+                        - button [ref=e136] [cursor=pointer]
+                        - button [ref=e138] [cursor=pointer]
+                        - separator [ref=e140]
+                    - text: 
+                - separator [ref=e142]
+                - generic [ref=e145]:
+                  - generic [ref=e146]:
+                    - generic [ref=e147]:
+                      - heading [level=3] [ref=e148]: Workflow Overview
+                      - button [pressed] [ref=e150] [cursor=pointer]
+                    - navigation [ref=e152]:
+                      - tablist [ref=e153]:
+                        - tab [selected] [ref=e154] [cursor=pointer]: Parameters
+                        - tab [ref=e155] [cursor=pointer]: Nodes
+                        - tab [ref=e156] [cursor=pointer]: Global Settings
+                  - generic [ref=e157]:
+                    - textbox [ref=e161]:
+                      - /placeholder: Search ...
+                    - generic [ref=e163]:
+                      - button [disabled] [ref=e165]:
+                        - generic [ref=e166]: NO FAVORITED INPUTS
+                      - generic [ref=e171]:
+                        - paragraph [ref=e172]: Inputs you favorite will show up here
+                        - paragraph [ref=e173]: In the Parameters tab, click on any input to add it here
+      - text: 
+  - dialog [active] [ref=e177]:
+    - generic [ref=e179]:
+      - navigation [ref=e180]:
+        - heading "Templates" [level=2] [ref=e183]
+        - generic [ref=e184]:
+          - button "All Templates" [ref=e186] [cursor=pointer]
+          - button "Popular" [ref=e190] [cursor=pointer]
+          - button "Use Cases" [ref=e194] [cursor=pointer]
+          - button "Utility" [ref=e198] [cursor=pointer]
+          - button "Getting Started" [ref=e202] [cursor=pointer]
+          - button "Node Basics" [ref=e206] [cursor=pointer]
+          - generic [ref=e209]:
+            - heading "Generation Type" [level=3] [ref=e211]
+            - button "Video" [ref=e212] [cursor=pointer]
+            - button "Image" [ref=e215] [cursor=pointer]
+            - button "Audio" [ref=e218] [cursor=pointer]
+            - button "3D Model" [ref=e221] [cursor=pointer]
+            - button "LLM" [ref=e224] [cursor=pointer]
+          - button "Partner Nodes" [ref=e228] [cursor=pointer]
+          - generic [ref=e231]:
+            - generic [ref=e232] [cursor=pointer]:
+              - heading "Extensions" [level=3] [ref=e233]
+              - generic [ref=e234]: 
+            - button "ComfyUI-MiniMaxH3-Director" [ref=e235] [cursor=pointer]
+      - generic [ref=e238]:
+        - banner [ref=e239]:
+          - generic [ref=e241]:
+            - heading "Getting Started" [level=2] [ref=e242]
+            - textbox [ref=e245]:
+              - /placeholder: Search ...
+          - button "Close dialog" [ref=e246] [cursor=pointer]:
+            - generic [ref=e247]: 
+        - main [ref=e248]:
+          - generic [ref=e250]:
+            - generic [ref=e251]:
+              - button "All" [pressed] [ref=e252] [cursor=pointer]
+              - button "Node graph" [ref=e254] [cursor=pointer]
+              - button "App" [ref=e257] [cursor=pointer]
+            - generic [ref=e260]:
+              - button "Model Filter" [ref=e262] [cursor=pointer]
+              - button "Tasks" [ref=e268] [cursor=pointer]
+              - button "Runs on" [ref=e274] [cursor=pointer]
+              - combobox "Sort by" [ref=e279] [cursor=pointer]:
+                - generic [ref=e280]: Default
+          - generic [ref=e284]:
+            - generic [ref=e286]:
+              - generic [ref=e287] [cursor=pointer]:
+                - generic [ref=e288]:
+                  - img "1.1 Starter – Text to Image" [ref=e293]
+                  - generic [ref=e294]: Node graph
+                - generic [ref=e299]:
+                  - heading "1.1 Starter – Text to Image" [level=3] [ref=e300]
+                  - generic [ref=e301]:
+                    - generic [ref=e302]: Image
+                    - generic [ref=e304]: Text to Image
+              - generic [ref=e306] [cursor=pointer]:
+                - generic [ref=e307]:
+                  - img "1.2 Starter – Image to Video" [ref=e312]
+                  - generic [ref=e313]: Node graph
+                - generic [ref=e318]:
+                  - heading "1.2 Starter – Image to Video" [level=3] [ref=e319]
+                  - generic [ref=e320]:
+                    - generic [ref=e321]: Video
+                    - generic [ref=e323]: FLF2V
+              - generic [ref=e325] [cursor=pointer]:
+                - generic [ref=e326]:
+                  - img "1.3 Starter – Product Photography" [ref=e331]
+                  - generic [ref=e332]: Node graph
+                - generic [ref=e337]:
+                  - heading "1.3 Starter – Product Photography" [level=3] [ref=e338]
+                  - generic [ref=e339]:
+                    - generic [ref=e340]: Image
+                    - generic [ref=e342]: Image Edit
+              - generic [ref=e344] [cursor=pointer]:
+                - generic [ref=e345]:
+                  - generic [ref=e348]:
+                    - img "2.2 Creator - Image Editing" [ref=e350]
+                    - img "2.2 Creator - Image Editing" [ref=e353]
+                  - generic [ref=e354]: Node graph
+                - generic [ref=e359]:
+                  - heading "2.2 Creator - Image Editing" [level=3] [ref=e360]
+                  - generic [ref=e361]: Inpainting
+              - generic [ref=e364] [cursor=pointer]:
+                - generic [ref=e365]:
+                  - img "Text to Image" [ref=e370]
+                  - generic [ref=e371]: Node graph
+                  - button "See a tutorial" [ref=e376]
+                - generic [ref=e379]:
+                  - heading "Text to Image" [level=3] [ref=e380]
+                  - generic [ref=e381]:
+                    - generic [ref=e382]: Image
+                    - generic [ref=e384]: Text to Image
+              - generic [ref=e386] [cursor=pointer]:
+                - generic [ref=e387]:
+                  - generic [ref=e390]:
+                    - img "Image Editing" [ref=e392]
+                    - img "Image Editing" [ref=e395]
+                  - generic [ref=e396]: Node graph
+                  - button "See a tutorial" [ref=e401]
+                - generic [ref=e404]:
+                  - heading "Image Editing" [level=3] [ref=e405]
+                  - generic [ref=e406]:
+                    - generic [ref=e407]: ControlNet
+                    - generic [ref=e409]: Image Edit
+              - generic [ref=e411] [cursor=pointer]:
+                - generic [ref=e412]:
+                  - img "Image to Video" [ref=e417]
+                  - generic [ref=e418]: Node graph
+                  - button "See a tutorial" [ref=e423]
+                - generic [ref=e426]:
+                  - heading "Image to Video" [level=3] [ref=e427]
+                  - generic [ref=e428]:
+                    - generic [ref=e429]: Image to Video
+                    - generic [ref=e431]: Video
+              - generic [ref=e433] [cursor=pointer]:
+                - generic [ref=e434]:
+                  - img "Image to 3D" [ref=e439]
+                  - generic [ref=e440]: Node graph
+                  - button "See a tutorial" [ref=e445]
+                - generic [ref=e448]:
+                  - heading "Image to 3D" [level=3] [ref=e449]
+                  - generic [ref=e450]:
+                    - generic [ref=e451]: Image to 3D
+                    - generic [ref=e453]: 3D
+              - generic [ref=e455] [cursor=pointer]:
+                - generic [ref=e456]:
+                  - img "Text to Song" [ref=e461]
+                  - generic [ref=e462]: Node graph
+                  - button "See a tutorial" [ref=e467]
+                - generic [ref=e470]:
+                  - heading "Text to Song" [level=3] [ref=e471]
+                  - generic [ref=e472]:
+                    - generic [ref=e473]: Audio
+                    - generic [ref=e475]: Text to Audio
+              - generic [ref=e477] [cursor=pointer]:
+                - generic [ref=e478]:
+                  - img "Image Generation" [ref=e483]
+                  - generic [ref=e484]: Node graph
+                  - button "See a tutorial" [ref=e489]
+                - generic [ref=e492]:
+                  - heading "Image Generation" [level=3] [ref=e493]
+                  - generic [ref=e494]:
+                    - generic [ref=e495]: Text to Image
+                    - generic [ref=e497]: Image
+            - generic [ref=e499]: Showing 10 of 10 templates

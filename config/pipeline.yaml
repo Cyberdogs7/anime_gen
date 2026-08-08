@@ -1,0 +1,15 @@
+# Pipeline runtime configuration. See DESIGN.md §15 (modes/throughput), §17 (event source).
+mode: overnight            # overnight | continuous | hybrid
+nightly_time: "02:00"      # timer source publishes RunRequested at this time each night
+budget_min: 480            # nightly budget per show (or split across enabled shows)
+
+shot_workers: 1            # renderer agent concurrency (1 per ComfyUI/GPU)
+max_retakes_per_shot: 2
+max_revisions: 2           # writers'-room review loop cap (Stage 2a)
+fallback_local: true       # if the SMB share is down, run image/TTS/assembly on node A
+
+resolution: [1344, 768]    # 16:9 native H3 canvas (768 short edge)
+fps: 24
+default_shot_duration_s: 10.125   # grid k=14 (243 frames)
+insert_shot_duration_s: 5.167     # grid k=7 (124 frames)
+hero_best_of: 2                   # hero shots render N seeds, keep best composite

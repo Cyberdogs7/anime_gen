@@ -1,0 +1,103 @@
+{
+  "episode": 0,
+  "world": {},
+  "characters": {},
+  "plotlines": [
+    {
+      "id": "lilys_rivalry",
+      "name": "Lily's Rivalry",
+      "characters": [
+        "Lily",
+        "Ivy"
+      ],
+      "status": "active",
+      "summary": "Lily and Ivy, two of the most skilled armorer-mercs in the city, constantly compete against each other for Blade's attention. Their rivalry fuels their desire to create the best hardsuits for him.",
+      "last_seen_episode": 1
+    },
+    {
+      "id": "roses_secrets",
+      "name": "Rose's Secrets",
+      "characters": [
+        "Rose",
+        "Dahlia"
+      ],
+      "status": "dormant",
+      "summary": "While Rose and Dahlia are close allies, they each hold secrets from the other that could change their dynamic forever. As these secrets come to light, it will test their friendship and loyalty.",
+      "last_seen_episode": 0
+    },
+    {
+      "id": "love-triangle",
+      "name": "The Love Triangle",
+      "characters": [
+        "Blade",
+        "Luna",
+        "Cassandra"
+      ],
+      "status": "active",
+      "summary": "As the battle-hardened mercenary Blade finds himself torn between two of his team members, Luna and Cassandra, a love triangle brews amidst the chaos.",
+      "last_seen_episode": 1
+    },
+    {
+      "id": "rivalry",
+      "name": "The Rivalry",
+      "characters": [
+        "Ravenna",
+        "Iris"
+      ],
+      "status": "dormant",
+      "summary": "Two of Blade's team members, Ravenna and Iris, are fierce rivals. Their rivalry often leads to intense battles on the battlefield.",
+      "last_seen_episode": 0
+    },
+    {
+      "id": "blades-affection",
+      "name": "Blade's Affection",
+      "characters": [
+        "Blade",
+        "Raven",
+        "Viper",
+        "Siren"
+      ],
+      "status": "active",
+      "summary": "A deadly game of cat and mouse as four beautiful armorer-mercs vie for Blade's affection, each vying to be the one he trusts with his life.",
+      "last_seen_episode": 1
+    },
+    {
+      "id": "the-rival-warlord",
+      "name": "The Rival Warlord",
+      "characters": [
+        "Blade",
+        "Raven"
+      ],
+      "status": "dormant",
+      "summary": "A shadowy figure from Raven's past returns, threatening to tear apart the team and the slum they protect.",
+      "last_seen_episode": 3
+    },
+    {
+      "id": "suit-fittings-and-upgrades",
+      "name": "Suit Fittings & Upgrades",
+      "characters": [
+        "Blade",
+        "Viper"
+      ],
+      "status": "active",
+      "summary": "A series of high-stakes suit fittings and upgrades where Viper pushes the boundaries of her technology to keep Blade one step ahead of their enemies.",
+      "last_seen_episode": 1
+    }
+  ],
+  "unresolved_threads": [],
+  "continuity_rules": [],
+  "overall_plotline": {
+    "id": "blades_romance",
+    "name": "Blade's Romance",
+    "characters": [
+      "Blade",
+      "Lily",
+      "Ivy",
+      "Rose",
+      "Dahlia"
+    ],
+    "summary": "A battle-hardened mercenary, Blade, finds himself the center of a deadly romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - fight for his affection while they all struggle to survive in their rain-drenched city.",
+    "last_seen_episode": 1,
+    "status": "active"
+  }
+}

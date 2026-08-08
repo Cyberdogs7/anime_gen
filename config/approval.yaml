@@ -1,0 +1,16 @@
+# Approval chain. See DESIGN.md §9.5 / §9.5a.
+global:
+  auto_approve: false      # master switch: true collapses every gate to auto (recorded as auto_approved)
+
+bootstrap:
+  depth: full              # full | coarse | auto
+
+gates:
+  show: gated              # concept/bible/character/scenes
+  character: gated         # ref-bank contact sheet
+  voice: gated             # voice audition
+  story: auto              # plan + script (with Stage 2a reviewer notes attached)
+  shot: auto               # shots auto-approved above QC threshold
+  episode: gated           # the "air" gate
+
+auto_approve_after_hours: 0   # >0: a gated artifact auto-approves after N hours (safety valve, 0 = off)

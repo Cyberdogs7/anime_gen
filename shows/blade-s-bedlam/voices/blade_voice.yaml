@@ -1,0 +1,10 @@
+id: blade_voice
+engine: qwen3_tts
+mode: designed
+speaker: 'null'
+voice_description: Mid-to-late 20s, deep baritone register (low end), rough/raspy
+  texture reminiscent of someone who chain-smokes synth-tobacco. Delivery is slow
+  and measured when contemplative, but snaps into a clipped, aggressive rhythm during
+  combat or confrontation.
+speed: 1.0
+pitch: 0.0

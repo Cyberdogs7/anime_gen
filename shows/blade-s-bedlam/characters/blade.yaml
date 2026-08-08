@@ -1,0 +1,32 @@
+id: blade
+name: Blade
+role: Primary Mercenary (The Anchor)
+appearance_canonical: Tall, powerfully built with a lean, battle-hardened physique
+  visible beneath perpetually worn, dark leather duster armor. He possesses close-cropped,
+  oil-black hair that always looks damp from the city's rain. His eyes are an intense,
+  scarred silver-grey, and a faint network of old combat scars crisscrosses his jawline
+  and left forearm.
+appearance_notes: Must maintain the perpetual 'rain-soaked' look; never allow him
+  to appear clean or dry unless immediately after a major fight scene. The silver-grey
+  eye color is absolute. His primary attire must be dark, functional mercenary gear
+  with metallic reinforcement plating.
+personality:
+- Stoic and guarded
+- Deeply cynical about the city's politics and inhabitants
+- Possesses a hidden vein of fierce loyalty (usually reserved for one person)
+- Pragmatic to a fault; sentimentality is a weakness he fights daily
+- Surprisingly protective, often sacrificing his own comfort or safety for others
+traits_for_llm: Blade speaks with a low, gravelly baritone that sounds perpetually
+  tired. His dialogue is economical—he rarely wastes words. He uses short, declarative
+  sentences punctuated by sharp observations about the immediate environment or the
+  absurdity of his current predicament. When provoked or flustered (usually by the
+  four women), he exhibits terse exasperation, often just grunting a response or sighing
+  heavily before cutting to the chase.
+h3_slot: char1
+voice:
+  mode: designed
+  speaker: 'null'
+  voice_description: Mid-to-late 20s, deep baritone register (low end), rough/raspy
+    texture reminiscent of someone who chain-smokes synth-tobacco. Delivery is slow
+    and measured when contemplative, but snaps into a clipped, aggressive rhythm during
+    combat or confrontation.

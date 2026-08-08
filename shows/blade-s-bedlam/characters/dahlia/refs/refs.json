@@ -1,0 +1,12 @@
+{
+  "status": "real",
+  "refs": [
+    "dahlia_ref_01.png",
+    "dahlia_mech_01.png"
+  ],
+  "seed": 2968563518672040627,
+  "variants": {
+    "base": "dahlia_ref_01.png",
+    "mech frame": "dahlia_mech_01.png"
+  }
+}

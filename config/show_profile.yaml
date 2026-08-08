@@ -1,0 +1,6 @@
+# Defaults used by `init-show --generate` (zero-input bootstrap). See DESIGN.md §9.5a / §8.1.
+genre: ["romantic-comedy", "martial-arts"]
+tone: ["warm", "comedic", "heartfelt"]
+maturity: "mature"
+baseline: "ranma-1-2"      # production-quality reference for reviewer rubrics
+runtime_target_s: 1320     # 22:00
