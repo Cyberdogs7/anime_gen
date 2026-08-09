@@ -40,6 +40,11 @@ def _read_yaml(path: Path | None) -> Any:
         return None
 
 
+def _render_status(show_id: str) -> dict[str, Any]:
+    from .render import render_status
+    return render_status(show_id)
+
+
 def show_payload(show_id: str) -> dict[str, Any]:
     show = Show(show_id)
     bs = show.bootstrap_state()
@@ -152,6 +157,12 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
             objects.append({"name": f.stem.replace("-", " ").title(),
                             "slug": f.stem, "image": f.name})
 
+    videos: dict[str, str] = {}
+    vd = d / "video"
+    if vd.exists():
+        for f in sorted(vd.glob("*.mp4")):
+            videos[f.stem] = f.name
+
     # Episode cast: every character the script's cast lists, with their ref image.
     cast: list[dict[str, Any]] = []
     if script:
@@ -187,6 +198,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
                          "variants": variants})
 
     from .storyboard import storyboard_status
+    from .planner import read_episode_plan, read_scene_details
     sb = storyboard_status(show_id)
     cjson = d / "consistency.json"
     consistency = _read_json(cjson) if cjson.exists() else (sb.get("report") or [])
@@ -196,6 +208,9 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         if entry.get("shot"):
             final_cons[entry["shot"]] = entry
     consistency = list(final_cons.values())
+    ep_num = int(ep.replace("EP", "") or 1)
+    plan = read_episode_plan(show, ep_num)
+    scene_details = read_scene_details(show, ep_num)
     return {
         "episode": ep,
         "script_file": latest.name if latest else None,
@@ -207,12 +222,17 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
             "shots": total_shots,
             "dialogue_lines": dialogue_lines,
             "hero_shots": hero_shots,
+            "episode": (script or {}).get("summary", "") or "",
         },
         "scenes": scenes_out,
         "objects": objects,
         "cast": cast,
+        "videos": videos,
+        "render": _render_status(show_id),
         "storyboard": sb,
         "consistency": consistency,
+        "plan": plan,
+        "scene_details": scene_details,
     }
 
 
@@ -251,6 +271,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         mime = {
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".webp": "image/webp", ".wav": "audio/wav", ".mp3": "audio/mpeg",
+            ".mp4": "video/mp4",
         }.get(path.suffix.lower(), "application/octet-stream")
         data = path.read_bytes()
         self.send_response(200)
@@ -288,17 +309,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "activity":
             from .bootstrap import ACTIVITY
             from .storyboard import storyboard_status
+            from .render import render_status
             a = ACTIVITY.get(parts[2])
             sb = storyboard_status(parts[2])
+            rd = render_status(parts[2])
             detail = ""
             active = False
-            if sb.get("state") == "running":
-                active = True
-                detail = sb.get("detail") or "Working…"
-            elif a:
+            for job in (sb, rd):
+                if job.get("state") == "running":
+                    active = True
+                    detail = job.get("detail") or "Working…"
+                    break
+            if not active and a:
                 active = True
                 detail = a.get("detail", "Working…")
-            self._send(200, {"active": active, "detail": detail, "storyboard": sb})
+            self._send(200, {"active": active, "detail": detail, "output": (a or {}).get("output", ""),
+                             "storyboard": sb, "render": rd})
             return
         if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "episodes":
             self._send(200, {"episodes": episodes_payload(parts[2])})
@@ -339,28 +365,106 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "generate":
                 from .bootstrap import ACTIVITY
                 from .clients.lmstudio import LMStudioClient
-                from .scriptgen import WritersRoom
-                from .storyboard import build_storyboard
+                from .planner import generate_episode_plan
                 ep = int(body.get("episode", 1) or 1)
                 show_id = parts[2]
                 show = Show(show_id)
-                llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=900)
-                ACTIVITY[show_id] = {"detail": f"Writing episode {ep} (Development → script → review)…",
-                                     "ts": time.time()}
+                llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=300)
                 try:
-                    result = WritersRoom(show, llm=llm).run(ep)
+                    plan = generate_episode_plan(show, ep, llm=llm)
+                    n = len(plan.get("scenes", []))
                     self._send(200, {"ok": True, "messages": [
-                        f"episode {ep}: passed={result['passed']} rounds={result['rounds']} "
-                        f"— building storyboard + consistency (background)"]})
+                        f"episode {ep}: plan generated ({n} scenes) — review & approve it "
+                        "to write the shots"]})
                 except Exception as exc:
                     self._send(200, {"ok": False, "error": str(exc)})
-                    ACTIVITY.pop(show_id, None)
-                    return
                 finally:
                     ACTIVITY.pop(show_id, None)
-                # Storyboard + ref pass + costumes + consistency run automatically.
-                build_storyboard(show, ep)
                 return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "plan" \
+                    and parts[4] == "reject":
+                from .bootstrap import ACTIVITY
+                from .clients.lmstudio import LMStudioClient
+                from .planner import (add_director_note, generate_episode_plan,
+                                      reject_plan)
+                ep = int(body.get("episode", 1) or 1)
+                show_id = parts[2]
+                show = Show(show_id)
+                notes = body.get("notes", "no notes")
+                reject_plan(show, ep, notes)
+                llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=300)
+                add_director_note(show, notes)
+                try:
+                    generate_episode_plan(show, ep, llm=llm, notes=notes)
+                    self._send(200, {"ok": True, "messages": [
+                        "outline rejected — regenerated from your notes"]})
+                except Exception as exc:
+                    self._send(200, {"ok": False, "error": str(exc)})
+                finally:
+                    ACTIVITY.pop(show_id, None)
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "plan" \
+                    and parts[4] == "approve":
+                from .bootstrap import ACTIVITY
+                from .planner import approve_plan
+                ep = int(body.get("episode", 1) or 1)
+                show_id = parts[2]
+                show = Show(show_id)
+                approve_plan(show, ep)
+                self._send(200, {"ok": True, "messages": [
+                    "plan approved — writing the detailed scene section (background)…"]})
+                ACTIVITY.pop(show_id, None)
+
+                def _details():
+                    try:
+                        from .planner import generate_scene_details
+                        generate_scene_details(show, ep)
+                    except Exception as exc:
+                        ACTIVITY[show_id] = {"detail": f"Scene details failed: {exc}",
+                                             "ts": time.time()}
+                import threading
+                threading.Thread(target=_details, daemon=True).start()
+                return
+            if len(parts) == 6 and parts[:2] == ["api", "show"] and parts[3] == "scene-details":
+                from .bootstrap import ACTIVITY
+                ep = int(body.get("episode", 1) or 1)
+                show_id = parts[2]
+                show = Show(show_id)
+                action = parts[4] or parts[5]
+                if action == "approve":
+                    from .planner import approve_scene_details
+                    from .storyboard import build_storyboard
+                    approve_scene_details(show, ep)
+                    self._send(200, {"ok": True, "messages": [
+                        "scene details approved — writing shots + storyboard (background)…"]})
+                    ACTIVITY.pop(show_id, None)
+
+                    def _build():
+                        try:
+                            from .planner import assemble_episode_script
+                            assemble_episode_script(show, ep)
+                            build_storyboard(show, ep)
+                        except Exception as exc:
+                            ACTIVITY[show_id] = {"detail": f"Episode build failed: {exc}",
+                                                 "ts": time.time()}
+                    import threading
+                    threading.Thread(target=_build, daemon=True).start()
+                    return
+                if action == "reject":
+                    from .clients.lmstudio import LMStudioClient
+                    from .planner import generate_scene_details, reject_scene_details
+                    notes = body.get("notes", "no notes")
+                    reject_scene_details(show, ep, notes)
+                    llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=300)
+                    try:
+                        generate_scene_details(show, ep, llm=llm, notes=notes)
+                        self._send(200, {"ok": True, "messages": [
+                            "scene details rejected — regenerating with your notes"]})
+                    except Exception as exc:
+                        self._send(200, {"ok": False, "error": str(exc)})
+                    finally:
+                        ACTIVITY.pop(show_id, None)
+                    return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "storyboard":
                 from .storyboard import build_storyboard
                 ep = int(body.get("episode", 1) or 1)
@@ -379,6 +483,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True,
                                  "messages": [f"consistency: {len(report)} shots reviewed, "
                                               f"{len(fails)} failed"]})
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "render":
+                from .render import build_render
+                ep = int(body.get("episode", 1) or 1)
+                build_render(Show(parts[2]), ep)
+                self._send(200, {"ok": True,
+                                 "messages": ["video render started (H3, background)"]})
                 return
             if len(parts) == 6 and parts[:2] == ["api", "show"] and parts[3] == "ep":
                 show_id, ep, action = parts[2], parts[4], parts[5]

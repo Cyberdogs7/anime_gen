@@ -18,7 +18,7 @@ def _make_show(tmp_path) -> Show:
     show = Show("demo", root=tmp_path)
     show.write_character({"id": "ryou", "name": "Ryou", "appearance_canonical": "x"})
     show.write_bible({"title": "Demo", "content_policy": "mature",
-                      "runtime_target_s": 1320,
+                      "runtime_target_s": 10,
                       "arcs": [{"id": "a1", "name": "Arc", "beats_total": 6,
                                 "beats": [{"id": "b1", "summary": "beat"}]}],
                       "mature_spec": {"quotient": "ecchi", "quotas": {},
@@ -58,3 +58,11 @@ def test_writers_room_revision_loop(tmp_path):
     # durations snapped to the H3 grid (10 -> 10.125)
     script = __import__("json").loads(r2.read_text(encoding="utf-8"))
     assert script["scenes"][0]["shots"][0]["duration_s"] == 10.125
+
+
+def test_runtime_review_flags_short_scripts():
+    from studio.scriptgen import _runtime_review
+    short = {"scenes": [{"shots": [{"duration_s": 10.125}] * 3}]}      # ~30s vs 1320 target
+    assert _runtime_review(short, 1320) is not None
+    full = {"scenes": [{"shots": [{"duration_s": 10.125}] * 130}]}    # ~1316s
+    assert _runtime_review(full, 1320) is None

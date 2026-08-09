@@ -89,11 +89,16 @@ def generate_keyframe(client: ComfyClient, workflow: dict[str, Any], prompt: str
 
 def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int,
                                 aspect_ratio: str, ref_filenames: list[str],
-                                weight: float = 0.8) -> dict[str, Any]:
+                                weight: float = 0.8,
+                                weights: list[float] | None = None) -> dict[str, Any]:
     """Base keyframe workflow + an IPAdapter pass over the reference images.
 
     Routes the diffusion model through IPAdapterUnifiedLoader + IPAdapterAdvanced
     so the generated keyframe inherits the referenced character designs.
+
+    ``weights`` (one per ref) overrides the flat ``weight`` so the primary
+    character of a multi-character shot dominates: the chained applies order
+    stays the same, but each ref pulls with its own strength.
     """
     import copy
     wf = copy.deepcopy(workflow)
@@ -115,9 +120,13 @@ def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int
         "inputs": {"model": [NODE_MODEL_SWITCH, 0], "preset": "PLUS (high strength)"},
         "class_type": "IPAdapterUnifiedLoader", "_meta": {"title": "IPAdapter Load"}}
 
+    if weights is None:
+        weights = [weight] * len(img_links)
+
     # One IPAdapter pass PER reference, chained: each applies a single character's
     # design onto the model in sequence (the reliable way to combine multiple
-    # subjects; a batched IPAdapter input is flaky on this stack).
+    # subjects; a batched IPAdapter input is flaky on this stack). Each ref pulls
+    # with its own weight so the primary character dominates.
     prev_model: Any = [NODE_MODEL_SWITCH, 0]
     for i, link in enumerate(img_links):
         apply_id = f"ipad_apply_{i}"
@@ -126,7 +135,7 @@ def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int
                 "model": prev_model,
                 "ipadapter": ["ipad_loader", 1],
                 "image": link,
-                "weight": weight,
+                "weight": weights[i] if i < len(weights) else weight,
                 "weight_type": "linear",
                 "combine_embeds": "concat",
                 "start_at": 0.0,
@@ -142,8 +151,13 @@ def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int
 def generate_keyframe_with_ref(client: ComfyClient, workflow: dict[str, Any], prompt: str,
                                seed: int, ref_image_paths: list[str],
                                out_path: Path | str, aspect_ratio: str = "16:9",
-                               weight: float = 0.8) -> Path:
-    """Upload the reference images, build the IPAdapter workflow, render."""
+                               weight: float = 0.8,
+                               weights: list[float] | None = None) -> Path:
+    """Upload the reference images, build the IPAdapter workflow, render.
+
+    ``weights`` per ref overrides the flat ``weight`` (for dominance control).
+    """
     filenames = [client.upload_image(p) for p in ref_image_paths]
-    wf = build_keyframe_ref_workflow(workflow, prompt, seed, aspect_ratio, filenames, weight)
+    wf = build_keyframe_ref_workflow(workflow, prompt, seed, aspect_ratio, filenames,
+                                     weight, weights)
     return run_t2i(client, wf, out_path)

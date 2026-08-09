@@ -43,9 +43,24 @@
   .shot-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; margin-top:8px; }
   .shot { border:1px solid var(--line); border-radius:8px; padding:8px; }
   .shot-img { width:100%; border-radius:6px; display:block; }
+  .shot-video { width:100%; border-radius:6px; display:block; margin-top:4px; }
   .shot-empty { height:100px; display:flex; align-items:center; justify-content:center; border:1px dashed var(--line); border-radius:6px; }
   .shot-meta { font-size:11px; color:var(--dim); margin:4px 0; }
   .shot-costumes { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+  .ep-summary { font-size:12px; color:var(--text); margin:4px 0 8px; line-height:1.4; }
+  .pdict { display:flex; flex-direction:column; gap:6px; }
+  .prow { display:flex; align-items:baseline; gap:10px; font-size:12px; line-height:1.4; }
+  .plabel { flex:0 0 130px; color:var(--accent,#7fb0ff); font-size:10px; font-weight:700;
+            text-transform:uppercase; letter-spacing:.06em; }
+  .pval { flex:1; color:var(--text); }
+  .pgroup { margin:4px 0 4px 6px; padding:6px 8px 6px 10px; border-left:2px solid var(--line,#2a3140);
+            background:rgba(255,255,255,.02); border-radius:4px; }
+  .plist { display:flex; flex-direction:column; gap:4px; }
+  .pitem { }
+  .chips { display:flex; flex-wrap:wrap; gap:4px; }
+  .chip { background:#1c2330; color:#c8d2e0; border:1px solid #2a3140; border-radius:10px;
+          padding:1px 8px; font-size:11px; }
+  .prop-body { max-height:300px; overflow:auto; }
   .shot-dlg { font-size:12px; margin:2px 0; }
   .obj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
   .obj { text-align:center; }
@@ -65,6 +80,9 @@
            border-radius:8px; padding:10px 14px; max-width:420px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,.5); }
   .busybar { position:fixed; top:0; left:0; right:0; z-index:40; background:var(--warn); color:#0d0f13;
              text-align:center; padding:8px; font-weight:600; }
+  .liveout { position:fixed; bottom:0; left:0; right:0; z-index:39; max-height:160px; overflow:auto;
+             background:#10141b; color:#cfd6e0; border-top:1px solid var(--line);
+             font:11px/1.4 Consolas,monospace; padding:8px 16px; white-space:pre-wrap; }
   #modal { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; z-index:30; }
   #modal.hide { display:none !important; }
   .modal-card { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(760px,92vw);
@@ -91,6 +109,7 @@
   </div>
 </header>
 <div id="busy" class="hide busybar"></div>
+<div id="liveout" class="hide liveout"></div>
 <main>
   <div id="view-setup"></div>
   <div id="view-story" class="hide"></div>
@@ -280,6 +299,33 @@ async function doReject(step, char) {
 }
 
 // ---------------- Setup (Gate 0) ----------------
+// Human-readable rendering of dicts/lists instead of raw JSON.
+function pretty(v, depth) {
+  depth = depth || 0;
+  if (v === null || v === undefined) return '<span class="muted">—</span>';
+  if (Array.isArray(v)) {
+    if (!v.length) return '<span class="muted">—</span>';
+    if (v.every(x => typeof x === "string" || typeof x === "number")) {
+      return `<div class="chips">${v.map(x => `<span class="chip">${esc(String(x))}</span>`).join("")}</div>`;
+    }
+    return `<div class="plist">${v.map(x => `<div class="pitem">${pretty(x, depth)}</div>`).join("")}</div>`;
+  }
+  if (typeof v === "object") {
+    const rows = Object.entries(v)
+      .filter(([k, x]) => x !== null && x !== undefined && x !== "" &&
+              !(Array.isArray(x) && !x.length))
+      .map(([k, x]) => `<div class="prow"><span class="plabel">${esc(labelize(k))}</span><div class="pval">${pretty(x, depth + 1)}</div></div>`)
+      .join("");
+    if (!rows) return '<span class="muted">—</span>';
+    const cls = depth === 0 ? "pdict" : "pdict pgroup";
+    return `<div class="${cls}">${rows}</div>`;
+  }
+  return `<span>${esc(String(v))}</span>`;
+}
+function labelize(k) {
+  return k.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 async function loadSetup() {
   const d = await api(`/api/show/${SHOW}`);
   const el = document.getElementById("view-setup");
@@ -287,12 +333,12 @@ async function loadSetup() {
   let html = "";
   html += card("Concept", badge(d.bootstrap.concept.status),
                (regenNote(d.bootstrap.concept) || "") +
-               (d.concept ? `<pre>${esc(JSON.stringify(d.concept, null, 2))}</pre>` : '<p class="muted">no concept yet</p>'),
+               (d.concept ? pretty(d.concept) : '<p class="muted">no concept yet</p>'),
                actRow("concept", "", "concept"));
   const bibleBody = !d.bible ? '<p class="muted">no bible yet</p>'
     : isStubBible(d.bible)
       ? '<p class="muted">Bible not generated yet — it generates after the concept is approved (takes a couple of minutes).</p>'
-      : `<pre>${esc(JSON.stringify(d.bible, null, 2))}</pre>`;
+      : pretty(d.bible);
   html += card("Bible", badge(d.bootstrap.bible.status),
                (regenNote(d.bootstrap.bible) || "") + bibleBody,
                actRow("bible", "", "bible"));
@@ -317,7 +363,7 @@ async function loadSetup() {
         ${c.voice_file ? `<button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : ""}
       </div>
       ${c.rejected_notes ? `<div class="kv">Rejected: <b>${esc(c.rejected_notes)}</b></div>` : ""}
-      <details><summary class="muted">proposal</summary><pre>${esc(JSON.stringify(cc, null, 2))}</pre></details>
+      <details><summary class="muted">proposal details</summary><div class="prop-body">${pretty(cc)}</div></details>
     </div>`;
   }
   charHtml += '</div>';
@@ -346,17 +392,22 @@ async function loadSetup() {
 // storyboard/consistency jobs, not just button-triggered actions).
 async function pollActivity() {
   const busy = document.getElementById("busy");
+  const out = document.getElementById("liveout");
   try {
     const a = await api(`/api/show/${SHOW}/activity`);
-    if (a && a.active && busy) {
-      busy.textContent = "● " + (a.detail || "Working…");
-      busy.classList.remove("hide");
-    } else if (busy && !busy.dataset.busy) {
-      busy.classList.add("hide");
+    if (a && a.active) {
+      if (busy) { busy.textContent = "● " + (a.detail || "Working…"); busy.classList.remove("hide"); }
+      if (out) {
+        out.textContent = a.output ? a.output.slice(-800) : "";
+        out.classList.remove("hide");
+      }
+    } else {
+      if (busy && !busy.dataset.busy) busy.classList.add("hide");
+      if (out) out.classList.add("hide");
     }
   } catch (e) { /* show not loaded yet */ }
 }
-setInterval(pollActivity, 3000);
+setInterval(pollActivity, 2000);
 
 function episodeStatus(d) {
   const st = d.story || {};
@@ -412,13 +463,41 @@ function episodeStoryboard(ep, d) {
     const k = r.result === "pass" ? "pass" : (r.result === "regenerated" ? "regenerated" : "failed");
     a[k] = (a[k] || 0) + 1; return a;
   }, {});
-  let h = card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
+  let h = "";
+  const plan = d.plan || {};
+  if (plan && plan.status) {
+    h += card("Episode outline", badge(plan.status),
+      `<div class="ep-summary"><b>Plot:</b> ${esc(plan.plot || plan.summary || "")}</div>` +
+      `<div class="kv muted">Characters: ${esc((plan.characters || []).join(", ") || "—")}</div>` +
+      (plan.rejected_notes ? `<div class="kv">Rejected: ${esc(plan.rejected_notes)}</div>` : ""),
+      plan.status === "pending"
+        ? `<div class="actions"><button class="btn approve" onclick="doPlanApprove('${esc(d.episode)}')">Approve outline</button>` +
+          `<button class="btn reject" onclick="doPlanReject('${esc(d.episode)}')">Reject outline</button></div>`
+        : (plan.status === "approved" ? `<div class="kv muted">Outline approved — writing scene details</div>` : ""));
+  }
+  const sd = d.scene_details || {};
+  if (sd && sd.status) {
+    const dsc = (sd.scenes || []).map(sc =>
+      `<div class="scene"><b>${esc(sc.id)}</b> — ${esc(sc.location || "")} <span class="muted">${esc(sc.time_of_day || "")}</span>` +
+      `<div class="kv">${esc(sc.narrative || sc.summary || "")}</div>` +
+      ((sc.beats || []).length ? `<div class="kv muted">• ${esc((sc.beats || []).join(" • "))}</div>` : "") +
+      ((sc.dialogue_beats || []).length ? `<div class="kv muted">Dialogue: ${esc((sc.dialogue_beats || []).slice(0, 3).map(d => d.char + ": " + d.line).join(" | "))}</div>` : "") +
+      `</div>`).join("");
+    h += card("Scene details", badge(sd.status),
+      (sd.rejected_notes ? `<div class="kv">Rejected: ${esc(sd.rejected_notes)}</div>` : "") + dsc,
+      sd.status === "pending"
+        ? `<div class="actions"><button class="btn approve" onclick="doSceneDetails('approve','${esc(d.episode)}')">Approve scenes</button>` +
+          `<button class="btn reject" onclick="doSceneDetails('reject','${esc(d.episode)}')">Reject scenes</button></div>`
+        : (sd.status === "approved" ? `<div class="kv muted">Scene details approved — writing shots</div>` : ""));
+  }
+  h += card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
     `<div class="kv">Status: <b>${esc(episodeStatus(d))}</b></div>` +
+    (sum.episode ? `<div class="ep-summary"><b>Episode summary:</b> ${esc(sum.episode)}</div>` : "") +
     `<div class="kv">Scenes: <b>${sum.scenes || 0}</b> · Shots: <b>${sum.shots || 0}</b> · ` +
     `Dialogue lines: <b>${sum.dialogue_lines || 0}</b> · Hero shots: <b>${sum.hero_shots || 0}</b></div>` +
     (consCounts.pass || consCounts.regenerated || consCounts.failed
       ? `<div class="kv">Consistency: <b>${consCounts.pass || 0} pass</b> · <b>${consCounts.regenerated || 0} regenerated</b> · <b>${consCounts.failed || 0} failed</b></div>` : "") +
-    storyboardControls(d));
+    storyboardControls(d) + renderControls(d));
   for (const sc of (d.scenes || [])) {
     let sh = `<div class="scene"><b>${esc(sc.id)}</b> — ${esc(sc.location || "")} ` +
              `<span class="muted">${esc(sc.time_of_day || "")}</span>` +
@@ -427,12 +506,15 @@ function episodeStoryboard(ep, d) {
       const img = s.keyframe
         ? `<img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/storyboard/${esc(s.keyframe)}?v=${Date.now()}">`
         : '<div class="muted shot-empty">keyframe pending</div>';
+      const vid = (d.videos || {})[s.id]
+        ? `<video class="shot-video" controls preload="none" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/video/${esc(d.videos[s.id])}"></video>`
+        : "";
       const dlg = (s.dialogue || []).map(x =>
         `<div class="shot-dlg"><b>${esc(x.char)}:</b> ${esc(x.line)}</div>`).join("");
       const costs = Object.entries(s.costumes || {}).map(([n, l]) =>
         `<span class="badge ghost" title="costume">${esc(n)}: ${esc(l)}</span>`).join(" ");
       const consBadge = consMap[s.id] ? ` ${badge(consMap[s.id])}` : "";
-      sh += `<div class="shot">${img}
+      sh += `<div class="shot">${img}${vid}
         <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}</div>
         <div class="shot-costumes">${costs}</div>
         <div class="kv">${esc(s.camera || "")}</div>
@@ -495,6 +577,52 @@ function genStoryboard(ep) {
   const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
   act(`/api/show/${SHOW}/storyboard`, { episode: n },
       "Starting storyboard generation (background)…");
+}
+
+function renderControls(d) {
+  const rd = d.render || {};
+  const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
+  const videos = Object.keys(d.videos || {}).length;
+  if (rd.state === "running") {
+    return `<div class="kv muted">Video rendering… ${rd.done || 0}/${rd.total || shots} — ${esc(rd.detail || "")}</div>`;
+  }
+  if (!shots) return "";
+  let h = "";
+  if (videos && videos >= shots) {
+    h += `<div class="kv muted">Video complete (${videos}/${shots} shots rendered)</div>`;
+  } else {
+    h += `<div class="actions"><button class="btn approve" onclick="genRender('${esc(d.episode)}')">Render video (${videos}/${shots} shots)</button></div>`;
+  }
+  return h;
+}
+
+function genRender(ep) {
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  act(`/api/show/${SHOW}/render`, { episode: n },
+      "Starting H3 video render (background)…");
+}
+
+async function doPlanApprove(ep) {
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  await act(`/api/show/${SHOW}/plan/approve`, { episode: n },
+            "Plan approved — writing scene shots & building storyboard (background)…");
+}
+async function doPlanReject(ep) {
+  const notes = askNotes(); if (notes === null) return;
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  await act(`/api/show/${SHOW}/plan/reject`, { episode: n, notes },
+            "Rejected — regenerating the plan with your notes…");
+}
+
+async function doSceneDetails(action, ep) {
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  let notes = {};
+  if (action === "reject") { const x = askNotes(); if (x === null) return; notes = { notes: x }; }
+  await act(`/api/show/${SHOW}/scene-details/${action === "approve" ? "approve" : "reject"}`,
+            { episode: n, ...notes },
+            action === "approve"
+              ? "Scene details approved — writing shots + storyboard (background)…"
+              : "Rejected — regenerating scene details with your notes…");
 }
 
 async function doStoryApprove(ep) {

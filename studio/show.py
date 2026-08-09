@@ -91,6 +91,7 @@ class Show:
 
     def write_character(self, data: dict[str, Any]) -> Path:
         char_id = data.get("id") or _slug(data.get("name", ""))
+        self.characters_dir.mkdir(parents=True, exist_ok=True)
         p = self.characters_dir / f"{char_id}.yaml"
         p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
         (self.characters_dir / char_id / "refs").mkdir(parents=True, exist_ok=True)
@@ -107,6 +108,7 @@ class Show:
         return dict(yaml.safe_load(p.read_text(encoding="utf-8")) or {})
 
     def write_voice(self, data: dict[str, Any]) -> Path:
+        self.voices_dir.mkdir(parents=True, exist_ok=True)
         p = self.voices_dir / f"{data.get('id', 'voice')}.yaml"
         p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
         return p
@@ -119,6 +121,7 @@ class Show:
 
     def write_scene(self, data: dict[str, Any]) -> Path:
         loc = data.get("id") or _slug(data.get("name", "scene"))
+        self.scenes_dir.mkdir(parents=True, exist_ok=True)
         p = self.scenes_dir / f"{loc}.yaml"
         p.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
         return p

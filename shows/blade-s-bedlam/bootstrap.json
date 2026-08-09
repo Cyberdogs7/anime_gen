@@ -10,40 +10,11 @@
     {
       "name": "Blade",
       "proposal": "approved",
-      "refs": "real",
-      "voice": "approved",
-      "rejected_notes": ""
-    },
-    {
-      "name": "Lily",
-      "proposal": "approved",
-      "refs": "approved",
-      "voice": "approved",
-      "rejected_notes": "Visual design needs to be a bigger mix of 'realistic anime' on the clothing and modern anime on the body/hair."
-    },
-    {
-      "name": "Ivy",
-      "proposal": "approved",
       "refs": "approved",
       "voice": "approved",
       "rejected_notes": ""
-    },
-    {
-      "name": "Rose",
-      "proposal": "approved",
-      "refs": "approved",
-      "voice": "approved",
-      "rejected_notes": "Make the voice a little less 'bubbly' and more brooding"
-    },
-    {
-      "name": "Dahlia",
-      "proposal": "approved",
-      "refs": "approved",
-      "voice": "approved"
     }
   ],
-  "scenes": {
-    "status": "approved"
-  },
-  "complete": true
+  "scenes": {},
+  "complete": false
 }

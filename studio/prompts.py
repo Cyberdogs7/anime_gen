@@ -348,6 +348,7 @@ def script_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, An
                   characters: list[dict[str, Any]]) -> str:
     schema = {
         "episode": "int",
+        "summary": "one-paragraph episode summary (the full story of this episode, for the viewer)",
         "cast": ["EXACT names of EVERY character who appears on screen or speaks in this episode, "
                  "including any new supporting characters you invent (not just the main cast)"],
         "scenes": [{
@@ -372,6 +373,8 @@ def script_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, An
         }],
     }
     cast = [c.get("name") for c in characters]
+    target = int(bible.get("runtime_target_s", 1320) or 1320)
+    min_shots = max(30, int(target / 10.0))
     return (
         "Write the FULL script for this episode as a storyboard-ready JSON. Each scene "
         "breaks into shots; each shot is one H3 video generation (4-15s).\n\n"
@@ -382,8 +385,12 @@ def script_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, An
         f"Cast (use these EXACT character names in dialogue and references): {cast}\n\n"
         "Rules:\n"
         "- Fictional characters only; no minors; no real persons.\n"
-        "- Dialogue uses only cast names. Total runtime target ~"
-        f"{bible.get('runtime_target_s', 1320)}s; each scene 2-5 shots; aim for a complete, paced episode.\n"
+        "- Dialogue uses only cast names.\n"
+        f"- LENGTH: this episode MUST total ~{target}s (~{target // 60} minutes). Each shot is "
+        f"4-15s (typically ~10s), so write about {min_shots} shots across as many scenes as "
+        f"needed. Do NOT write a short episode — the runtime target is the single most "
+        f"important constraint. A {target // 60}-minute episode is a full act structure, not "
+        f"a handful of shots.\n"
         "- Keep continuity: do not contradict the continuity state.\n"
         "- Return ONLY valid JSON matching the schema."
     )
@@ -393,7 +400,10 @@ def development_prompt(episode: int, overall_plotline: dict[str, Any] | None,
                        plotlines: list[dict[str, Any]],
                        unresolved_threads: list[str], continuity: dict[str, Any],
                        characters: list[dict[str, Any]],
-                       new_character_candidates: list[dict[str, Any]]) -> str:
+                       new_character_candidates: list[dict[str, Any]],
+                       feedback: str = "",
+                       cadence: int = 3,
+                       episodes_since_new: int = 0) -> str:
     """Decide what happens in the next episode of a continuous plotline-driven show.
 
     Returns a user prompt asking for the featured plotlines (including the always-
@@ -418,6 +428,24 @@ def development_prompt(episode: int, overall_plotline: dict[str, Any] | None,
     threads = "; ".join(unresolved_threads) or "(none)"
     chars = ", ".join(c.get("name", "") for c in characters) or "(none)"
     new_cands = ", ".join(c.get("name", "") for c in new_character_candidates) or "(none)"
+    cadence_rule = ""
+    if episodes_since_new >= cadence:
+        cadence_rule = (
+            f"\nIMPORTANT: it has been {episodes_since_new} episodes since a new plotline "
+            "was introduced (cadence = every ~"
+            f"{cadence} episodes). INTRODUCE a new plotline THIS episode: a brand-new "
+            "thread that grows the world — a new rivalry, romance, debt, mystery, faction, "
+            "or a newly-arrived character. The new plotline must involve at least one "
+            "existing cast member so it is grounded, and may introduce up to two NEW "
+            "supporting characters (give them names; they will get character sheets). "
+            "Fill 'new_plotline' — do NOT return null."
+        )
+    elif new_cands != "(none)":
+        cadence_rule = (
+            f"\nThe following characters exist in the cast but have NO plotline yet: "
+            f"{new_cands}. If one is story-ready, introduce a new plotline built around "
+            "them (this is the preferred way to grow the cast)."
+        )
     return (
         "You are the Development stage of a continuous anime (Ranma 1/2-style). There "
         "are NO seasons or arc boundaries - the story is one ongoing stream, and every "
@@ -433,7 +461,8 @@ def development_prompt(episode: int, overall_plotline: dict[str, Any] | None,
         "- You MAY introduce a NEW plotline if warranted (a new character with a love "
         "interest, a new rivalry, a debt surfacing). If a new character exists without "
         "their own plotline yet (listed below), this is a strong reason to introduce one "
-        "for them.\n"
+        "for them."
+        f"{cadence_rule}\n"
         "- Write the episode synopsis as a natural blend of the overall plotline and the "
         "featured plotlines.\n\n"
         f"Episode to develop: EP{episode:02d}\n"
@@ -445,7 +474,9 @@ def development_prompt(episode: int, overall_plotline: dict[str, Any] | None,
         f"Continuity state: {json.dumps(continuity)}\n\n"
         "Return ONLY valid JSON matching this schema:\n"
         f"{json.dumps(schema, indent=2)}\n\n"
-        "The synopsis will become the storyboard for the episode. No markdown fences."
+        "The synopsis will become the storyboard for the episode. No markdown fences.\n"
+        + (f"DIRECTOR'S CONSTRAINT (ABSOLUTE, overrides plotlines if it conflicts): {feedback}\n"
+           if feedback.strip() else "")
     )
 
 
@@ -486,6 +517,290 @@ def revise_appearance_prompt(current: str, feedback: str) -> str:
         "JSON containing exactly one key: {\"appearance_canonical\": \"...\"}.\n\n"
         f"CURRENT APPEARANCE:\n{current}\n\n"
         f"DIRECTOR'S FEEDBACK:\n{feedback}"
+    )
+
+
+def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, Any],
+                        names: list[str], target: int, current_plan: dict[str, Any] | None = None,
+                        feedback: str = "", director_constraints: list[str] | None = None,
+                        state: dict[str, Any] | None = None) -> str:
+    """Stage 1 — REVISION setup: rewrite a rejected outline from the director's feedback.
+
+    Original creation uses the show-specific story-engine template (stored per show).
+    """
+    schema = {
+        "episode": (state or {}).get("episode", "int"),
+        "title": "Episode Title",
+        "threat_of_the_week": "Brief description of the episodic hazard/enemy",
+        "plot": "one paragraph: the full story of this episode from setup to resolution",
+        "characters": ["EXACT names of the characters who appear"],
+        "plotline_updates": {
+            "active_plotline_progress": "How the active plotline moved forward",
+            "dormant_plotline_beat": "The minor tease included for the dormant plotline",
+        },
+    }
+    return (
+        "REVISE the EPISODE OUTLINE below in response to the director's feedback.\n"
+        "IMPORTANT: the director's feedback is ABSOLUTE and OVERRIDES anything it "
+        "conflicts with — including the series bible, plotlines, the synopsis, and "
+        "the current outline. Remove or rework the flagged elements decisively.\n"
+        "Keep the parts the feedback did not flag; change everything it asks for.\n"
+        "Return the FULL revised outline JSON (same schema).\n\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Cast: {names}\n"
+        f"Target runtime ~{target}s (~{target // 60} minutes).\n\n"
+        f"CURRENT OUTLINE:\n{json.dumps(current_plan, indent=2, ensure_ascii=False)}\n\n"
+        f"DIRECTOR'S FEEDBACK (ABSOLUTE):\n{feedback}\n\n"
+        f"Return ONLY the revised outline JSON:\n{json.dumps(schema, indent=2)}"
+    )
+
+
+def scene_breakdown_prompt(bible: dict[str, Any], outline: dict[str, Any],
+                           cast: list[dict[str, Any]], target: int) -> str:
+    """Stage 2a: break the approved one-paragraph outline into a scene list."""
+    min_scenes = max(6, int(target / 120))
+    schema = {"scenes": [{
+        "id": "slug (s01, s02, ...)",
+        "location": "a location name",
+        "time_of_day": "str",
+        "summary": "one sentence on what happens in this scene",
+        "characters": ["EXACT character names present"],
+    }]}
+    cast_snip = [(c.get("name"), (c.get("personality") or "")[:160])
+                 for c in cast if c.get("name")]
+    return (
+        "You are the showrunner. BREAK the approved one-paragraph episode outline "
+        "into a SCENE LIST — the scene-by-scene structure a writer will then detail.\n\n"
+        f"Schema:\n{json.dumps(schema, indent=2)}\n\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Cast (name -> personality): {cast_snip}\n\n"
+        f"APPROVED EPISODE OUTLINE:\n{json.dumps(outline, indent=2, ensure_ascii=False)}\n\n"
+        f"LENGTH: this episode MUST total ~{target}s (~{target // 60} minutes). Plan "
+        f"about {min_scenes} scenes, each with a distinct purpose that advances the "
+        "plot. Vary locations across the episode (do not reuse one location for every "
+        "scene). Every scene lists the exact characters present.\n"
+        "- Keep continuity; fictional characters only; no minors; no real persons.\n"
+        "- Return ONLY valid JSON matching the schema."
+    )
+
+
+def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
+                        cast: list[dict[str, Any]], current: dict[str, Any] | None = None,
+                        feedback: str = "") -> str:
+    """Step 2: expand the approved blueprint into a DETAILED scene section.
+
+    One chunk per scene keeps context localised: each scene gets a full narrative,
+    its story beats, and its dialogue beats — the treatment a shot-writer then uses.
+    With feedback, REWRITES the current rejected scene in place.
+    """
+    schema = {
+        "id": "scene id (from the blueprint)",
+        "location": "str",
+        "time_of_day": "str",
+        "narrative": "a detailed paragraph of what happens in this scene, start to finish",
+        "beats": ["3-6 detailed story beats, each one sentence"],
+        "dialogue_beats": [{"char": "exact character name", "line": "the dialogue line",
+                            "intent": "what this line accomplishes"}],
+    }
+    cast_snip = [(c.get("name"), (c.get("personality") or "")[:200])
+                 for c in cast if c.get("name")]
+    base = (
+        "You are the writer's room. EXPAND ONE SCENE of an approved episode blueprint "
+        "into a DETAILED SCENE TREATMENT that a shot-writer will use to write shots.\n\n"
+        f"Scene schema:\n{json.dumps(schema, indent=2)}\n\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Cast (name -> personality): {cast_snip}\n\n"
+        f"APPROVED EPISODE BLUEPRINT:\n{json.dumps(blueprint, indent=2, ensure_ascii=False)}\n\n"
+        "Write THIS scene only. Give it a full narrative, concrete story beats, and "
+        "specific dialogue lines with intent. Stay consistent with the bible and the "
+        "characters. Fictional characters only; no minors; no real persons.\n"
+        "Return ONLY valid JSON matching the scene schema."
+    )
+    if feedback.strip() and current:
+        return (
+            "REVISE THIS SCENE TREATMENT in response to the director's feedback. "
+            "Keep the parts the feedback did not flag; change what it asks for. "
+            "Return the FULL revised scene JSON (same schema).\n\n"
+            f"Series bible: {json.dumps(bible)}\n"
+            f"Cast: {[c[0] for c in cast_snip]}\n\n"
+            f"CURRENT SCENE:\n{json.dumps(current, indent=2, ensure_ascii=False)}\n\n"
+            f"DIRECTOR'S FEEDBACK:\n{feedback}\n\n"
+            f"Return ONLY the revised scene JSON:\n{json.dumps(schema, indent=2)}"
+        )
+    return base
+
+
+def scene_shots_prompt(bible: dict[str, Any], episode_summary: str, plan_scene: dict[str, Any],
+                       cast: list[dict[str, Any]], target_seconds: int) -> str:
+    """Write the shots for ONE scene (chunk 3, localized context)."""
+    schema = {"shots": [{
+        "id": "slug (s01_sh01, ...)",
+        "type": "'ref2va' if it uses character references else 'fl2va'",
+        "importance": "'hero' for money shots (~1 per scene) else 'standard'",
+        "duration_s": "float 4-15 (dialogue ~10.125, inserts ~5.167)",
+        "camera": "shot/camera description",
+        "action": "what happens",
+        "dialogue": [{"char": "exact character name", "line": "str", "on_camera": "bool"}],
+        "soundscape": "str",
+        "music": "str",
+        "references": {"characters": ["EXACT names on screen"],
+                       "costumes": {"CharacterName": "costume variant they wear in this shot, or omit for base"},
+                       "scene": "location name"},
+    }]}
+    cast_snip = [(c.get("name"), (c.get("appearance_canonical") or "")[:200])
+                 for c in cast if c.get("name")]
+    return (
+        "You are writing the SHOTS for ONE scene of an anime episode. Each shot is one "
+        "H3 video generation (4-15s).\n\n"
+        f"Shot schema:\n{json.dumps(schema, indent=2)}\n\n"
+        f"Episode summary: {episode_summary}\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Cast (name -> appearance): {cast_snip}\n\n"
+        f"SCENE TO WRITE:\n{json.dumps(plan_scene, indent=2, ensure_ascii=False)}\n\n"
+        f"Write enough shots to fill roughly {target_seconds}s of runtime for this scene "
+        f"(~{max(4, int(target_seconds / 10))} shots, each 4-15s). Fully realize every "
+        "beat. Name EVERY character on screen and their costume variant in references.\n"
+        "- Dialogue uses only cast names.\n"
+        "- Fictional characters only; no minors; no real persons.\n"
+        "- Return ONLY valid JSON matching the shot schema."
+    )
+
+
+
+def story_engine_architect_prompt(bible: dict[str, Any]) -> str:
+    """Meta-prompt: write a SHOW-SPECIFIC episode-outline prompt template.
+
+    The result is stored per show and used by episode_plan_prompt to generate
+    outlines, keeping the pipeline generic across shows.
+    """
+    return (
+        "You are a prompt architect for an anime story engine. Given the series bible "
+        "below, write a SHOW-SPECIFIC EPISODE OUTLINE prompt template — a 'Lead Story "
+        "Engine and Showrunner' instruction block tailored to THIS series.\n\n"
+        "The template MUST have this exact structure, with dynamic data left as the "
+        "literal {{TOKEN}} placeholders shown (do NOT fill them in):\n\n"
+        "1. A show-specific intro describing the engine's job for THIS series (its genre, "
+        "tone, world flavor, and the core cast dynamic).\n"
+        "2. CRITICAL RULES (3-5), written concretely for THIS show (named characters, "
+        "world-specific), including:\n"
+        "   - An ABSOLUTE DIRECTOR CONSTRAINT about how the cast behaves during serious, "
+        "     life-or-death battles (united team vs the enemy; no infighting) — grounded "
+        "     in this show's tone and cast.\n"
+        "   - ELASTIC STATUS QUO and BOUNDED PROGRESSION rules.\n"
+        "3. These STRUCTURED SECTIONS with these EXACT placeholder tokens:\n"
+        "   <series_bible>\n{{SERIES_BIBLE_JSON}}\n</series_bible>\n"
+        "   <state_tracker>\n"
+        "     <current_episode_number>{{EPISODE_NUMBER}}</current_episode_number>\n"
+        "     <active_plotline>{{ACTIVE_PLOTLINE_DATA}}</active_plotline>\n"
+        "     <dormant_plotline_to_tease>{{DORMANT_PLOTLINE_DATA}}</dormant_plotline_to_tease>\n"
+        "     <cooling_plotlines>{{COOLING_PLOTLINES_LIST}}</cooling_plotlines>\n"
+        "   </state_tracker>\n"
+        "   <episode_history>{{RECENT_EPISODES_SUMMARY_LOG}}</episode_history>\n"
+        "4. A <user_prompt> with SHOW-SPECIFIC episode-generation steps: a Threat of the "
+        "Week suited to this world, a tactical/technical focus, plotline integration, "
+        "format requirements — and a 'Return ONLY a valid JSON object' schema with keys: "
+        "episode, title, threat_of_the_week, plot, characters, plotline_updates "
+        "(active_plotline_progress, dormant_plotline_beat).\n\n"
+        "HARD RULES FOR THE TEMPLATE:\n"
+        "- Do NOT embed the bible's content (world text, cast, plotline summaries) "
+        "directly in the template. Refer to the bible ONLY via the {{SERIES_BIBLE_JSON}} "
+        "token.\n"
+        "- The template MUST contain ALL of these literal tokens, verbatim, as "
+        "placeholders for the story engine to fill at generation time:\n"
+        "  {{SERIES_BIBLE_JSON}}, {{EPISODE_NUMBER}}, {{ACTIVE_PLOTLINE_DATA}}, "
+        "{{DORMANT_PLOTLINE_DATA}}, {{COOLING_PLOTLINES_LIST}}, "
+        "{{RECENT_EPISODES_SUMMARY_LOG}}\n"
+        "- Write only the static instruction text (intro, rules, steps, schema shape) "
+        "with the tokens where dynamic data belongs.\n\n"
+        "Return ONLY the template text. Keep the {{PLACEHOLDER}} tokens verbatim.\n\n"
+        f"SERIES BIBLE (read this to write the template, but do not paste it into the "
+        f"template):\n{json.dumps(bible)}"
+    )
+
+
+def new_plotline_review_prompt(bible: dict[str, Any], existing_ids: list[str],
+                               cast: list[str], proposal: dict[str, Any],
+                               episode: int) -> str:
+    """Auto-approval review for a proposed new plotline (series growth)."""
+    schema = {
+        "approved": "bool - true ONLY if this plotline fits the show and is not a duplicate",
+        "notes": ["brief, specific notes; if rejected, exactly what to change so it fits"],
+        "plotline": {
+            "id": "slug (must be new, lowercase-hyphens, distinct from existing ids)",
+            "name": "str",
+            "characters": ["exact cast names involved (existing cast members OR up to two new supporting characters)"],
+            "summary": "one or two sentences",
+        },
+    }
+    return (
+        "You are the Series-Growth reviewer. Development proposed a NEW plotline for "
+        "this continuous anime. Decide whether to APPROVE it into canon.\n"
+        "APPROVE only if it:\n"
+        "- Fits the show's world, tone, and maturity level.\n"
+        "- Is genuinely NEW (no duplicate of an existing plotline id/name/idea).\n"
+        "- Names at least one existing cast member OR a concrete new supporting "
+        "character.\n"
+        "- Does not resolve or contradict the bible's overall_plotline.\n"
+        "If it fails any check, set approved=false and say exactly what to fix.\n"
+        "If approved, return the plotline field with a clean id and a tight summary "
+        "(keep the characters it names).\n\n"
+        f"Existing plotline ids (must NOT collide): {existing_ids}\n"
+        f"Cast: {cast}\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Episode {episode} proposed new plotline:\n{json.dumps(proposal, indent=2, ensure_ascii=False)}\n\n"
+        "Return ONLY valid JSON matching this schema:\n"
+        f"{json.dumps(schema, indent=2)}"
+    )
+
+
+def new_character_review_prompt(bible: dict[str, Any], cast: list[str],
+                                name: str, plotline: dict[str, Any],
+                                episode: int) -> str:
+    """Auto-approval review for a newly-introduced character sheet."""
+    schema = {
+        "approved": "bool - true ONLY if the character fits the show and plotline",
+        "notes": ["brief, specific notes; if rejected, exactly what to fix"],
+    }
+    return (
+        "You are the Series-Growth reviewer. A new supporting character was proposed "
+        "for the plotline below. Decide whether to APPROVE their character sheet into "
+        "the cast.\n"
+        "APPROVE only if they:\n"
+        "- Fit the show's world, tone, maturity level, and the plotline they join.\n"
+        "- Are visually and behaviorally distinct from the existing cast.\n"
+        "- Do not duplicate or replace an existing character.\n"
+        "If it fails any check, set approved=false and say exactly what to fix.\n\n"
+        f"Existing cast: {cast}\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Episode {episode} plotline they join:\n{json.dumps(plotline, indent=2, ensure_ascii=False)}\n"
+        f"Proposed character name: {name}\n\n"
+        "Return ONLY valid JSON matching this schema:\n"
+        f"{json.dumps(schema, indent=2)}"
+    )
+
+
+def new_character_prompt(bible: dict[str, Any], cast: list[str], name: str,
+                         plotline: dict[str, Any]) -> str:
+    """Propose the full character sheet for a newly-introduced character."""
+    schema = {
+        "name": f"must be exactly '{name}'",
+        "appearance_canonical": "a single canonical physical description, never varies, drives image gen",
+        "appearance_notes": "immutable visual rules",
+        "personality": ["str"],
+        "traits_for_llm": "how they speak/behave, for the writer",
+        "voice": {"mode": "'manual' (no audio model; a human will supply the sample)",
+                  "voice_description": "a free-text voice spec (age, register, texture, delivery)"},
+    }
+    return (
+        "Flesh out a NEW supporting anime character joining the series for the plotline "
+        "below. They must fit the show's world, tone and maturity level, and be distinct "
+        "from the existing cast.\n"
+        f"Character sheet schema:\n{json.dumps(schema, indent=2)}\n\n"
+        f"Series bible: {json.dumps(bible)}\n"
+        f"Existing cast: {cast}\n"
+        f"Plotline they join: {json.dumps(plotline, indent=2, ensure_ascii=False)}\n"
+        "The appearance_canonical is the single source of truth for image generation - "
+        "make it vivid and specific. voice.mode must be 'manual'."
     )
 
 

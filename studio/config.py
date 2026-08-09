@@ -61,6 +61,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "llm": {
         "base_url": "http://127.0.0.1:1234/v1",
+        "fallback_url": "",
+        "concurrency_limit": 4,
+        "gpu_guard_urls": [],
         "model": "dolphin-2.9.3-mistral-nemo-12b",
         "context": 32768,
         "roles": {
@@ -69,6 +72,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "slop_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "continuity_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "fan_service_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "growth_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "describer": "",
         },
         "gpu_offload": True,
@@ -104,6 +108,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "continuity_block": True,
             "fanservice_quota_miss": True,
         },
+    },
+    "growth": {
+        "plotline_cadence_episodes": 3,   # introduce a new plotline roughly every N episodes
+        "max_new_characters_per_plotline": 2,
     },
     "show_profile": {
         "genre": ["romantic-comedy", "martial-arts"],

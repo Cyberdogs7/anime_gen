@@ -30,27 +30,35 @@ overall_plotline:
   - Rose
   - Dahlia
   summary: A battle-hardened mercenary, Blade, finds himself the center of a deadly
-    romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - fight
-    for his affection while they all struggle to survive in their rain-drenched city.
+    romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly
+    push their skills to the limit in service of him. They fight not just for his
+    affection, but through intense, synergistic competition, ensuring they are always
+    ready to protect him from the city's relentless threats.
 plotlines:
 - id: lilys_rivalry
-  name: Lily's Rivalry
+  name: Lily's Competitive Edge
   characters:
   - Lily
   - Ivy
   status: active
-  summary: Lily and Ivy, two of the most skilled armorer-mercs in the city, constantly
-    compete against each other for Blade's attention. Their rivalry fuels their desire
-    to create the best hardsuits for him.
+  summary: Lily and Ivy constantly challenge each other in high-stakes combat scenarios,
+    not merely for Blade's gaze, but to prove whose armoring expertise is superior.
+    Their rivalry manifests as an intense engineering competition during battles—who
+    can craft the most resilient or offensively optimized hardsuit mid-fight—driving
+    them to achieve peak synergy when fighting alongside Lily and Ivy against overwhelming
+    bio-mech threats.
 - id: roses_secrets
-  name: Rose's Secrets
+  name: Rose's Calculated Alliance
   characters:
   - Rose
   - Dahlia
   status: dormant
-  summary: While Rose and Dahlia are close allies, they each hold secrets from the
-    other that could change their dynamic forever. As these secrets come to light,
-    it will test their friendship and loyalty.
+  summary: While Rose and Dahlia maintain a close bond, their internal dynamic is
+    one of strategic alliance rather than passive friendship. Each harbors professional
+    or personal secrets that could shift the balance of power between them. When these
+    truths emerge, they don't devolve into petty arguments; instead, they redefine
+    how they coordinate tactics in battle, creating a sharper, more focused partnership
+    against enemy forces.
 style_guide: The show's visual look is a blend of modern anime aesthetics with gritty
   realism, featuring detailed line art and vibrant colors for characters, contrasted
   against dark, rain-soaked cityscapes and the metallic sheen of hardsuits.

@@ -29,8 +29,31 @@ def _auto_synopsis(bible: dict[str, Any], episode: int, continuity: dict[str, An
         f"{p.get('name')}: {p.get('summary', '')}" for p in picks)
 
 
+def _runtime_review(script: dict[str, Any], target: int) -> dict[str, Any] | None:
+    """Fail the script if its shot durations total well under the runtime target."""
+    total = sum(s.get("duration_s", 0) for sc in script.get("scenes", [])
+                for s in sc.get("shots", []))
+    if total >= target * 0.8:
+        return None
+    return {"pass": False, "score": 0,
+            "summary": f"runtime too short ({int(total)}s of {target}s target)",
+            "notes": [f"The script totals ~{int(total)}s but the target is {target}s "
+                      f"(~{target // 60} min). Expand the episode: add roughly "
+                      f"{int((target - total) / 10) + 1} more shots across additional scenes "
+                      f"and beats so it fills the runtime."]}
+
+
 def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
-    """Snap durations to the H3 grid, default fields, drop unknown speakers."""
+    """Snap durations to the H3 grid, default fields, drop unknown speakers.
+
+    ``cast_names`` are the characters with approved sheets. A speaker is kept if
+    they are either in ``cast_names`` OR listed in the script's own ``cast``
+    pre-section (a newly-introduced supporting character that has no sheet yet
+    but is canon for this episode — the ref pass will create it).
+    """
+    script_cast = set(script.get("cast", []) or [])
+    valid = set(cast_names) | script_cast
+
     for scene in script.get("scenes", []):
         for i, shot in enumerate(scene.get("shots", [])):
             shot.setdefault("id", f"{scene.get('id', 's')}_sh{i + 1:02d}")
@@ -39,7 +62,7 @@ def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
             shot.setdefault("on_camera", True)
             shot["duration_s"] = snap_duration(float(shot.get("duration_s", 10.125)))[2]
             kept = [d for d in shot.get("dialogue", [])
-                    if d.get("char") in cast_names]
+                    if d.get("char") in valid]
             if kept != shot.get("dialogue", []):
                 shot["dialogue"] = kept
             shot.setdefault("soundscape", "")
@@ -47,8 +70,8 @@ def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
             shot.setdefault("references", {})
             if "characters" in shot["references"]:
                 shot["references"]["characters"] = [
-                    c for c in shot["references"]["characters"] if c in cast_names]
-    # Guarantee the cast pre-section: every exact name that appears in shots.
+                    c for c in shot["references"]["characters"] if c in valid]
+    # Guarantee the cast pre-section and a top-level summary.
     if not isinstance(script.get("cast"), list):
         seen: list[str] = []
         for scene in script.get("scenes", []):
@@ -60,6 +83,10 @@ def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
                     if d.get("char") and d["char"] not in seen:
                         seen.append(d["char"])
         script["cast"] = seen
+    if not (script.get("summary") or "").strip():
+        script["summary"] = " ".join(
+            (sc.get("summary") or "").strip() for sc in script.get("scenes", [])
+            if (sc.get("summary") or "").strip())
     return script
 
 
@@ -122,6 +149,10 @@ class WritersRoom:
         reviews = run_reviewers(script, show=self.show, cfg=self.cfg, llm=self.llm,
                                 episode=episode, round_no=1,
                                 notes_dir=self._runs_dir(episode) / "reviews")
+        target = int(bible.get("runtime_target_s", 1320) or 1320)
+        dur = _runtime_review(script, target)
+        if dur:
+            reviews["duration"] = dur
         rounds = 1
         passed = all_pass(reviews)
         while not passed and rounds < max_revisions:
@@ -134,20 +165,31 @@ class WritersRoom:
             reviews = run_reviewers(script, show=self.show, cfg=self.cfg, llm=self.llm,
                                     episode=episode, round_no=rounds,
                                     notes_dir=self._runs_dir(episode) / "reviews")
+            dur = _runtime_review(script, target)
+            if dur:
+                reviews["duration"] = dur
             passed = all_pass(reviews)
 
         return {"script": script, "reviews": reviews, "rounds": rounds, "passed": passed,
                 "episode": episode}
+
+    def _report_output(self, detail: str, text: str) -> None:
+        ACTIVITY[self.show.show_id] = {"detail": detail, "output": text[-600:],
+                                       "ts": time.time()}
 
     def _ask_script(self, system: str, bible, synopsis, continuity, characters) -> dict[str, Any]:
         return self.llm.chat_json(
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.script_prompt(bible, synopsis, continuity,
                                                                characters)}],
-            model=self._role_model("script"), temperature=0.8, max_tokens=16384)
+            model=self._role_model("script"), temperature=0.8, max_tokens=65536,
+            on_progress=lambda n, t: self._report_output(
+                f"Episode script — writing ({n} tokens generated…)", t))
 
     def _ask_revision(self, system: str, script, reviews) -> dict[str, Any]:
         return self.llm.chat_json(
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.revision_prompt(script, reviews)}],
-            model=self._role_model("script"), temperature=0.6, max_tokens=16384)
+            model=self._role_model("script"), temperature=0.6, max_tokens=65536,
+            on_progress=lambda n, t: self._report_output(
+                f"Episode script — revising ({n} tokens generated…)", t))

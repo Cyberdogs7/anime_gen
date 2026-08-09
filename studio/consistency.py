@@ -18,7 +18,8 @@ from typing import Any
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .show import Show
-from .storyboard import (_keyframe_prompt, _latest_script, _shot_characters, _shot_refs)
+from .storyboard import (_keyframe_prompt, _latest_script, _shot_characters,
+                         _shot_object_refs, _shot_ref_weights, _shot_refs)
 REVIEW_PROMPT = (
     "You are a STRICT character-consistency reviewer for an anime production.\n"
     "You receive a storyboard keyframe and a set of EXPECTED characters, each with an "
@@ -77,6 +78,21 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _prev_keyframe(runs, scene: dict[str, Any], sid: str) -> Path | None:
+    """The storyboard PNG of the shot just before `sid` within the scene."""
+    shots = scene.get("shots", []) or []
+    for i, sh in enumerate(shots):
+        if sh.get("id") == sid:
+            if i == 0:
+                return None
+            prev_id = shots[i - 1].get("id")
+            if not prev_id:
+                return None
+            p = runs / "storyboard" / f"{prev_id}.png"
+            return p if p.exists() else None
+    return None
+
+
 def review_shot(llm, model: str, names: list[str], ref_paths: list[Path],
                 keyframe_path: Path) -> dict[str, Any]:
     """One vision call: are all expected characters present, consistent, and are
@@ -93,6 +109,33 @@ def review_shot(llm, model: str, names: list[str], ref_paths: list[Path],
                     temperature=0.2, max_tokens=3000)
     return _extract_json(text) or {"pass": True, "issue": "unparseable",
                                    "prompt_fix": ""}
+
+
+def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) -> str:
+    """Send the current prompt + reviewer corrections to the LLM, which REWRITES
+    the whole keyframe prompt. Appending fixes doesn't work; a coherent rewrite does.
+    """
+    revision = (
+        "You are an anime storyboard prompt engineer. Rewrite the keyframe prompt below "
+        "to fully incorporate the reviewer's corrections.\n"
+        "KEEP the scene's action, camera, setting and mood intact. CHANGE the character "
+        "design details the reviewer flagged so they match the approved character "
+        "references (hair color, hair style, eye color, outfit/costume). Name EVERY "
+        "character who is on screen. If a character must be present, name them explicitly.\n"
+        "The image must contain NO text, no dialogue bubbles, no captions, no subtitles, "
+        "no watermark.\n"
+        "Reply with ONLY JSON: {\"prompt\": \"the fully rewritten keyframe prompt\"}\n\n"
+        f"CURRENT PROMPT:\n{prompt}\n\n"
+        f"REVIEWER CORRECTIONS:\n{issues}\n{fix}"
+    )
+    text = llm.chat([{"role": "user", "content": revision}], model=model,
+                    temperature=0.6, max_tokens=1500)
+    try:
+        s = text[text.find("{"): text.rfind("}") + 1]
+        out = (json.loads(s).get("prompt") or "").strip()
+        return out if len(out) > 40 else prompt
+    except Exception:
+        return prompt
 
 
 def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
@@ -163,16 +206,25 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
         try:
             for f in failures:
                 sid = f["sid"]
-                ACTIVITY[show.show_id] = {"detail": f"Regenerating {sid} (consistency fix)…",
+                ACTIVITY[show.show_id] = {"detail": f"Rewriting prompt for {sid} + regenerate…",
                                           "ts": __import__("time").time()}
-                base = _keyframe_prompt(f["shot"], f["scene"], _shot_characters(f["shot"]))
-                if f.get("fix"):
-                    base = f"{base} {f['fix']}".strip()
+                enames, _ = _shot_refs(show, f["shot"])
+                base = _keyframe_prompt(f["shot"], f["scene"], enames)
+                base = revise_keyframe_prompt(llm, model, base,
+                                              f.get("issue", ""), f.get("fix", ""))
+                # Rebuild the full ref chain (characters + objects + prev keyframe)
+                # with the same per-ref dominance weights the storyboard uses.
                 kf = runs / "storyboard" / f"{sid}.png"
+                eobj = _shot_object_refs(show, episode, f["shot"])
+                prev = _prev_keyframe(runs, f["scene"], sid)
+                full_refs = list(f["refs"]) + eobj + ([str(prev)] if prev else [])
+                weights = _shot_ref_weights(f["shot"], enames, len(f["refs"]),
+                                            len(eobj), bool(prev))
                 try:
                     generate_keyframe_with_ref(client, load_workflow(wf_path), base, 0,
-                                               f["refs"], str(kf),
-                                               aspect_ratio="16:9", weight=0.8)
+                                               full_refs, str(kf),
+                                               aspect_ratio="16:9", weight=0.8,
+                                               weights=weights or None)
                     for entry in report:
                         if entry.get("shot") == sid:
                             entry["result"] = "regenerated"

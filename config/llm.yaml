@@ -1,11 +1,20 @@
 # LM Studio configuration. See DESIGN.md §11.
-# Node A (renderer) talks to the worker's LM Studio over the LAN portproxy.
-# Single-model strategy: only one LLM can stay resident on the worker's 6 GB
-# card, so the uncensored gemma-4-e4b handles every role (follows the approved
-# mature-content instructions; the only model that does).
-base_url: "http://192.168.50.173:1235/v1"
+# BEAST5's own LM Studio (this machine, 127.0.0.1:1234) is the PRIMARY LLM: the
+# router sends calls there whenever it has capacity. When BEAST5 is busy (its
+# concurrency limit in-flight) or down, calls fall back to Beast3's LM Studio
+# over the LAN portproxy (192.168.50.173:1235). Both instances handle
+# concurrency_limit requests at a time.
+base_url: "http://127.0.0.1:1234/v1"
+fallback_url: "http://192.168.50.173:1235/v1"
+concurrency_limit: 4
+# ComfyUI instances on BEAST5 whose running queue marks the GPU as busy.
+# While any is rendering (krea2 image gen, H3 video), LLM calls prefer the
+# fallback node instead of competing with the render for VRAM.
+gpu_guard_urls:
+  - "http://127.0.0.1:8188"
+  - "http://127.0.0.1:8189"
 model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-context: 16384
+context: 65536
 
 # Role -> model assignment. Model names must be loaded in LM Studio's catalog.
 roles:
@@ -16,6 +25,7 @@ roles:
   slop_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
   continuity_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
   fan_service_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+  growth_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
   describer: ""            # vision model (e.g. Qwen2.5-VL) - optional at M0
 
 gpu_offload: true          # if false, LLM runs on CPU during render phases

@@ -109,6 +109,34 @@ def _shot_refs(show: Show, shot: dict[str, Any]):
     return names, refs
 
 
+def _shot_ref_weights(shot: dict[str, Any], names: list[str],
+                      n_char_refs: int, n_obj_refs: int, has_prev_kf: bool) -> list[float]:
+    """Per-ref IPAdapter dominance weights aligned to the refs list order.
+
+    Order in the refs list is: [character refs..., object refs..., prev keyframe?].
+    Weights: the speaker (if on camera) or the first character dominates (~0.95),
+    later characters taper, objects pull lightly (~0.55), and the shot-line
+    continuity keyframe is weakest (~0.45) so it nudges composition without
+    overriding character identity.
+    """
+    weights: list[float] = []
+    speakers = [d.get("char") for d in (shot.get("dialogue") or []) if d.get("on_camera")]
+    primary = speakers[0] if speakers else (names[0] if names else "")
+    for i, name in enumerate(names):
+        if i >= n_char_refs:
+            break
+        if name == primary:
+            weights.append(0.95)
+        elif i == 0:
+            weights.append(0.9)
+        else:
+            weights.append(max(0.7, 0.9 - 0.1 * i))
+    weights += [0.55] * n_obj_refs
+    if has_prev_kf:
+        weights.append(0.45)
+    return weights
+
+
 def _keyframe_prompt(shot: dict[str, Any], scene: dict[str, Any], names: list[str]) -> str:
     setting = (scene.get("summary") or scene.get("location") or "").strip()
     action = (shot.get("action") or "").strip()
@@ -131,6 +159,26 @@ def _recurring_objects(script: dict[str, Any]) -> list[str]:
             name = m.group(0)
             seen_in.setdefault(name, set()).add(idx)
     return [n for n, shots_i in seen_in.items() if len(shots_i) >= 2]
+
+
+def _shot_object_refs(show: Show, episode: int, shot: dict[str, Any]) -> list[str]:
+    """Reference-image paths for recurring objects present in this shot.
+
+    Matches the same capitalized multi-word heuristic against the shot's
+    action/camera text and returns the ref for any object whose ref image
+    exists under runs/EP##/objects/<slug>.png.
+    """
+    od = show.dir / "runs" / f"EP{episode:02d}" / "objects"
+    if not od.exists():
+        return []
+    text = f"{shot.get('action', '')} {shot.get('camera', '')}"
+    out: list[str] = []
+    for m in re.finditer(r"\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+\b", text):
+        slug = re.sub(r"[^a-z0-9-]+", "-", m.group(0).lower()).strip("-")
+        p = od / f"{slug}.png"
+        if p.exists() and str(p) not in out:
+            out.append(str(p))
+    return out
 
 
 def _char_ref_images(show: Show, names: list[str]) -> list[str]:
@@ -256,18 +304,28 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None) -
                         progress(done, total, sid)
                     continue
                 names, refs = _shot_refs(show, shot)
+                n_char_refs = len(refs)
+                # Recurring objects in this shot get their ref image chained in
+                # after the characters, so props stay consistent shot-to-shot.
+                obj_refs = _shot_object_refs(show, episode, shot)
+                refs = list(refs) + obj_refs
+                n_obj_refs = len(obj_refs)
                 # Shot-line continuity: reuse the previous keyframe of the scene as an
                 # extra reference so consecutive shots stay visually consistent.
-                if prev_kf and prev_kf.exists():
+                has_prev_kf = bool(prev_kf and prev_kf.exists())
+                if has_prev_kf:
                     refs = list(refs) + [str(prev_kf)]
                 prompt = _keyframe_prompt(shot, sc, names)
+                weights = _shot_ref_weights(shot, names, n_char_refs, n_obj_refs,
+                                            has_prev_kf) if refs else None
                 if progress:
                     progress(done, total, sid)
                 try:
                     if refs and wf_path.exists():
                         generate_keyframe_with_ref(client, load_workflow(wf_path),
                                                    prompt, 0, refs, str(out),
-                                                   aspect_ratio="16:9", weight=0.8)
+                                                   aspect_ratio="16:9", weight=0.8,
+                                                   weights=weights)
                     elif wf_path.exists():
                         generate_keyframe(client, load_workflow(wf_path), prompt, 0,
                                           str(out), aspect_ratio="16:9")
@@ -330,6 +388,10 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
             vn = ensure_variant_refs(show, script or {}, cfg=cfg)
             if vn:
                 job["detail"] = f"Costume refs: {vn} variants"
+                ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+            objn = generate_object_refs(show, episode, cfg=cfg)
+            if objn:
+                job["detail"] = f"Object refs: {objn} recurring props"
                 ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
             total_shots = len([s for sc in (script or {}).get("scenes", [])
                                for s in sc.get("shots", [])])

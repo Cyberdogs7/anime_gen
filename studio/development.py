@@ -87,6 +87,7 @@ def _record_seen(show: Show, continuity: dict[str, Any], episode: int,
         new_plotline.setdefault("status", "active")
         new_plotline["last_seen_episode"] = episode
         merged.append(new_plotline)
+        continuity["last_new_plotline_episode"] = episode
     continuity["plotlines"] = merged
     if overall:
         overall["last_seen_episode"] = episode
@@ -94,9 +95,15 @@ def _record_seen(show: Show, continuity: dict[str, Any], episode: int,
     show.write_continuity(continuity)
 
 
-def develop_episode(show: Show, episode: int, llm=None, cfg=None) -> str:
+def _episodes_since_new_plotline(continuity: dict[str, Any], episode: int) -> int:
+    """How many episodes since a plotline was last introduced (default: all of them)."""
+    last = continuity.get("last_new_plotline_episode")
+    return episode if last is None else max(0, episode - int(last))
+
+
+def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "") -> str:
     """Pick plotlines (overall always featured), optionally introduce a new one, and
-    return the episode synopsis."""
+    return the episode synopsis. New plotlines are LLM-reviewed + persisted canon."""
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"))
     bible = show.read_bible()
@@ -110,9 +117,22 @@ def develop_episode(show: Show, episode: int, llm=None, cfg=None) -> str:
     profile = cfg.get("show_profile") or {}
     system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
                                        profile.get("baseline", "ranma-1-2"))
+    cadence = int(cfg.get("growth", "plotline_cadence_episodes", 3) or 3)
+    since = _episodes_since_new_plotline(continuity, episode)
     user = prompts.development_prompt(
         episode, overall, plotlines, continuity.get("unresolved_threads", []) or [],
-        continuity, characters, new_cands)
+        continuity, characters, new_cands, notes,
+        cadence=cadence, episodes_since_new=since)
+    # Durable director constraints shape plotline selection, not just output text.
+    try:
+        from .planner import read_director_notes
+        dir_notes = read_director_notes(show)
+        if dir_notes:
+            user += ("\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE, apply to plotline "
+                     "selection and the synopsis; if a plotline conflicts, do NOT feature "
+                     "it this episode):\n- " + "\n- ".join(dir_notes))
+    except Exception:
+        pass
     try:
         data = llm.chat_json([{"role": "system", "content": system},
                               {"role": "user", "content": user}],
@@ -121,5 +141,21 @@ def develop_episode(show: Show, episode: int, llm=None, cfg=None) -> str:
         return _fallback_synopsis(episode, overall, plotlines)
     if not isinstance(data, dict) or not data.get("synopsis"):
         return _fallback_synopsis(episode, overall, plotlines)
+    # New plotline goes through the LLM review gate and, if approved, is persisted
+    # to the BIBLE (canon) + continuity, and its new characters get sheets.
+    if isinstance(data.get("new_plotline"), dict) and data["new_plotline"].get("id"):
+        try:
+            from .growth import process_new_plotline
+            result = process_new_plotline(show, data["new_plotline"], episode,
+                                          llm=llm, cfg=cfg)
+            if result.get("approved"):
+                data["new_plotline"] = result["plotline"]
+            else:
+                # Rejected by the reviewer: not canon, do not persist to continuity.
+                data["new_plotline"] = None
+        except Exception as exc:
+            log = __import__("logging").getLogger(__name__)
+            log.warning("growth gate failed for episode %s: %s", episode, exc)
+            data["new_plotline"] = None
     _record_seen(show, continuity, episode, data, plotlines, overall)
     return data["synopsis"]

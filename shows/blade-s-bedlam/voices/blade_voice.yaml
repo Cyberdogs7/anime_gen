@@ -2,9 +2,9 @@ id: blade_voice
 engine: qwen3_tts
 mode: designed
 speaker: 'null'
-voice_description: Mid-to-late 20s, deep baritone register (low end), rough/raspy
-  texture reminiscent of someone who chain-smokes synth-tobacco. Delivery is slow
-  and measured when contemplative, but snaps into a clipped, aggressive rhythm during
-  combat or confrontation.
+voice_description: Deep male register (baritone bordering on bass). Texture is slick,
+  like worn obsidian or aged mahogany. Delivery is measured and deliberate; rarely
+  elevated in pitch unless anger flares. Think a weary veteran who has seen too many
+  neon-drenched nightmares.
 speed: 1.0
 pitch: 0.0

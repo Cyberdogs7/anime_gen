@@ -1,32 +1,32 @@
 id: lily
 name: Lily
 role: Armorer-Merc
-appearance_canonical: A toned, athletic build that suggests coiled power rather than
-  fragility, encased in highly polished chrome and deep midnight-blue plating. She
-  possesses long, vibrant crimson hair that cascades down her back, often pulled into
-  a high, sharp ponytail that flicks dramatically during action sequences. Her eyes
-  are an unnatural, piercing amber, and she favors revealing armor segments—a tight
-  breastplate over exposed midriff and legs, accented with glowing cyan piping.
-appearance_notes: The crimson hair must always appear saturated and glossy, even in
-  the rain. The amber eye color is non-negotiable. Her primary suit aesthetic leans
-  toward 'elegant predator' rather than raw brute strength, but her build firmly anchors
-  her as a powerful contender against Ivy's more overtly muscular presentation.
+appearance_canonical: 'A striking young woman with unnervingly bright, electric blue
+  eyes that seem to catch the neon reflections of the city. She possesses long, midnight-black
+  hair often tied in a high, practical ponytail, allowing several strands to frame
+  sharp cheekbones. Her physique is lean and highly toned from constant combat, visible
+  beneath her standard operational gear: dark charcoal armor plates accented with
+  vibrant cyan trim. When off-duty, she favors fitted tactical wear that emphasizes
+  a slender but powerful build.'
+appearance_notes: Eyes must always be electric blue. Hair color (midnight black) and
+  general silhouette must remain consistent across all scenes. Her armor plating detail
+  should always feature sharp, geometric edges.
 personality:
-- Competitive
-- Intensely devoted (especially to Blade)
-- Proud/Arrogant (when her skill is challenged)
-- Passionate
-- Strategically brilliant
-traits_for_llm: Lily speaks with a sharp, melodious tone that often carries an undercurrent
-  of condescension when addressing rivals. She uses precise vocabulary and rarely
-  wastes words. In combat or romantic moments, her speech gains a breathless urgency.
-  She tends to direct conversations toward skill comparison ('Your welds are amateurish,'
-  'This plating is adequate, but *mine* is perfection.')
+- Intensely Competitive
+- Pragmatic to a fault
+- Driven by validation (especially from Blade)
+- Sharply Witty/Sarcastic
+- Deeply Loyal (to those she deems worthy)
+traits_for_llm: Lily speaks with rapid-fire energy, often bordering on impatient.
+  Her dialogue is laced with technical jargon related to engineering or combat efficiency.
+  When speaking to Blade, her tone shifts from competitive banter to intense, focused
+  adoration; when interacting with rivals (especially Ivy), she adopts a challenging,
+  superior cadence, often punctuated by an exasperated sigh.
 h3_slot: char1
 voice:
   mode: designed
   speaker: null
-  voice_description: Mid-high register female voice. Texture is smooth and crystalline,
-    like polished glass. Delivery is usually articulate, fast-paced when excited or
-    challenged, but can drop to a low, seductive purr when flirting with Blade. Imagine
-    a highly trained opera singer who just finished an intense sprint.
+  voice_description: Mid-high register female voice. Crisp, clear texture with a slight
+    edge of metallic sharpness to the delivery. Speaks at a quick pace, conveying
+    high energy and intellectual speed. Imagine a blend of energetic anime heroine
+    mixed with the precise cadence of an engineering student.

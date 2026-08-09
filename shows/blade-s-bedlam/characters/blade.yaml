@@ -1,32 +1,35 @@
 id: blade
 name: Blade
-role: Primary Mercenary (The Anchor)
-appearance_canonical: Tall, powerfully built with a lean, battle-hardened physique
-  visible beneath perpetually worn, dark leather duster armor. He possesses close-cropped,
-  oil-black hair that always looks damp from the city's rain. His eyes are an intense,
-  scarred silver-grey, and a faint network of old combat scars crisscrosses his jawline
-  and left forearm.
-appearance_notes: Must maintain the perpetual 'rain-soaked' look; never allow him
-  to appear clean or dry unless immediately after a major fight scene. The silver-grey
-  eye color is absolute. His primary attire must be dark, functional mercenary gear
-  with metallic reinforcement plating.
+role: Primary Mercenary / Anchor
+appearance_canonical: A towering figure, Blade possesses a lean, battle-scarred physique
+  honed by constant urban warfare; his hair is slicked back but retains a damp sheen,
+  appearing deep indigo rather than pure black, falling across an angular face dominated
+  by sharp cheekbones. His eyes are an intensely saturated, molten amber, rarely widening
+  beyond a calculating narrowing. He favors heavily reinforced, dark tactical gear—usually
+  matte black or charcoal grey—accented with worn crimson piping that mirrors the
+  blood spatters of recent engagements. A faint, jagged scar traces from his left
+  temporal region down to his jawline.
+appearance_notes: Must maintain a brooding, world-weary aura even when relaxed. Never
+  allow him to look pristine or clean; there must always be evidence of grime, rain
+  splatter, or minor abrasions on his gear/skin. The amber eyes are the single most
+  defining feature and must remain intense.
 personality:
-- Stoic and guarded
-- Deeply cynical about the city's politics and inhabitants
-- Possesses a hidden vein of fierce loyalty (usually reserved for one person)
-- Pragmatic to a fault; sentimentality is a weakness he fights daily
-- Surprisingly protective, often sacrificing his own comfort or safety for others
-traits_for_llm: Blade speaks with a low, gravelly baritone that sounds perpetually
-  tired. His dialogue is economical—he rarely wastes words. He uses short, declarative
-  sentences punctuated by sharp observations about the immediate environment or the
-  absurdity of his current predicament. When provoked or flustered (usually by the
-  four women), he exhibits terse exasperation, often just grunting a response or sighing
-  heavily before cutting to the chase.
-h3_slot: char1
+- Stoic/Guarded
+- Pragmatic
+- Deeply Protective (especially towards the four armorer-mercs)
+- Cynical but secretly sentimental
+- Intensely focused on efficiency in combat
+traits_for_llm: Blade speaks with a low, gravelly resonance, often clipped and economical.
+  He rarely wastes words, preferring declarative statements or short, pointed questions
+  ('Where is the breach?' 'Hold it.' 'Why are you smiling?'). His posture is always
+  coiled, ready for immediate action, even during mundane conversations. When flirting
+  (rarely), it's delivered as a blunt observation about a character's capability or
+  beauty, rather than flowery praise.
+h3_slot: primary
 voice:
   mode: designed
   speaker: 'null'
-  voice_description: Mid-to-late 20s, deep baritone register (low end), rough/raspy
-    texture reminiscent of someone who chain-smokes synth-tobacco. Delivery is slow
-    and measured when contemplative, but snaps into a clipped, aggressive rhythm during
-    combat or confrontation.
+  voice_description: Deep male register (baritone bordering on bass). Texture is slick,
+    like worn obsidian or aged mahogany. Delivery is measured and deliberate; rarely
+    elevated in pitch unless anger flares. Think a weary veteran who has seen too
+    many neon-drenched nightmares.
