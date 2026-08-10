@@ -214,11 +214,13 @@ def _script_costume_pairs(script: dict[str, Any]) -> dict[str, set[str]]:
     return pairs
 
 
-def ensure_variant_refs(show: Show, script: dict[str, Any], cfg=None) -> int:
+def ensure_variant_refs(show: Show, script: dict[str, Any], cfg=None,
+                        progress=None) -> int:
     """Generate a ref image for each costume variant a character actually wears.
 
     Generic: every (character, costume-label) pair the script declares gets its own
     reference image, derived from the character's base appearance plus the label.
+    ``progress(done, total, label)`` is called per variant when provided.
     """
     from .remote.ops import ServiceOps
     from .comfy_workflows import generate_keyframe, load_workflow
@@ -243,8 +245,11 @@ def ensure_variant_refs(show: Show, script: dict[str, Any], cfg=None) -> int:
     created = 0
     ops = ServiceOps(cfg)
     client, stop = ops._krea2_client()
+    total = len(jobs)
     try:
-        for cid, name, label, canon in jobs:
+        for i, (cid, name, label, canon) in enumerate(jobs, start=1):
+            if progress:
+                progress(i, total, f"costume ref {label} for {name}")
             ACTIVITY[show.show_id] = {"detail": f"Costume ref '{label}' for {name} (Krea 2)…",
                                       "ts": time.time()}
             rd = show.character_refs_dir(cid)
@@ -375,34 +380,39 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
 
         def prog(done, total, label):
             job["done"], job["total"] = done, total
-            job["detail"] = f"Generating storyboard {done}/{total}: {label}"
+            if "keyframe" in str(label).lower() or total == job.get("shot_total"):
+                job["detail"] = f"Generating storyboard {done}/{total}: {label}"
+            else:
+                job["detail"] = f"Reference images {done}/{total}: {label}"
             ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
 
         try:
-            from .casting import create_missing_character_refs
-            created = create_missing_character_refs(show, episode, cfg=cfg)
-            if created:
-                job["detail"] = f"Ref pass: new characters {', '.join(created)}"
+            from .remote.ops import ServiceOps
+            with ServiceOps(cfg).krea2_batch():
+                from .casting import create_missing_character_refs
+                created = create_missing_character_refs(show, episode, cfg=cfg)
+                if created:
+                    job["detail"] = f"Ref pass: new characters {', '.join(created)}"
+                    ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                script, _ = _latest_script(show, episode)
+                vn = ensure_variant_refs(show, script or {}, cfg=cfg, progress=prog)
+                if vn:
+                    job["detail"] = f"Costume refs: {vn} variants"
+                    ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                objn = generate_object_refs(show, episode, cfg=cfg, progress=prog)
+                if objn:
+                    job["detail"] = f"Object refs: {objn} recurring props"
+                    ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                total_shots = len([s for sc in (script or {}).get("scenes", [])
+                                   for s in sc.get("shots", [])])
+                job["total"] = total_shots
+                generate_shot_keyframes(show, episode, cfg=cfg, progress=prog)
+                job["detail"] = "Consistency review (vision)…"
                 ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
-            script, _ = _latest_script(show, episode)
-            vn = ensure_variant_refs(show, script or {}, cfg=cfg)
-            if vn:
-                job["detail"] = f"Costume refs: {vn} variants"
-                ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
-            objn = generate_object_refs(show, episode, cfg=cfg)
-            if objn:
-                job["detail"] = f"Object refs: {objn} recurring props"
-                ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
-            total_shots = len([s for sc in (script or {}).get("scenes", [])
-                               for s in sc.get("shots", [])])
-            job["total"] = total_shots
-            generate_shot_keyframes(show, episode, cfg=cfg, progress=prog)
-            job["detail"] = "Consistency review (vision)…"
-            ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
-            from .consistency import run_consistency_check
-            job["report"] = run_consistency_check(show, episode, cfg=cfg)
-            job["state"] = "done"
-            job["detail"] = "Storyboard + consistency complete"
+                from .consistency import run_consistency_check
+                job["report"] = run_consistency_check(show, episode, cfg=cfg)
+                job["state"] = "done"
+                job["detail"] = "Storyboard + consistency complete"
         except Exception as exc:
             job["state"] = "failed"
             job["detail"] = f"Storyboard failed: {exc}"

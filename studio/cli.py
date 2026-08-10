@@ -8,6 +8,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -344,6 +345,32 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    """Self-healing: resume any show whose Gate-0 chain was interrupted.
+
+    Reconcile is idempotent — it re-runs advance() from disk state, skipping
+    work that already produced artifacts and resuming interrupted steps. It
+    stops at the next human gate, so it is safe to run on a schedule or from
+    `serve` without ever auto-approving a gated artifact.
+    """
+    from .bootstrap import reconcile_show
+    from .show import Show
+    shows = [args.show] if args.show else get_config().list_shows()
+    for show_id in shows:
+        if not (get_config().show_path(show_id) / "bootstrap.json").exists():
+            continue
+        log = reconcile_show(show_id)
+        state = Show(show_id).bootstrap_state()
+        if state.get("complete"):
+            print(f"[reconcile:{show_id}] BOOTSTRAP COMPLETE")
+            continue
+        if log:
+            for line in log:
+                print(f"  {show_id}: {line}")
+        print(f"[reconcile:{show_id}] {_pending_step(state) or 'stalled, nothing pending'}")
+    return 0
+
+
 def _pending_step(state: dict) -> str | None:
     if state.get("concept", {}).get("status") == "pending":
         return "concept"
@@ -538,6 +565,22 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     bus.start()
     print(f"[serve] broker={cfg['bus']['provider']} nodes: worker-B. Ctrl+C to stop.")
     shows = cfg.list_shows()
+
+    # Self-healing: resume any show whose Gate-0 chain was interrupted before
+    # the worker came up (crash / restart). Runs once, in the background; stops
+    # at the next human gate and never auto-approves a gated artifact.
+    def _reconcile_all() -> None:
+        from .bootstrap import reconcile_if_stalled
+        time.sleep(1.0)
+        for show in shows:
+            try:
+                if reconcile_if_stalled(show):
+                    log.info("[reconcile] resumed Gate-0 chain for %s", show)
+            except Exception:
+                log.exception("[reconcile] precheck failed for %s", show)
+
+    threading.Thread(target=_reconcile_all, daemon=True,
+                     name="startup-reconcile").start()
     if not shows:
         print("[serve] no shows yet - `studio.py init-show --name <id>`")
     elif args.request_once:
@@ -711,6 +754,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--show", required=True)
     b.add_argument("--auto", action="store_true", help="auto-approve every step to completion")
 
+    rc = sub.add_parser("reconcile", help="self-heal: resume any interrupted Gate-0 chains (idempotent)")
+    rc.add_argument("--show", default="", help="show id (default: all shows)")
+
     ap = sub.add_parser("approve", help="approve a bootstrap artifact (human gate)")
     ap.add_argument("--show", required=True)
     ap.add_argument("--step", required=True, choices=["concept", "bible", "character", "voice", "scenes"])
@@ -762,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
         "extend": _cmd_extend,
         "init-show": _cmd_init_show,
         "bootstrap": _cmd_bootstrap,
+        "reconcile": _cmd_reconcile,
         "approve": _cmd_approve,
         "reject": _cmd_reject,
         "add-character": _cmd_add_character,

@@ -59,6 +59,32 @@ plotlines:
     truths emerge, they don't devolve into petty arguments; instead, they redefine
     how they coordinate tactics in battle, creating a sharper, more focused partnership
     against enemy forces.
+- id: blades-romance
+  name: Blade's Romance
+  characters:
+  - Blade
+  - Lily
+  - Ivy
+  - Rose
+  - Dahlia
+  summary: A battle-hardened mercenary, Blade, finds himself the center of a deadly
+    romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly
+    push their skills to the limit in service of him. They fight not just for his
+    affection, but through intense, synergistic competition, ensuring they are always
+    ready to protect him from the city's relentless threats.
+  status: active
+  last_seen_episode: 1
+- id: dahlia-debt
+  name: Dahlia's Hidden Obligation
+  characters:
+  - Dahlia
+  - Jax
+  summary: Dahlia is bound by a dangerous debt to underworld financier Jax, forcing
+    her into high-risk retrieval missions outside the usual bio-mech skirmishes. This
+    obligation threatens to shatter the trust she maintains with Rose and Blade regarding
+    her past mercenary life.
+  status: active
+  last_seen_episode: 4
 style_guide: The show's visual look is a blend of modern anime aesthetics with gritty
   realism, featuring detailed line art and vibrant colors for characters, contrasted
   against dark, rain-soaked cityscapes and the metallic sheen of hardsuits.

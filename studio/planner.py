@@ -23,7 +23,9 @@ PLAN_FILE = "plan.json"
 
 
 def _plan_path(show: Show, episode: int) -> Path:
-    return show.dir / "runs" / f"EP{episode:02d}" / PLAN_FILE
+    p = show.dir / "runs" / f"EP{episode:02d}" / PLAN_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _target(show: Show) -> int:
@@ -206,6 +208,19 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         plan.setdefault("episode", episode)
     if notes.strip():
         plan["rejected_notes"] = notes
+    # The model may omit the cast; the episode always features the approved
+    # roster (the script assembly keys off "cast", the dashboard off "characters").
+    chars = [c for c in (plan.get("characters") or []) if isinstance(c, str) and c]
+    if not chars:
+        chars = list(names)
+    plan["characters"] = chars
+    plan.setdefault("cast", chars)
+    # The scene-by-scene outline must be a list of dicts with at least an id; drop
+    # anything malformed so the dashboard/breakdown never trips on junk.
+    plan_scenes = [s for s in (plan.get("scenes") or [])
+                   if isinstance(s, dict) and s.get("id")]
+    if plan_scenes:
+        plan["scenes"] = plan_scenes
     plan["status"] = "pending"
     plan["synopsis"] = synopsis
     _plan_path(show, episode).write_text(json.dumps(plan, indent=2, ensure_ascii=False),
@@ -273,26 +288,59 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
                    "time_of_day": s.get("time_of_day"), "summary": s.get("summary", ""),
                    "characters": s.get("characters", [])} for s in scenes]
     else:
-        ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: breaking outline into scenes…",
-                                  "ts": time.time()}
-        breakdown = llm.chat_json(
-            [{"role": "system", "content": prompts.showrunner_system(
-                cfg["show_profile"], bible.get("content_policy", "mature"),
-                cfg["show_profile"].get("baseline", "ranma-1-2"))},
-             {"role": "user", "content": prompts.scene_breakdown_prompt(
-                 bible, outline, cast, _target(show))}],
-            model=model, temperature=0.8, max_tokens=8192,
-            on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
-                "detail": f"Episode {episode}: scene breakdown ({n} tokens…)",
-                "output": t[-500:], "ts": time.time()}}))
-        scenes = breakdown.get("scenes", []) or []
+        # The approved outline carries the scene-by-scene blueprint when the story
+        # engine produced one (full outline); reuse it directly. Fall back to a
+        # dedicated breakdown LLM call only for legacy plans that lack "scenes".
+        plan_scenes = outline.get("scenes") or []
+        plan_scenes = [s for s in plan_scenes if isinstance(s, dict) and s.get("id")]
+        if plan_scenes:
+            scenes = [{"id": s.get("id"), "location": s.get("location", ""),
+                       "time_of_day": s.get("time_of_day", ""),
+                       "summary": s.get("summary", ""),
+                       "characters": s.get("characters", [])} for s in plan_scenes]
+        else:
+            ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: breaking outline into scenes…",
+                                      "ts": time.time()}
+            breakdown = llm.chat_json(
+                [{"role": "system", "content": prompts.showrunner_system(
+                    cfg["show_profile"], bible.get("content_policy", "mature"),
+                    cfg["show_profile"].get("baseline", "ranma-1-2"))},
+                 {"role": "user", "content": prompts.scene_breakdown_prompt(
+                     bible, outline, cast, _target(show))}],
+                model=model, temperature=0.8, max_tokens=8192,
+                on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+                    "detail": f"Episode {episode}: scene breakdown ({n} tokens…)",
+                    "output": t[-500:], "ts": time.time()}}))
+            scenes = breakdown.get("scenes", []) or []
 
-    # 2b: detailed treatment per scene.
+    # 2b: detailed treatment per scene. Resumable: a scene whose detail file
+    # already exists is reused, so an interrupted run only regenerates the
+    # missing scenes (the reconciler calls this until all plan scenes exist).
     prior = read_scene_details(show, episode).get("scenes", []) if notes.strip() else []
     prior_by_id = {s.get("id"): s for s in prior}
+    sc_dir = _scenes_dir(show, episode)
+    sc_dir.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, dict[str, Any]] = {}
+    if not notes.strip():
+        # Key by FILENAME sid (authoritative): the model sometimes echoes a wrong
+        # id in the content, so a checkpoint file's name is what identifies it.
+        for f in sc_dir.glob("*.json"):
+            if f.name.endswith("_shots.json"):
+                continue   # shot checkpoints from assemble; not a scene detail
+            sid = f.stem
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(d, dict) and d.get("narrative"):
+                    d["id"] = sid
+                    existing[sid] = d
+            except Exception:
+                continue
     details: list[dict[str, Any]] = []
     for i, ps in enumerate(scenes, start=1):
         sid = ps.get("id", f"s{i:02d}")
+        if not notes.strip() and sid in existing:
+            details.append(existing[sid])
+            continue
         current = prior_by_id.get(sid)
         ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: scene detail {sid}…",
                                   "ts": time.time()}
@@ -307,12 +355,11 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
                 "detail": f"Episode {episode}: scene detail {sid} ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
         detail.setdefault("id", sid)
+        detail["id"] = sid   # force: the model often echoes a wrong id in content
         detail.setdefault("location", ps.get("location", ""))
         detail.setdefault("time_of_day", ps.get("time_of_day", ""))
         detail.setdefault("summary", ps.get("summary", ""))
         detail.setdefault("characters", ps.get("characters", []))
-        sc_dir = _scenes_dir(show, episode)
-        sc_dir.mkdir(parents=True, exist_ok=True)
         (sc_dir / f"{sid}.json").write_text(json.dumps(detail, indent=2, ensure_ascii=False),
                                             encoding="utf-8")
         details.append(detail)
@@ -446,7 +493,11 @@ def _writer_review(show: Show, episode: int, script: dict[str, Any],
 
 def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
                             max_revisions: int | None = None) -> dict[str, Any]:
-    """Chunk 3: run every plan scene's shot generation, assemble, normalize, write."""
+    """Chunk 3: run every plan scene's shot generation, assemble, normalize, write.
+
+    Resumable: each scene's shots are checkpointed to scenes/<sid>_shots.json, so an
+    interrupted run resumes from the checkpointed scenes instead of re-writing shots.
+    """
     from .clients.lmstudio import LMStudioClient
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=300)
@@ -458,18 +509,31 @@ def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
     episodes: list[dict[str, Any]] = []
     cast_names = [c.get("name") for c in (show.read_character(cid) for cid in show.list_characters())
                   if c.get("name")]
+    runs = show.dir / "runs" / f"EP{episode:02d}"
+    runs.mkdir(parents=True, exist_ok=True)
+    sc_dir = _scenes_dir(show, episode)
+    sc_dir.mkdir(parents=True, exist_ok=True)
     for i, ps in enumerate(scenes, start=1):
         sid = ps.get("id", f"s{i:02d}")
+        ck = sc_dir / f"{sid}_shots.json"
+        if ck.exists():
+            try:
+                scene = json.loads(ck.read_text(encoding="utf-8"))
+                if scene.get("id") and scene.get("shots"):
+                    episodes.append(scene)
+                    continue
+            except Exception:
+                pass
         ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: writing shots for {sid}…",
                                   "ts": time.time()}
         scene = generate_scene_shots(show, episode, ps, llm=llm, cfg=cfg,
                                      episode_summary=ep_summary)
+        ck.write_text(json.dumps(scene, indent=2, ensure_ascii=False), encoding="utf-8")
         episodes.append(scene)
-    script = {"episode": episode, "summary": ep_summary, "cast": plan.get("cast", cast_names),
+    script = {"episode": episode, "summary": ep_summary,
+              "cast": plan.get("characters") or plan.get("cast") or cast_names,
               "scenes": episodes}
     script = _normalize(script, cast_names)
-    runs = show.dir / "runs" / f"EP{episode:02d}"
-    runs.mkdir(parents=True, exist_ok=True)
     (runs / "script.r1.json").write_text(json.dumps(script, indent=2, ensure_ascii=False),
                                          encoding="utf-8")
     script = _writer_review(show, episode, script, llm=llm, cfg=cfg,

@@ -1,0 +1,10 @@
+id: ivy_voice
+engine: qwen3_tts
+mode: designed
+speaker: 'null'
+voice_description: Mid-to-high register (soprano/alto transition); crisp, clear texture
+  with a slight metallic edge to it, as if her voice is slightly amplified by her
+  own suit's comm unit; delivery is sharp and precise, moving quickly when agitated
+  or confident, but settling into a cool, controlled cadence when observing.
+speed: 1.0
+pitch: 0.0

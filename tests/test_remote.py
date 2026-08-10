@@ -97,3 +97,48 @@ def test_resolve_client_role():
     assert client.token == "t"
     raw = resolve_client(cfg, "10.0.0.7:9000")
     assert raw.base == "http://10.0.0.7:9000"
+
+
+def test_comfy_free_memory_and_interrupt():
+    """ComfyClient.free_memory / interrupt must hit /free and /interrupt and
+    never raise on a down server."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from studio.clients.comfy import ComfyClient
+
+    calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append(self.path)
+            if self.path == "/free":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+            elif self.path == "/interrupt":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        client = ComfyClient(f"http://127.0.0.1:{port}")
+        assert client.free_memory() is True
+        assert client.free_memory(unload_models=False, free_memory=True) is True
+        client.interrupt()
+        assert "/free" in calls
+        assert "/interrupt" in calls
+        # down server -> free_memory returns False, interrupt does not raise
+        down = ComfyClient("http://127.0.0.1:1")
+        assert down.free_memory() is False
+        down.interrupt()
+    finally:
+        httpd.shutdown()

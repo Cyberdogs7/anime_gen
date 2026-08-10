@@ -1,0 +1,10 @@
+id: lily_voice
+engine: qwen3_tts
+mode: designed
+speaker: null
+voice_description: Mid-high register female voice. Crisp, clear texture with a slight
+  edge of metallic sharpness to the delivery. Speaks at a quick pace, conveying high
+  energy and intellectual speed. Imagine a blend of energetic anime heroine mixed
+  with the precise cadence of an engineering student.
+speed: 1.0
+pitch: 0.0

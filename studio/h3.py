@@ -16,7 +16,9 @@ from .config import get_config
 
 def build_timeline(global_prompt: str, frames: int, segment_prompt: str = "",
                    prompt_format: str = "MiniMax", reference_mode: str = "OFF",
-                   characters: list[dict] | None = None) -> str:
+                   characters: list[dict] | None = None,
+                   audio_segments: list[dict] | None = None,
+                   soundscape: str = "", music: str = "") -> str:
     tl: dict[str, Any] = {
         "mainTrackEnabled": True, "audioTrackEnabled": True, "motionTrackEnabled": True,
         "propHeight": 90, "globalPropHeight": 85,
@@ -32,7 +34,8 @@ def build_timeline(global_prompt: str, frames: int, segment_prompt: str = "",
         "characters": characters or [],
         "segments": [{"id": "seg0", "start": 0, "length": frames,
                       "prompt": segment_prompt, "type": "text", "isEndFrame": False}],
-        "motionSegments": [], "audioSegments": [],
+        "motionSegments": [], "audioSegments": audio_segments or [],
+        "overall_soundscape": soundscape or "", "non_diegetic_music": music or "",
     }
     return json.dumps(tl)
 
@@ -64,8 +67,12 @@ def build_h3_shot_workflow(
     seed: int,
     cfg=None,
     segment_prompt: str = "",
+    characters: list[dict] | None = None,
     use_ref2va: bool = False,
     ref_images: list[str] | None = None,
+    audio_segments: list[dict] | None = None,
+    soundscape: str = "",
+    music: str = "",
     use_spectrum: bool = False,
     use_first_block_cache: bool = False,
     steps: int = 4,
@@ -81,9 +88,12 @@ def build_h3_shot_workflow(
     ck = cfg.get("comfy", "checkpoints", {})
     k, frames, _ = snap_duration(duration_s)
     ref_images = ref_images or []
-    ref_mode = "REF2VA" if (use_ref2va or ref_images) else "OFF"
+    audio_segments = audio_segments or []
+    ref_mode = "REF2VA" if (use_ref2va or ref_images or audio_segments or characters) else "OFF"
     timeline = build_timeline(global_prompt, frames, segment_prompt=segment_prompt,
-                              reference_mode=ref_mode)
+                              reference_mode=ref_mode, characters=characters,
+                              audio_segments=audio_segments,
+                              soundscape=soundscape, music=music)
 
     wf: dict[str, Any] = {
         "1": {"class_type": "UNETLoader",
@@ -110,6 +120,7 @@ def build_h3_shot_workflow(
                   "segment_lengths": f"[{frames}]", "guide_strength": "",
                   "frame_rate": fps,
                   "custom_width": width, "custom_height": height,
+                  "use_custom_audio": bool(audio_segments),
               }},
         "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler_name}},
@@ -149,6 +160,107 @@ def build_h3_shot_workflow(
             model_src = ["18", 0]
         wf["9"]["inputs"]["model"] = model_src
         wf["10"]["inputs"]["model"] = model_src
+    return wf
+
+
+def build_h3_ref2va_workflow(
+    prompt: str,
+    duration_s: float,
+    seed: int,
+    cfg=None,
+    ref_image_filenames: list[str] | None = None,
+    ref_audio_filenames: list[str] | None = None,
+    fps: int = 24,
+    width: int = 1344,
+    height: int = 768,
+    steps: int = 8,
+    sampler_name: str = "res_multistep",
+    scheduler: str = "simple",
+    use_spectrum: bool = False,
+    use_first_block_cache: bool = False,
+    use_turbo_lora: bool = True,
+    lora_strength: float = 0.75,
+) -> dict[str, Any]:
+    """Official Comfy-Org ref2va workflow (comfy_extras MiniMaxH3ReferenceToVideo).
+
+    Unlike the third-party Director wrapper, this is the core H3 graph: refs are
+    wired as SOCKETS (LoadImage -> ref_image_0..8, LoadAudio -> ref_audio_0..2)
+    and the node auto-labels them <Picture N> / <Audio N> in connection order,
+    which the prompt references directly. Width/height default to H3's native
+    1344x768 canvas.
+    """
+    cfg = cfg or get_config()
+    ck = cfg.get("comfy", "checkpoints", {})
+    k, frames, _ = snap_duration(duration_s)
+    ref_image_filenames = ref_image_filenames or []
+    ref_audio_filenames = ref_audio_filenames or []
+
+    wf: dict[str, Any] = {
+        "1": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": ck.get("h3_ref2va"),
+                         "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": ck.get("h3_clip"), "type": "minimax",
+                         "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": ck.get("h3_video_vae")}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": ck.get("h3_audio_vae")}},
+    }
+
+    # ref sockets (autogrow): LoadImage -> ref_image_N, LoadAudio -> ref_audio_N
+    cond_inputs: dict[str, Any] = {
+        "clip": ["2", 0], "vae": ["3", 0], "audio_vae": ["4", 0],
+        "prompt": prompt,
+        "width": int(width), "height": int(height), "length": int(frames),
+        "ref_image_size": "match",
+    }
+    for i, fname in enumerate(ref_image_filenames):
+        nid = f"img{i}"
+        wf[nid] = {"class_type": "LoadImage", "inputs": {"image": fname}}
+        cond_inputs[f"ref_images.ref_image_{i}"] = [nid, 0]
+    for i, fname in enumerate(ref_audio_filenames):
+        nid = f"aud{i}"
+        wf[nid] = {"class_type": "LoadAudio", "inputs": {"audio": fname}}
+        cond_inputs[f"ref_audios.ref_audio_{i}"] = [nid, 0]
+    wf["5"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": cond_inputs}
+
+    model_src: list[Any] = ["1", 0]
+    if use_spectrum or use_first_block_cache:
+        if use_spectrum:
+            wf["17"] = {"class_type": "SpectrumApplyMiniMaxH3",
+                        "inputs": {"model": model_src, "enabled": True, "blend_weight": 0.5,
+                                   "degree": 1, "ridge_lambda": 0.10, "window_size": 2.0,
+                                   "flex_window": 0.75, "warmup_steps": 1, "tail_actual_steps": 1,
+                                   "max_history": 8, "debug": False}}
+            model_src = ["17", 0]
+        if use_first_block_cache:
+            wf["18"] = {"class_type": "ApplyMiniMaxH3FirstBlockCache",
+                        "inputs": {"model": model_src,
+                                   "mode": "H3 Fast — 0.10 / max 2",
+                                   "threshold": 0.10, "start_percent": 0.10,
+                                   "end_percent": 0.95, "max_consecutive_hits": 2,
+                                   "temporal_guard": False}}
+            model_src = ["18", 0]
+
+    wf["6"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler_name}}
+    wf["7"] = {"class_type": "BasicScheduler",
+               "inputs": {"model": model_src, "scheduler": scheduler,
+                          "steps": steps, "denoise": 1.0}}
+    wf["8"] = {"class_type": "BasicGuider",
+               "inputs": {"model": model_src, "conditioning": ["5", 0]}}
+    wf["9"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}}
+    wf["10"] = {"class_type": "SamplerCustomAdvanced",
+                "inputs": {"noise": ["9", 0], "guider": ["8", 0],
+                           "sampler": ["6", 0], "sigmas": ["7", 0],
+                           "latent_image": ["5", 1]}}
+    wf["11"] = {"class_type": "VAEDecode",
+                "inputs": {"samples": ["10", 0], "vae": ["3", 0]}}
+    wf["12"] = {"class_type": "VAEDecodeAudio",
+                "inputs": {"samples": ["10", 0], "vae": ["4", 0]}}
+    wf["13"] = {"class_type": "CreateVideo",
+                "inputs": {"images": ["11", 0], "audio": ["12", 0], "fps": fps}}
+    wf["14"] = {"class_type": "SaveVideo",
+                "inputs": {"video": ["13", 0], "filename_prefix": "h3_shot",
+                           "format": "mp4", "codec": "h264"}}
     return wf
 
 

@@ -1,0 +1,10 @@
+id: dahlia_voice
+engine: qwen3_tts
+mode: designed
+speaker: 'null'
+voice_description: Bright, feminine contralto; smooth, velvety texture with a slight
+  rasp when speaking intensely. Delivery is measured and deliberate—never rushed unless
+  combat dictates it. Imagine the controlled cadence of a seasoned theatre actor who
+  has seen too much gore, dripping with barely concealed contempt.
+speed: 1.0
+pitch: 0.0

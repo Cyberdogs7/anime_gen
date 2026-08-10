@@ -72,13 +72,16 @@
   .muted { color:var(--dim); }
   .ep-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); }
   .ep-row .spacer { flex:1; }
+  .ep-tabs { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 16px; }
+  .ep-tabs .tab { border:1px solid var(--line); }
+  .ep-tabs .tab.active { background:var(--accent); color:#0d0f13; font-weight:600; }
   .rev { border-left:3px solid var(--line); margin:8px 0; padding:6px 10px; background:#161a21; border-radius:4px; }
   .rev.fail { border-color:var(--bad); } .rev.pass { border-color:var(--ok); }
   .rev b { font-size:12px; }
   .hide { display:none; }
   .flash { position:fixed; right:16px; bottom:16px; background:#262b35; border:1px solid var(--line);
            border-radius:8px; padding:10px 14px; max-width:420px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,.5); }
-  .busybar { position:fixed; top:0; left:0; right:0; z-index:40; background:var(--warn); color:#0d0f13;
+  .busybar { background:var(--warn); color:#0d0f13;
              text-align:center; padding:8px; font-weight:600; }
   .liveout { position:fixed; bottom:0; left:0; right:0; z-index:39; max-height:160px; overflow:auto;
              background:#10141b; color:#cfd6e0; border-top:1px solid var(--line);
@@ -97,6 +100,7 @@
 </style>
 </head>
 <body>
+<div id="busy" class="hide busybar"></div>
 <header>
   <h1>Studio · human approval &amp; review</h1>
   <select id="showSel"></select>
@@ -108,7 +112,6 @@
     <div class="tab" id="tab-story" onclick="showTab('story')">Story</div>
   </div>
 </header>
-<div id="busy" class="hide busybar"></div>
 <div id="liveout" class="hide liveout"></div>
 <main>
   <div id="view-setup"></div>
@@ -130,7 +133,7 @@
   </div>
 </div>
 <script>
-let SHOW = "", EPISODES = [];
+let SHOW = "", EPISODES = [], CUR_EP = "";
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -298,6 +301,22 @@ async function doReject(step, char) {
             "Rejected — regenerating with your notes (may take 1–3 min)…");
 }
 
+async function doRejectScene(sid) {
+  const notes = askNotes(); if (notes === null) return;
+  const box = [...document.querySelectorAll(".scene")]
+    .find(el => el.querySelector("b") && el.querySelector("b").textContent === sid);
+  if (box) {
+    const holder = document.createElement("div");
+    holder.className = "kv muted";
+    holder.textContent = "Regenerating scene image…";
+    box.querySelectorAll("img.scene-ref").forEach(i => i.remove());
+    box.querySelectorAll(".actions").forEach(a => a.remove());
+    box.appendChild(holder);
+  }
+  await act(`/api/show/${SHOW}/reject`, { step: "scene", char: sid, notes },
+            "Rejected — regenerating scene image (may take 1–3 min)…");
+}
+
 // ---------------- Setup (Gate 0) ----------------
 // Human-readable rendering of dicts/lists instead of raw JSON.
 function pretty(v, depth) {
@@ -372,7 +391,12 @@ async function loadSetup() {
   for (const [k, v] of Object.entries(d.scenes || {})) {
     const imgs = (v.ref_images || []).map(f =>
       `<img class="scene-ref" alt="${esc(k)}" src="/api/show/${SHOW}/media/scenes/${esc(k)}/refs/${esc(f)}?v=${Date.now()}">`).join("");
-    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")}${imgs}</div>`;
+    const rejectBtn = (v.ref_images || []).length
+      ? `<button class="btn ghost" onclick="doRejectScene('${esc(k)}')">Reject image</button>`
+      : "";
+    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")}${imgs}` +
+      (rejectBtn ? `<div class="actions" style="border-top:0;padding:4px 0 0">${rejectBtn}</div>` : "") +
+      `</div>`;
   }
   sceneHtml += '</div>';
   html += card("Scenes", badge(d.bootstrap.scenes.status),
@@ -431,6 +455,16 @@ async function loadStory() {
   const d = await api(`/api/show/${SHOW}/episodes`);
   EPISODES = d.episodes || [];
   if (!EPISODES.length) { el.innerHTML = '<p class="muted">no episodes yet — generate a script first</p>'; return; }
+  if (!CUR_EP || !EPISODES.find(e => e.episode === CUR_EP)) CUR_EP = EPISODES[EPISODES.length - 1].episode;
+  // Episode selector tabs.
+  let tabs = '<div class="ep-tabs">';
+  for (const ep of EPISODES) {
+    const st = ep.story || {};
+    tabs += `<div class="tab ${ep.episode === CUR_EP ? "active" : ""}" onclick="selectEpisode('${esc(ep.episode)}')">` +
+            `${esc(ep.episode)} ${badge(st.status || "pending")}</div>`;
+  }
+  tabs += '</div>';
+  // Compact episode wall (status + approve/reject per episode).
   let html = '<div class="card"><div class="body">';
   for (const ep of EPISODES) {
     const st = ep.story || {};
@@ -444,14 +478,19 @@ async function loadStory() {
     </div>`;
   }
   html += '</div></div>';
+  // Only the selected episode's full storyboard detail.
   let anyRunning = false;
-  for (const ep of EPISODES) {
-    const d2 = await api(`/api/show/${SHOW}/ep/${ep.episode}`);
-    if ((d2.storyboard || {}).state === "running") anyRunning = true;
-    html += episodeStoryboard(ep, d2);
-  }
-  el.innerHTML = html;
+  const d2 = await api(`/api/show/${SHOW}/ep/${CUR_EP}`);
+  if ((d2.storyboard || {}).state === "running") anyRunning = true;
+  html += episodeStoryboard(EPISODES.find(e => e.episode === CUR_EP), d2);
+  el.innerHTML = tabs + html;
   if (anyRunning) setTimeout(loadStory, 4000);
+}
+
+function selectEpisode(ep) {
+  if (CUR_EP === ep) return;
+  CUR_EP = ep;
+  loadStory();
 }
 
 function episodeStoryboard(ep, d) {
@@ -466,10 +505,18 @@ function episodeStoryboard(ep, d) {
   let h = "";
   const plan = d.plan || {};
   if (plan && plan.status) {
+    const planScenes = (plan.scenes || []).map(sc =>
+      `<div class="scene"><b>${esc(sc.id || "")}</b> — ${esc(sc.location || "")} ` +
+      `<span class="muted">${esc(sc.time_of_day || "")}</span>` +
+      `<div class="kv">${esc(sc.summary || "")}</div>` +
+      ((sc.beats || []).length ? `<div class="kv muted">• ${esc((sc.beats || []).join(" • "))}</div>` : "") +
+      ((sc.characters || []).length ? `<div class="kv muted">Cast: ${esc((sc.characters || []).join(", "))}</div>` : "") +
+      `</div>`).join("");
     h += card("Episode outline", badge(plan.status),
       `<div class="ep-summary"><b>Plot:</b> ${esc(plan.plot || plan.summary || "")}</div>` +
       `<div class="kv muted">Characters: ${esc((plan.characters || []).join(", ") || "—")}</div>` +
-      (plan.rejected_notes ? `<div class="kv">Rejected: ${esc(plan.rejected_notes)}</div>` : ""),
+      (plan.rejected_notes ? `<div class="kv">Rejected: ${esc(plan.rejected_notes)}</div>` : "") +
+      (planScenes ? `<div class="scenes">${planScenes}</div>` : ""),
       plan.status === "pending"
         ? `<div class="actions"><button class="btn approve" onclick="doPlanApprove('${esc(d.episode)}')">Approve outline</button>` +
           `<button class="btn reject" onclick="doPlanReject('${esc(d.episode)}')">Reject outline</button></div>`

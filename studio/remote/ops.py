@@ -14,8 +14,9 @@ import shutil
 import socket
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ..config import get_config
 
@@ -278,28 +279,141 @@ class ServiceOps:
             return ComfyClient(primary), self._stop_krea2
         return fb, None
 
+    def _beast3_llm_host(self) -> str:
+        """Host:port of the fallback LLM (Beast3), from llm.fallback_url."""
+        url = self.cfg.get("llm", "fallback_url", "") or ""
+        return url.rstrip("/") if url else ""
+
+    def _evict_llm(self, host: str | None = None) -> bool:
+        """Unload the LLM on a node so image/video gen owns the GPU.
+
+        Mutually-exclusive-GPU rule: no LLM while krea2/H3 renders. When ``host``
+        is the local LM Studio the ``lms`` CLI unloads it directly; the Beast3
+        fallback LLM (which shares Beast3's GPU with the krea2 fallback) is
+        unloaded over WinRM. Best-effort: a failure only logs and continues.
+        """
+        target = host or "local"
+        try:
+            if target == "local":
+                rc, out = _run([self.lms, "unload", "--all"], timeout=120)
+                return rc == 0
+            # Remote (Beast3) — use the cached WinRM credential, mirroring
+            # how the handoff drives Beast3's LM Studio.
+            import subprocess as _sp
+            cred_xml = os.environ.get("BEAST3_CRED_XML") or os.path.join(
+                os.environ.get("TEMP", ""), "beast3-cred.xml")
+            if not os.path.isfile(cred_xml):
+                log.warning("[gpu] LLM evict: no Beast3 credential at %s", cred_xml)
+                return False
+            ps = ("$c = Import-Clixml '%s'; $s = New-PSSession -ComputerName "
+                  "192.168.50.173 -Credential $c -ErrorAction Stop; "
+                  "Invoke-Command -Session $s -ScriptBlock { "
+                  "& 'C:\\anime-studio\\portable\\lmstudio\\resources\\app\\.webpack\\lms.exe' "
+                  "unload --all 2>&1 }; Remove-PSSession $s" % cred_xml.replace("'", "''"))
+            _sp.run(["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True, timeout=180)
+            return True
+        except Exception as exc:
+            log.warning("[gpu] LLM evict failed on %s: %s", target, exc)
+            return False
+
+    def _reload_llm(self, host: str | None = None) -> bool:
+        """Reload the showrunner model on a node after image/video gen (best-effort)."""
+        target = host or "local"
+        model = (self.cfg.get("env", "lmstudio", {}).get("models", {}) or {}).get(
+            "showrunner") or (self.cfg.get("llm", "model") or "")
+        if not model:
+            return True
+        try:
+            if target == "local":
+                rc, _ = _run([self.lms, "load", model, "--gpu", "max",
+                              "-c", str(self._lms_ctx()), "-y"], timeout=600)
+                return rc == 0
+            import subprocess as _sp
+            cred_xml = os.environ.get("BEAST3_CRED_XML") or os.path.join(
+                os.environ.get("TEMP", ""), "beast3-cred.xml")
+            if not os.path.isfile(cred_xml):
+                return False
+            ps = ("$c = Import-Clixml '%s'; $s = New-PSSession -ComputerName "
+                  "192.168.50.173 -Credential $c -ErrorAction Stop; "
+                  "Invoke-Command -Session $s -ScriptBlock { "
+                  "& 'C:\\anime-studio\\portable\\lmstudio\\resources\\app\\.webpack\\lms.exe' "
+                  "load '%s' --gpu max -c %d -y 2>&1 }; Remove-PSSession $s"
+                  % (cred_xml.replace("'", "''"), model.replace("'", "''"), self._lms_ctx()))
+            _sp.run(["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True, timeout=600)
+            return True
+        except Exception as exc:
+            log.warning("[gpu] LLM reload failed on %s: %s", target, exc)
+            return False
+
+    @contextmanager
+    def krea2_gpu(self, evict_remote: bool = True) -> Iterator[ComfyClient]:
+        """Exclusive-GPU context for one krea2 image-generation session.
+
+        Picks the krea2 instance (primary BEAST5 or Beast3 fallback) and, before
+        yielding the client, unloads the LLM that shares the target GPU so image
+        gen owns all VRAM. On exit the LLM is reloaded. Yields the ComfyClient.
+        """
+        from ..clients.comfy import ComfyClient as _CC
+        client, stop = self._krea2_client()
+        remote = evict_remote and "127.0.0.1" not in (client.base_url or "127.0.0.1")
+        host = "beast3" if remote else "local"
+        self._evict_llm(host)
+        try:
+            yield client
+        finally:
+            if stop:
+                stop()
+            self._reload_llm(host)
+
+    @contextmanager
+    def krea2_batch(self, evict_remote: bool = True) -> Iterator[None]:
+        """Exclusive-GPU context spanning a whole batch of krea2 generations.
+
+        Unloads the LLM on the target GPU once up front (so a long batch owns
+        all VRAM) and reloads it when the batch finishes. ``evict_remote=False``
+        skips the Beast3 fallback eviction for callers that stay local.
+        """
+        # Determine whether this session will use the Beast3 fallback: the krea2
+        # primary is down (not responding) -> fallback -> shares Beast3's GPU
+        # with the fallback LLM.
+        k = self._comfy_cfg("krea2")
+        primary = k.get("url", "")
+        remote = False
+        try:
+            if primary and self._comfy_up(primary):
+                remote = False
+            else:
+                remote = bool(k.get("fallback_url"))
+        except Exception:
+            remote = bool(k.get("fallback_url"))
+        host = "beast3" if (remote and evict_remote) else "local"
+        self._evict_llm(host)
+        try:
+            yield
+        finally:
+            self._reload_llm(host)
+
     def generate_image(self, prompt: str, seed: int = 0, aspect_ratio: str = "16:9",
                        out_path: str = "", use_lora: bool = False) -> dict[str, Any]:
         import random
 
         from ..comfy_workflows import generate_keyframe, load_workflow
 
-        client, stop = self._krea2_client()
         wf_path = self.cfg.workflows_dir / "image_keyframe.json"
         if not wf_path.exists():
             return {"ok": False, "detail": f"workflow not found: {wf_path}"}
         out = Path(out_path) if out_path else self.cfg.root / "cache" / "krea2.png"
         try:
-            seed = seed or random.randint(0, 2**63)
-            final = generate_keyframe(client, load_workflow(wf_path), prompt, seed, out,
-                                      aspect_ratio=aspect_ratio, use_lora=use_lora)
-            return {"ok": True, "detail": f"generated {final} (seed={seed}) via {client.base_url}",
-                    "path": str(final), "seed": seed, "host": client.base_url}
+            with self.krea2_gpu() as client:
+                seed = seed or random.randint(0, 2**63)
+                final = generate_keyframe(client, load_workflow(wf_path), prompt, seed, out,
+                                          aspect_ratio=aspect_ratio, use_lora=use_lora)
+                return {"ok": True, "detail": f"generated {final} (seed={seed}) via {client.base_url}",
+                        "path": str(final), "seed": seed, "host": client.base_url}
         except Exception as exc:
             return {"ok": False, "detail": str(exc)}
-        finally:
-            if stop:
-                stop()
 
     def verify(self) -> dict[str, Any]:
         from ..verify import run_checks

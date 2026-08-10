@@ -223,10 +223,32 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
                 st["complete"] = status == "pending"
             _regenerate(lambda: chain.generate_scenes(feedback=notes),
                         SCENE_REGISTRY_REJECTED, SCENE_REGISTRY_PENDING, mark_scenes)
+        elif step == "scene":
+            # Reject only ONE scene's reference image; keep the rest of the
+            # registry. Revise the scene's setting_prompt from the notes, clear
+            # its ref dir, and regenerate just that image.
+            import yaml
+            sid = char
+            p = show.scenes_dir / f"{sid}.yaml"
+            if not p.exists():
+                raise ValueError(f"no scene named '{sid}'")
+            scene = dict(yaml.safe_load(p.read_text(encoding="utf-8")) or {})
+            if notes.strip():
+                chain.revise_scene_setting(scene, sid, notes)
+            rd = show.scenes_dir / sid / "refs"
+            if rd.exists():
+                for f in list(rd.iterdir()):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            chain.bootstrap_scene_ref(scene, sid)
         else:
             raise ValueError(f"unknown step '{step}' ({'|'.join(GATE_STEPS)})")
     finally:
         ACTIVITY.pop(show_id, None)
+    if step == "scene":
+        return [f"scene {char} image rejected; regenerating from your notes"]
     return [f"{label} rejected; regenerated from notes"]
 
 

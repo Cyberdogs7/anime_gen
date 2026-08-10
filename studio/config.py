@@ -30,6 +30,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "default_shot_duration_s": 10.125,
         "insert_shot_duration_s": 5.167,
         "hero_best_of": 2,
+        "auto_start_episode": True,  # hands-free: reconcile starts the next episode once the latest is complete
     },
     "bus": {
         "provider": "memory",  # memory | redis

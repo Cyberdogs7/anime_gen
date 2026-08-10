@@ -154,12 +154,25 @@ class GPUManager:
 
     def _unload_comfyui(self) -> None:
         inst = self._comfy_cfg()
-        port = str(int(inst.get("port", 8188)))
-        proc = self._comfy_procs.get(port)
+        port = int(inst.get("port", 8188))
+        proc = self._comfy_procs.pop(str(port), None)
         if proc and proc.poll() is None:
-            proc.terminate()
-        self._comfy_procs.pop(port, None)
-        # If we didn't start it, leave it running (matches LanguageLearner behavior).
+            # Kill the whole tree: the `cmd /c run_*.bat` wrapper spawns python
+            # as a child, so a bare terminate() leaves ComfyUI alive on the GPU.
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        # With manage_lifecycle we own the instance: also stop one we didn't
+        # start (e.g. a manual launch), so release() really frees the GPU.
+        if bool(self.cfg.get("comfy", "manage_lifecycle", True)) and _port_open(port):
+            out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                 text=True, timeout=30).stdout
+            for line in out.splitlines():
+                if f":{port} " in line and "LISTENING" in line.upper():
+                    pid = line.strip().split()[-1]
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                                   capture_output=True, timeout=30)
+                    break
+        time.sleep(1)
 
     # ---- acquire / release ----
 

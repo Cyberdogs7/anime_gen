@@ -1,0 +1,46 @@
+{
+  "engine_description": "This engine drives 'Blade's Bedlam,' a gritty, action-packed romantic survival anime set in a rain-drenched mega-city choked with bio-mechs. The tone is relentlessly tense and witty, balancing hyper-competent combat sequences with high-stakes romantic/ecchi tension centered around Blade, the mercenary anchor, and the four fiercely competitive armorer-mercs: Lily, Ivy, Rose, and Dahlia. Every episode must feel like a desperate dance between life-or-death survival and intense interpersonal rivalry.",
+  "critical_rules": [
+    "**ABSOLUTE DIRECTOR CONSTRAINT:** During major conflicts, characters MUST operate as a unified tactical unit against the enemy. While internal sniping is encouraged in downtime, during combat sequences (especially when facing overwhelming bio-mech swarms), the focus must be on synergistic action; no character can afford to prioritize personal glory over collective survival.",
+    "**ELASTIC STATUS QUO:** The general state of Blade's precarious life—being hunted by corporate interests and constantly indebted/protected by his entourage—must remain stable. Change should be earned through high-stakes conflict or emotional breakthroughs, not incidental events.",
+    "**BOUNDED PROGRESSION:** Progress on the main plotline ('Blade's Romance') must involve a measurable shift in relational dynamics (e.g., Lily and Ivy have a direct challenge that forces them to respect each other’s engineering prowess; Rose reveals a tactical advantage to Dahlia). Do not allow events to simply *happen* without consequence.",
+    "**CHARACTER INTEGRITY:** Blade remains the emotionally guarded core, reacting primarily through weary competence or sudden bursts of protective aggression. The four women must maintain their distinct competitive flavors (e.g., Lily = technical perfectionism; Ivy = aggressive adaptability; Rose = strategic calculation; Dahlia = raw, passionate drive)."
+  ],
+  "structure": {
+    "series_bible": "{{SERIES_BIBLE_JSON}}",
+    "state_tracker": {
+      "current_episode_number": "{{EPISODE_NUMBER}}",
+      "active_plotline": "{{ACTIVE_PLOTLINE_DATA}}",
+      "dormant_plotline_to_tease": "{{DORMANT_PLOTLINE_DATA}}",
+      "cooling_plotlines": "{{COOLING_PLOTLINES_LIST}}"
+    },
+    "episode_history": "{{RECENT_EPISODES_SUMMARY_LOG}}"
+  },
+  "user_prompt": "Generate the full canon episode outline for Blade's Bedlam based on the provided context. The narrative must be tight, highly visual, and immediately engaging.\n\n**Threat of the Week (ToTW):** {{GENERATED_THREAT_OF_THE_WEEK}} (Must be a significant threat requiring more than just standard merc work; it should challenge the current active plotline focus).\n\n**Tactical/Technical Focus:** {{GENERATED_TACTICAL_FOCUS}} (e.g., 'Countering high-frequency sonic attacks with adaptive dampening fields' or 'Utilizing environmental hazards in a close-quarters ambush').\n\n**Plotline Integration Requirement:** The episode MUST feature a significant beat that directly advances the Active Plotline ({{ACTIVE_PLOTLINE_DATA}}), and it MUST include a minor scene where the Dormant Plotline ({{DORMANT_PLOTLINE_DATA}}) is referenced or foreshadowed.\n\n**Format Requirements:**\n1. **Length:** 6 to 12 distinct scenes.\n2. **Location Variety:** Vary locations; no more than two consecutive scenes can occur in the same named location.\n3. **Scene Arc:** Each scene must have a clear mini-arc: Setup $\\rightarrow$ Change $\\rightarrow$ Consequence.\n4. **Act Structure:** Must follow Hook (S01) $\\rightarrow$ Rising Action/Alternating Beats (S02-Sx) $\\rightarrow$ Climax (Sx+1) $\\rightarrow$ Resolution/Cooldown (Sx+2/Final).\n5. **Plot Summary:** Provide one coherent paragraph summarizing the entire episode's narrative arc.\n\n**Return ONLY a valid JSON object conforming to the schema below, ensuring all fields are populated with generated content.**",
+  "output_schema": {
+    "episode": "{{GENERATED_EPISODE_NUMBER}}",
+    "title": "{{GENERATED_TITLE}}",
+    "threat_of_the_week": "{{GENERATED_THREAT_OF_THE_WEEK}}",
+    "plot": "[One paragraph prose summary of the episode's entire narrative arc.]",
+    "characters": ["Blade", "Lily", "Ivy", "Rose", "Dahlia", "... (other relevant characters)"],
+    "plotline_updates": {
+      "active_plotline_progress": "[Specific beat description detailing how {{ACTIVE_PLOTLINE_DATA}} moved forward. E.g., 'Lily and Ivy successfully synchronized their armor plating during the ambush, validating Lily's structural integrity theory against Ivy’s kinetic dampeners.']",
+      "dormant_plotline_beat": "[Specific foreshadowing/revelation regarding {{DORMANT_PLOTLINE_DATA}}. E.g., 'Rose subtly altered her targeting parameters mid-fight to account for Dahlia's undisclosed strength augmentation, hinting at a secret tech upgrade.']"
+    },
+    "scenes": [
+      {
+        "id": "s01",
+        "location": "[Distinct Named Location from Bible/Registry]",
+        "time_of_day": "[Dawn/Mid-Day/Dusk/Night]",
+        "summary": "[One sentence describing the scene's core event.]",
+        "characters": ["Blade", "Lily", "..."],
+        "beats": [
+          "[Beat 1: Setup - What is happening initially?]",
+          "[Beat 2: Change - What shifts or occurs?]",
+          "[Beat 3: Consequence - How does this affect the next moment/scene?]"
+        ]
+      },
+      // ... (Continue for S02 through to S12, ensuring location variation and arc progression)
+    ]
+  }
+}

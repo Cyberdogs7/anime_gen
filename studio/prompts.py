@@ -520,6 +520,25 @@ def revise_appearance_prompt(current: str, feedback: str) -> str:
     )
 
 
+def revise_scene_setting_prompt(current: str, feedback: str) -> str:
+    """Rewrite ONLY a scene's setting_prompt from director feedback.
+
+    A scene-image rejection must touch only the scene's image prompt. The text
+    drives Krea 2 background generation, so it describes the location and
+    environment only — never characters.
+    """
+    return (
+        "Revise ONLY the scene's setting prompt below in response to the "
+        "director's feedback. This text drives image generation for a background "
+        "still, so describe the location and environment only, never characters. "
+        "Keep the parts the feedback did not flag; change only what it asks for. "
+        "Reply with JSON containing exactly one key: "
+        "{\"setting_prompt\": \"...\"}.\n\n"
+        f"CURRENT SETTING PROMPT:\n{current}\n\n"
+        f"DIRECTOR'S FEEDBACK:\n{feedback}"
+    )
+
+
 def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, Any],
                         names: list[str], target: int, current_plan: dict[str, Any] | None = None,
                         feedback: str = "", director_constraints: list[str] | None = None,
@@ -534,6 +553,14 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
         "threat_of_the_week": "Brief description of the episodic hazard/enemy",
         "plot": "one paragraph: the full story of this episode from setup to resolution",
         "characters": ["EXACT names of the characters who appear"],
+        "scenes": [{
+            "id": "s01",
+            "location": "location name",
+            "time_of_day": "str",
+            "summary": "one sentence: what happens in this scene",
+            "characters": ["EXACT character names present"],
+            "beats": ["2-4 one-sentence story beats for this scene"],
+        }],
         "plotline_updates": {
             "active_plotline_progress": "How the active plotline moved forward",
             "dormant_plotline_beat": "The minor tease included for the dormant plotline",
@@ -698,9 +725,25 @@ def story_engine_architect_prompt(bible: dict[str, Any]) -> str:
         "   <episode_history>{{RECENT_EPISODES_SUMMARY_LOG}}</episode_history>\n"
         "4. A <user_prompt> with SHOW-SPECIFIC episode-generation steps: a Threat of the "
         "Week suited to this world, a tactical/technical focus, plotline integration, "
-        "format requirements — and a 'Return ONLY a valid JSON object' schema with keys: "
-        "episode, title, threat_of_the_week, plot, characters, plotline_updates "
-        "(active_plotline_progress, dormant_plotline_beat).\n\n"
+        "format requirements — and a 'Return ONLY a valid JSON object' schema. The schema "
+        "MUST include these keys: episode, title, threat_of_the_week, plot, characters, "
+        "plotline_updates (active_plotline_progress, dormant_plotline_beat), "
+        "AND a SCENE-BY-SCENE OUTLINE key 'scenes' — an array (one entry per scene) with "
+        "keys: id ('s01','s02',…), location, time_of_day, summary (one sentence: what "
+        "happens in this scene), characters (exact names), beats (2-4 one-sentence story "
+        "beats for the scene).\n"
+        "The scenes array MUST be a FULL-EPISODE structure, not one continuous action "
+        "sequence. The template must instruct the model to:\n"
+        "  - Use 6-12 scenes and VARY the location: no more than 2 consecutive scenes in "
+        "    the same place, and every scene's 'location' must be a distinct, named place "
+        "    from the series bible/scene registry (do not suffix the same location).\n"
+        "  - Shape an act arc: an opening hook scene, rising-middle scenes that alternate "
+        "    action with quieter character/dialogue beats (planning, confrontation, "
+        "    romance/ecchi beats), a climax scene, and a distinct resolution/cool-down "
+        "    scene in a new location.\n"
+        "  - Each scene pushes the plot forward with its own mini-arc (setup -> change -> "
+        "    consequence), not a frame-by-frame replay of the same fight.\n"
+        "'plot' remains a one-paragraph prose summary of the whole episode.\n\n"
         "HARD RULES FOR THE TEMPLATE:\n"
         "- Do NOT embed the bible's content (world text, cast, plotline summaries) "
         "directly in the template. Refer to the bible ONLY via the {{SERIES_BIBLE_JSON}} "
@@ -823,3 +866,40 @@ def revision_prompt(script: dict[str, Any], review_results: dict[str, Any]) -> s
         "\n\nCURRENT SCRIPT:\n" + json.dumps(script) +
         "\n\nReturn ONLY valid JSON matching the same schema."
     )
+
+
+def h3_rewrite_prompt(llm, base_prompt: str, shot: dict[str, Any]) -> str:
+    """H3-Context-IR style prompt rewriter: expand a shot's deterministic prompt
+    into a rich production brief H3 follows well (dialogue, beats, sound).
+
+    `llm` is an LMStudioClient; returns a plain-text prompt (no JSON). The local
+    model runs as GGUF/NF4 off the primary GPU, so it does not compete with the
+    H3 render for VRAM.
+    """
+    system = (
+        "You rewrite video-generation prompts for MiniMax H3, an omni-modal "
+        "model that renders video + native stereo audio together. You keep every "
+        "reference tag (<Picture N>, <Audio N>) exactly as given, expand the shot "
+        "into cinematic detail (composition, lighting, camera, motion, character "
+        "placement), and write dialogue ONLY inside <d>[English] ...</d> tokens "
+        "bound to the speaking character's tag. Keep the whole thing as one "
+        "cohesive prompt, 250-500 words, plain text."
+    )
+    user = (
+        "Rewrite this H3 shot prompt into a richer production brief. Preserve the "
+        "reference tags verbatim and keep the exact dialogue words. Return ONLY "
+        "the rewritten prompt text.\n\n"
+        f"SHOT PROMPT:\n{base_prompt}\n\n"
+        f"SHOT ACTION:\n{(shot.get('action') or '')}\n"
+        f"SHOT CAMERA:\n{(shot.get('camera') or '')}"
+    )
+    try:
+        out = llm.chat([{"role": "system", "content": system},
+                        {"role": "user", "content": user}],
+                       temperature=0.7, max_tokens=1600)
+        rewritten = (out or "").strip()
+        if len(rewritten) > 120:
+            return rewritten
+    except Exception:
+        pass
+    return base_prompt

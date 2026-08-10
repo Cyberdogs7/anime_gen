@@ -17,6 +17,26 @@ def _fmt_ts(seconds: float) -> str:
     return f"{mm:02d}:{ss:02d}.{mmm:03d}"
 
 
+def _dialogue_fragment(dialogue: Any) -> str:
+    """Render one dialogue entry as an H3 native speech token.
+
+    String form (legacy/narration) wraps in <d> so it is still spoken; list
+    entries may carry a subject attribution so the model knows WHO speaks.
+    """
+    if isinstance(dialogue, list):
+        out: list[str] = []
+        for entry in dialogue:
+            line = (entry.get("line") or "").strip()
+            if not line:
+                continue
+            subj = (entry.get("subject") or "").strip()
+            frag = f"<d>[English] {line}</d>"
+            out.append(f"{subj} speaks, {frag}" if subj else frag)
+        return ", ".join(out)
+    line = str(dialogue or "").strip()
+    return f"<d>[English] {line}</d>" if line else ""
+
+
 def compile_h3_prompt(
     global_description: str,
     shots: list[dict[str, Any]],
@@ -32,6 +52,11 @@ def compile_h3_prompt(
       increasing MM:SS.mmm timestamp computed from cumulative durations.
     - ``subjects`` is a list of tokens already in `<Subject N>` form that the
       shot should reference.
+    - ``dialogue`` may be a string (treated as narration) OR a list of
+      {"subject": "<Subject N>" or "", "line": "..."} dicts. In list form each
+      line is emitted as a native speech token ``<d>[English] line</d>`` so H3
+      synthesizes the spoken line (with lip sync) instead of reading it as
+      narration.
     """
     lines: list[str] = []
 
@@ -65,9 +90,9 @@ def compile_h3_prompt(
         subjects = shot.get("subjects") or []
         if subjects:
             parts.append(", featuring " + ", ".join(subjects))
-        dialogue = shot.get("dialogue", "").strip()
+        dialogue = _dialogue_fragment(shot.get("dialogue", ""))
         if dialogue:
-            parts.append(f', "{dialogue}"')
+            parts.append(f", {dialogue}")
         lines.append("".join(parts))
         cursor += dur
 

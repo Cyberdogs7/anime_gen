@@ -1,0 +1,9 @@
+id: rose_voice
+engine: qwen3_tts
+mode: designed
+speaker: 'null'
+voice_description: Mid-to-low register female voice; smooth, clear texture with a
+  slight underlying grit (like polished steel); delivery is controlled and deliberate.
+  Think of the tone of a highly efficient operative—never rushed unless necessary.
+speed: 1.0
+pitch: 0.0

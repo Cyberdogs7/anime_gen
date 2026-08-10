@@ -15,7 +15,7 @@ checkpoints:
   krea2_lora: "fedor_bypass.safetensors"
   h3_fl2va: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
   h3_ref2va: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-  h3_clip: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+  h3_clip: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
   h3_turbo_lora: "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors"
   h3_video_vae: "minimax_h3_video_vae_fp16.safetensors"
   h3_audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
@@ -24,10 +24,16 @@ manage_lifecycle: true     # serve/renderer start & stop their local ComfyUI
 startup_retries: 30
 fp32_vae: true             # H3 grey/NaN fix; see DESIGN.md §19
 
-# H3 sampling defaults (validated A/B: Spectrum + res_multistep at 8 steps,
-# no visual difference vs sa_solver, ~25% faster). See cache/ab_*.mp4.
+# H3 sampling defaults. Measured A/B at 8 steps / 864x480:
+#   speed-ups OFF (Spectrum + FBC): ~395s  <-- FASTEST
+#   speed-ups ON:                    ~885s  (2.2x SLOWER at 8 steps)
+# FirstBlockCache gains nothing below ~20 steps; Spectrum's forecast overhead
+# dominates at 8 steps. Keep both OFF.
 h3:
-  spectrum: true           # SpectrumApplyMiniMaxH3 forecast acceleration
-  first_block_cache: false # FirstBlockCache (no gain at 8 steps; needs ~20 steps)
-  sampler: "res_multistep" # Spectrum-compatible; "sa_solver" otherwise
+  spectrum: false            # OFF — slower at 8 steps (measured)
+  first_block_cache: false   # OFF — no gain below ~20 steps (measured)
+  sampler: "res_multistep"
+  scheduler: "simple"
   steps: 8
+  width: 864                 # 16:9 @ 0.4 MP -> 864x480
+  height: 480

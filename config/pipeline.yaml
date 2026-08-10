@@ -10,6 +10,7 @@ fallback_local: true       # if the SMB share is down, run image/TTS/assembly on
 
 resolution: [1344, 768]    # 16:9 native H3 canvas (768 short edge)
 fps: 24
+h3_rewrite_prompt: false    # true: run shot prompts through the local LLM (H3-Context-IR style rewriter) before render
 default_shot_duration_s: 10.125   # grid k=14 (243 frames)
 insert_shot_duration_s: 5.167     # grid k=7 (124 frames)
 hero_best_of: 2                   # hero shots render N seeds, keep best composite

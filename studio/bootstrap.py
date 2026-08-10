@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,113 @@ STEPS = ("concept", "bible", "characters", "scenes")
 # Written by BootstrapChain._report while a synchronous approve/reject request
 # is running; cleared by approval.py once the chain finishes.
 ACTIVITY: dict[str, dict[str, Any]] = {}
+
+# Per-show locks: the Gate-0 chain is resumable and self-healing, so
+# approve/reject clicks and background reconcile runs must never interleave.
+# RLock: run_show_locked() may wrap an advance() that itself re-acquires.
+_show_locks: dict[str, threading.RLock] = {}
+_show_locks_guard = threading.Lock()
+_reconciling: set[str] = set()
+
+
+def _show_lock(show_id: str) -> threading.RLock:
+    with _show_locks_guard:
+        lock = _show_locks.get(show_id)
+        if lock is None:
+            lock = threading.RLock()
+            _show_locks[show_id] = lock
+        return lock
+
+
+def run_show_locked(show_id: str, fn) -> Any:
+    """Run fn under the show's Gate-0 lock (blocks until free)."""
+    with _show_lock(show_id):
+        return fn()
+
+
+def _missing_scene_refs(show: Show) -> bool:
+    """True when any scene in the registry still lacks its location ref image.
+
+    Scene refs are non-gating asset work (they must land for the dashboard to
+    show locations while the registry awaits approval). A stub marker counts as
+    done so a missing krea2 instance can't cause an infinite retry loop.
+    """
+    for sid in show.list_scenes():
+        rd = show.scenes_dir / sid / "refs"
+        if (rd / f"{sid}_ref_01.png").exists():
+            continue
+        if (rd / "refs.json").exists():
+            continue
+        return True
+    return False
+
+
+def needs_reconcile(show_id: str, show: Show | None = None) -> bool:
+    """True when the show is incomplete but NOT waiting on a human gate.
+
+    Self-healing signal: if a previous advance() was interrupted (crash /
+    dashboard restart) it left the chain mid-work with no pending artifact.
+    This detects that stuck state so a caller can resume generation.
+    """
+    show = show or Show(show_id)
+    st = show.bootstrap_state()
+    if st.get("complete"):
+        return False
+    if (st.get("concept") or {}).get("status") == "pending":
+        return False
+    if (st.get("bible") or {}).get("status") == "pending":
+        return False
+    for ch in st.get("characters", []):
+        if ch.get("proposal") == "pending" or ch.get("voice") == "pending":
+            return False
+    if (st.get("scenes") or {}).get("status") == "pending":
+        # The registry itself awaits the human, but its location ref images are
+        # non-gating asset work — if any are missing, resume generation so the
+        # dashboard can show them for review.
+        return _missing_scene_refs(show)
+    return True
+
+
+def reconcile_show(show_id: str, brief: str = "") -> list[str]:
+    """Resume the Gate-0 chain for a show, as far as approvals allow.
+
+    Idempotent: re-runs advance() from disk state. Steps that already produced
+    artifacts are skipped, interrupted work (e.g. a character whose proposal was
+    written but never registered in bootstrap.json) is picked up. Safe to call
+    on every dashboard load / poll; the per-show lock serializes against user
+    approve/reject actions.
+    """
+    log_ = run_show_locked(show_id, lambda: BootstrapChain(Show(show_id)).advance(brief=brief))
+    return log_
+
+
+def reconcile_if_stalled(show_id: str, brief: str = "") -> bool:
+    """Background self-healing: resume a stuck show, once per show.
+
+    Returns True when a reconcile thread was started. No-op when the show is
+    complete, awaiting a human gate, or already being reconciled.
+    """
+    if show_id in _reconciling:
+        return False
+    try:
+        if not needs_reconcile(show_id):
+            return False
+    except Exception:
+        log.exception("reconcile precheck failed for %s", show_id)
+        return False
+    _reconciling.add(show_id)
+
+    def _run() -> None:
+        try:
+            reconcile_show(show_id, brief)
+        except Exception:
+            log.exception("background reconcile failed for %s", show_id)
+        finally:
+            ACTIVITY.pop(show_id, None)
+            _reconciling.discard(show_id)
+
+    threading.Thread(target=_run, name=f"reconcile-{show_id}", daemon=True).start()
+    return True
 
 
 class BootstrapChain:
@@ -224,6 +332,25 @@ class BootstrapChain:
         self.show.write_character(char)
         return new
 
+    def revise_scene_setting(self, scene: dict[str, Any], sid: str, feedback: str) -> str:
+        """LLM rewrites ONLY a scene's setting_prompt from rejection feedback."""
+        import yaml
+        name = scene.get("name", "") or sid
+        self._report(f"Revising {name}'s setting prompt…")
+        current = (scene.get("setting_prompt") or scene.get("description") or "").strip()
+        profile = self.cfg["show_profile"]
+        system = prompts.showrunner_system(profile, "mature",
+                                           profile.get("baseline", "ranma-1-2"))
+        out = self._ask("showrunner", system,
+                        prompts.revise_scene_setting_prompt(current, feedback))
+        new = ((out or {}).get("setting_prompt") or "").strip() or current
+        scene["setting_prompt"] = new
+        p = self.show.scenes_dir / f"{sid}.yaml"
+        if p.exists():
+            p.write_text(yaml.safe_dump(scene, sort_keys=False, allow_unicode=True),
+                         encoding="utf-8")
+        return new
+
     def bootstrap_voice(self, char: dict[str, Any]) -> None:
         voice = char.get("voice", {})
         name = char.get("name", "") or "character"
@@ -262,12 +389,16 @@ class BootstrapChain:
         Step return codes: True = did work, False = blocked on a human gate,
         None = idle (nothing left to do at that step).
         """
+        with _show_lock(self.show.show_id):
+            return self._advance(brief, max_steps)
+
+    def _advance(self, brief: str = "", max_steps: int = 200) -> list[str]:
         events_log: list[str] = []
         steps = (lambda: self._step_concept(brief, events_log),
                  lambda: self._step_bible(events_log),
                  lambda: self._step_characters(events_log),
-                 lambda: self._step_scenes(events_log),
-                 lambda: self._step_scene_refs(events_log))
+                 lambda: self._step_scene_refs(events_log),
+                 lambda: self._step_scenes(events_log))
         for _ in range(max_steps):
             progressed = False
             blocked = False
@@ -339,6 +470,10 @@ class BootstrapChain:
             if char_state is None:
                 char_state = {"name": name, "proposal": "", "refs": "", "voice": ""}
                 chars.append(char_state)
+                # Write-through: persist the new roster entry BEFORE any
+                # long-running asset work so an interrupted advance() (crash /
+                # restart) never loses it. The chain resumes from disk state.
+                self.show.set_bootstrap_state(st)
 
             def _char():
                 return next((self.show.read_character(c) for c in self.show.list_characters()
@@ -363,6 +498,7 @@ class BootstrapChain:
             if char_state.get("refs") == "":
                 kind = self.bootstrap_refs(char)
                 char_state["refs"] = kind
+                self.show.set_bootstrap_state(st)   # write-through: refs result survives a crash
                 log_.append(f"character {name}: refs ({kind})")
                 did = True
                 if kind == "real":
@@ -371,6 +507,7 @@ class BootstrapChain:
             if char_state.get("voice") == "":
                 self.bootstrap_voice(char)
                 char_state["voice"] = "pending"
+                self.show.set_bootstrap_state(st)   # write-through: voice state survives a crash
                 self._emit(new_event(VOICE_SAMPLE_PENDING, show_id=self.show.show_id,
                                      payload={"char": char.get("id")}))
                 log_.append(f"character {name}: voice sample -> pending")
@@ -419,13 +556,15 @@ class BootstrapChain:
         return True
 
     def _step_scene_refs(self, log_: list[str]) -> bool | None:
-        """Generate a reference image for every scene once the registry is approved.
+        """Generate a reference image for every scene once the registry exists.
 
-        Non-gating: images drop in as they finish; the chain never blocks on them.
+        Runs while the registry is still *pending* (so the human can review the
+        locations on the dashboard) and again after approval. Non-gating: images
+        drop in as they finish; the chain never blocks on them.
         """
         import yaml
         st = self.show.bootstrap_state()
-        if (st.get("scenes", {}) or {}).get("status") != "approved":
+        if not (st.get("scenes", {}) or {}).get("status"):
             return None
         did = False
         for sid in self.show.list_scenes():
@@ -437,30 +576,58 @@ class BootstrapChain:
                                        .read_text(encoding="utf-8")) or {}
             except Exception:
                 continue
-            self.bootstrap_scene_ref(scene, sid)
-            log_.append(f"scene {sid}: ref image")
-            did = True
+            ok = self.bootstrap_scene_ref(scene, sid)
+            if ok:
+                log_.append(f"scene {sid}: ref image")
+                did = True
         return True if did else None
 
-    def bootstrap_scene_ref(self, scene: dict[str, Any], sid: str) -> None:
-        """Generate a location reference image (krea2) for one scene."""
+    def bootstrap_scene_ref(self, scene: dict[str, Any], sid: str) -> bool:
+        """Generate a location reference image (krea2) for one scene.
+
+        Returns True when an image landed (or a stub was recorded so reconcile
+        stops retrying). A stub refs.json prevents an infinite reconcile loop
+        when no krea2 instance is configured or generation is unavailable.
+        """
+        rd = self.show.scenes_dir / sid / "refs"
+        rd.mkdir(parents=True, exist_ok=True)
+        refs_json = rd / "refs.json"
+        if (rd / f"{sid}_ref_01.png").exists():
+            return True
         try:
             from .remote import ServiceOps
             krea2 = self.cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
             if not krea2.get("url"):
-                return
+                refs_json.write_text(
+                    '{"status": "stub", "note": "no krea2 url configured (env.yaml comfyui.krea2.url)"}',
+                    encoding="utf-8")
+                return False
             name = scene.get("name", "") or sid
             setting = (scene.get("setting_prompt") or scene.get("description") or "").strip()
             self._report(f"Generating scene image: {name} (Krea 2)…")
             prompt = (f"Anime location concept art. {setting}".rstrip(" .")
                       + ". Establishing shot, cinematic composition, detailed background "
                         "art, consistent series art style, high quality, no people.")
-            out = self.show.scenes_dir / sid / "refs" / f"{sid}_ref_01.png"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            ServiceOps(self.cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
-                                                out_path=str(out))
+            out = rd / f"{sid}_ref_01.png"
+            res = ServiceOps(self.cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
+                                                      out_path=str(out))
+            if res.get("ok") and out.exists():
+                refs_json.write_text(json.dumps(
+                    {"status": "real", "refs": [out.name], "seed": res.get("seed", 0)},
+                    ensure_ascii=False), encoding="utf-8")
+                return True
+            refs_json.write_text(
+                '{"status": "stub", "note": "krea2 scene ref generation unavailable"}',
+                encoding="utf-8")
         except Exception as exc:
             log.warning("scene ref generation failed for %s: %s", sid, exc)
+            try:
+                refs_json.write_text(
+                    f'{{"status": "stub", "note": "scene ref failed: {exc}"}}',
+                    encoding="utf-8")
+            except Exception:
+                pass
+        return False
 
 
 def _slug(text: str) -> str:

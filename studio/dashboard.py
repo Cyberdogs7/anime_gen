@@ -294,6 +294,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ]})
             return
         if len(parts) == 3 and parts[:2] == ["api", "show"]:
+            # Self-healing: resume a stalled Gate-0 chain OR a stalled episode
+            # pipeline in the background so nothing waits silently on a crash.
+            from .bootstrap import reconcile_if_stalled
+            from .episode_repair import reconcile_episodes_if_stalled
+            reconcile_if_stalled(parts[2])
+            reconcile_episodes_if_stalled(parts[2])
             self._send(200, show_payload(parts[2]))
             return
         if len(parts) >= 5 and parts[:2] == ["api", "show"] and parts[3] == "media":
@@ -307,9 +313,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": "media not found"})
             return
         if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "activity":
-            from .bootstrap import ACTIVITY
+            from .bootstrap import ACTIVITY, reconcile_if_stalled
+            from .episode_repair import reconcile_episodes_if_stalled
             from .storyboard import storyboard_status
             from .render import render_status
+            reconcile_if_stalled(parts[2])
+            reconcile_episodes_if_stalled(parts[2])
             a = ACTIVITY.get(parts[2])
             sb = storyboard_status(parts[2])
             rd = render_status(parts[2])
@@ -319,10 +328,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if job.get("state") == "running":
                     active = True
                     detail = job.get("detail") or "Working…"
+                    # The job dict only advances during the keyframe loop; the
+                    # ref passes (casting/costume/object) set a fresh, more
+                    # specific ACTIVITY detail — surface it so the user sees
+                    # what is actually rendering.
+                    if a and (time.time() - (a.get("ts") or 0)) < 120 and a.get("detail"):
+                        detail = a["detail"]
                     break
+            # A stale ACTIVITY entry (set by a thread that finished but never
+            # cleared it, or by a crash) must not pin the UI to "active".
             if not active and a:
-                active = True
-                detail = a.get("detail", "Working…")
+                fresh = (time.time() - (a.get("ts") or 0)) < 60
+                if fresh:
+                    active = True
+                    detail = a.get("detail", "Working…")
+                else:
+                    ACTIVITY.pop(parts[2], None)
             self._send(200, {"active": active, "detail": detail, "output": (a or {}).get("output", ""),
                              "storyboard": sb, "render": rd})
             return
@@ -422,6 +443,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     except Exception as exc:
                         ACTIVITY[show_id] = {"detail": f"Scene details failed: {exc}",
                                              "ts": time.time()}
+                    finally:
+                        ACTIVITY.pop(show_id, None)
                 import threading
                 threading.Thread(target=_details, daemon=True).start()
                 return
@@ -447,6 +470,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         except Exception as exc:
                             ACTIVITY[show_id] = {"detail": f"Episode build failed: {exc}",
                                                  "ts": time.time()}
+                        finally:
+                            ACTIVITY.pop(show_id, None)
                     import threading
                     threading.Thread(target=_build, daemon=True).start()
                     return
