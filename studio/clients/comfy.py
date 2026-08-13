@@ -24,8 +24,34 @@ class ComfyClient:
             with httpx.Client(timeout=3.0, headers=self._headers_with()) as client:
                 resp = client.get(f"{self.base_url}/system_stats")
                 return resp.status_code == 200
-        except httpx.HTTPError:
+        except Exception:
             return False
+
+    def queue_busy(self) -> bool:
+        """True when the instance has a running or pending job.
+
+        Used to gate interactive renders (e.g. Qwen-Image-Edit) behind long
+        H3 video renders on the SAME shared ComfyUI: the Qwen model (19 GB)
+        cannot share the 16 GB GPU with an H3 render, and jumping in mid-render
+        silently produces a black frame.
+        """
+        try:
+            with httpx.Client(timeout=5.0, headers=self._headers_with()) as client:
+                resp = client.get(f"{self.base_url}/queue")
+                q = resp.json()
+                return bool(q.get("queue_running") or q.get("queue_pending"))
+        except Exception:
+            return False
+
+    def wait_idle(self, timeout_s: float = 3600.0, poll_interval: float = 5.0) -> bool:
+        """Block until the instance queue is empty. Returns False on timeout."""
+        import time
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if not self.queue_busy():
+                return True
+            time.sleep(poll_interval)
+        return False
 
     def upload_image(self, path: str | Path) -> str:
         """Upload a local image into ComfyUI's input dir; returns the filename for LoadImage."""
@@ -48,10 +74,17 @@ class ComfyClient:
             resp.raise_for_status()
             return resp.json().get("name") or path.name
 
-    def submit(self, workflow: dict) -> str:
-        """POST a workflow graph; returns the prompt_id."""
+    def submit(self, workflow: dict, front: bool = False) -> str:
+        """POST a workflow graph; returns the prompt_id.
+
+        ``front=True`` jumps the new prompt to the FRONT of the queue, ahead of
+        any pending jobs (interactive edits beat long-running video renders).
+        """
+        payload: dict = {"prompt": workflow}
+        if front:
+            payload["front"] = True
         with httpx.Client(timeout=self.timeout, headers=self._headers_with()) as client:
-            resp = client.post(f"{self.base_url}/prompt", json={"prompt": workflow})
+            resp = client.post(f"{self.base_url}/prompt", json=payload)
             resp.raise_for_status()
             return resp.json()["prompt_id"]
 
@@ -87,17 +120,15 @@ class ComfyClient:
     def wait(self, prompt_id: str, timeout_s: float = 1800.0, poll_interval: float = 3.0) -> dict:
         """Poll until the prompt finishes or errors. Returns the history entry.
 
-        Queue-aware: the prompt is also polled while it is still sitting in the
-        ComfyUI queue (pending/running). A fixed wall-clock deadline would time
-        out a job that is legitimately queued behind many others on a slow GPU —
-        so instead the wait extends while the prompt is present in the queue, and
-        only raises once it has left the queue without completing, or after an
-        absolute ``timeout_s`` of no progress.
+        Queue-aware: while the prompt sits in the ComfyUI queue (pending/running)
+        the wait is allowed to exceed ``timeout_s`` — a fixed wall-clock deadline
+        would time out a job legitimately queued behind many others on a slow GPU.
+        Once the prompt leaves the queue without completing (e.g. it was cleared
+        or failed hard), the wait gives up after ``timeout_s`` of no progress.
         """
         import httpx
         deadline = time.monotonic() + timeout_s
         last_status = ""
-        last_in_queue = True
         while True:
             entry = self.history(prompt_id)
             if entry:
@@ -117,15 +148,12 @@ class ComfyClient:
                             in_queue = True
                             break
             except Exception:
-                in_queue = last_in_queue   # transient; keep waiting as before
-            last_in_queue = in_queue
+                in_queue = False   # can't confirm queued -> fall through to deadline
             if in_queue:
                 # Still queued/rendering — keep waiting, no deadline pressure.
                 time.sleep(poll_interval)
                 continue
-            # Not in queue and no history yet, or finished while we were polling:
-            if last_status in ("success", "error"):
-                return entry
+            # Not in queue and not in history: it was cleared / never ran.
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"ComfyUI prompt {prompt_id} did not finish (last: {last_status})")

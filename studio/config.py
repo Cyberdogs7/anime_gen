@@ -31,6 +31,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "insert_shot_duration_s": 5.167,
         "hero_best_of": 2,
         "auto_start_episode": True,  # hands-free: reconcile starts the next episode once the latest is complete
+        "pause_storyboard": False,   # true: stop the reconciler from generating/restarting storyboards (debugging)
     },
     "bus": {
         "provider": "memory",  # memory | redis
@@ -51,7 +52,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "krea2_lora": "fedor_bypass.safetensors",
             "h3_fl2va": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
             "h3_ref2va": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-            "h3_clip": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+            "h3_clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
             "h3_turbo_lora": "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
             "h3_video_vae": "minimax_h3_video_vae_fp16.safetensors",
             "h3_audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
@@ -73,6 +74,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "slop_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "continuity_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "fan_service_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "structure_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "growth_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "describer": "",
         },
@@ -98,12 +100,16 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "story": "auto",
             "shot": "auto",
             "episode": "gated",
+            "costume": "gated",
+            "object": "gated",
         },
         "auto_approve_after_hours": 0,
     },
     "reviewers": {
         "max_revisions": 2,
         "roles": ["slop", "continuity", "fan_service"],
+        "plan_max_revisions": 4,       # plan-level (outline) review loop cap
+        "plan_roles": ["structure"],    # outline reviewers: structure (plot/scene coherence)
         "thresholds": {
             "slop_block": 0.45,
             "continuity_block": True,

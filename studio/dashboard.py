@@ -62,16 +62,31 @@ def show_payload(show_id: str) -> dict[str, Any]:
                 break
         char_id = content.get("id", "")
         ref_images = []
+        variants = []
+        costumes = []
         refs_dir = show.character_refs_dir(char_id)
         if refs_dir.exists():
             ref_images = sorted(
                 p.name for p in refs_dir.iterdir()
                 if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
+            rj = refs_dir / "refs.json"
+            if rj.exists():
+                try:
+                    data = json.loads(rj.read_text(encoding="utf-8"))
+                    vmap = data.get("variants") or {}
+                    for label, f in vmap.items():
+                        if (refs_dir / f).exists():
+                            variants.append({"label": label, "image": f})
+                except Exception:
+                    variants = []
+            from .storyboard import costume_variant_payload
+            costumes = costume_variant_payload(show, char_id, content.get("name", ""))
         voice_file = ""
         vp = show.dir / "assets" / "voice" / f"{char_id}_voice.wav"
         if vp.exists():
             voice_file = vp.name
         chars.append({**cs, "content": content, "ref_images": ref_images,
+                      "variants": variants, "costumes": costumes,
                       "voice_file": voice_file})
     scenes: dict[str, Any] = {}
     for sid in show.list_scenes():
@@ -82,8 +97,16 @@ def show_payload(show_id: str) -> dict[str, Any]:
                               if rd.exists() else [])
         scenes[sid] = data
     runs = show.dir / "runs"
-    n_runs = len([d for d in runs.iterdir() if d.is_dir() and d.name.startswith("EP")]) \
-        if runs.exists() else 0
+    existing = sorted(int(d.name[2:]) for d in runs.iterdir()
+                      if d.is_dir() and d.name.startswith("EP") and d.name[2:].isdigit()) \
+        if runs.exists() else []
+    # First missing episode number (fills gaps from deletions).
+    next_ep = 1
+    for n in existing:
+        if n == next_ep:
+            next_ep += 1
+        else:
+            break
     return {
         "show_id": show_id,
         "bootstrap": bs,
@@ -91,7 +114,7 @@ def show_payload(show_id: str) -> dict[str, Any]:
         "bible": _read_yaml(show.bible_path),
         "characters": chars,
         "scenes": scenes,
-        "next_episode": n_runs + 1,
+        "next_episode": next_ep,
     }
 
 
@@ -109,6 +132,7 @@ def episodes_payload(show_id: str) -> list[dict[str, Any]]:
 def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
     show = Show(show_id)
     d = show.dir / "runs" / ep
+    ep_num = int(ep.replace("EP", "") or 1)
     scripts = sorted(d.glob("script.r*.json"), key=lambda p: p.stat().st_mtime)
     latest = scripts[-1] if scripts else None
     script = _read_json(latest) if latest else None
@@ -122,40 +146,88 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
     total_shots = 0
     dialogue_lines = 0
     hero_shots = 0
-    for sc in (script or {}).get("scenes", []):
-        shots_out = []
-        for shot in sc.get("shots", []):
-            total_shots += 1
-            if shot.get("importance") == "hero":
-                hero_shots += 1
-            dialogue_lines += len(shot.get("dialogue", []) or [])
-            sid = shot.get("id", "")
-            keyframe = d / "storyboard" / f"{sid}.png"
-            shots_out.append({
-                "id": sid,
-                "type": shot.get("type", ""),
-                "importance": shot.get("importance", ""),
-                "duration_s": shot.get("duration_s", 0),
-                "camera": shot.get("camera", ""),
-                "action": shot.get("action", ""),
-                "dialogue": shot.get("dialogue", []) or [],
-                "costumes": (shot.get("references") or {}).get("costumes", {}) or {},
-                "keyframe": keyframe.name if keyframe.exists() else "",
-            })
-        scenes_out.append({
+
+    def _shot_payload(shot: dict[str, Any]) -> dict[str, Any]:
+        sid = shot.get("id", "")
+        keyframe = d / "storyboard" / f"{sid}.png"
+        preview = d / "storyboard" / f"{sid}.mp4"
+        return {
+            "id": sid,
+            "type": shot.get("type", ""),
+            "importance": shot.get("importance", ""),
+            "duration_s": shot.get("duration_s", 0),
+            "camera": shot.get("camera", ""),
+            "action": shot.get("action", ""),
+            "dialogue": shot.get("dialogue", []) or [],
+            "costumes": (shot.get("references") or {}).get("costumes", {}) or {},
+            "keyframe": keyframe.name if keyframe.exists() else "",
+            "preview": preview.name if preview.exists() else "",
+        }
+
+    def _scene_payload(sc: dict[str, Any], shots: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
             "id": sc.get("id", ""),
             "location": sc.get("location", ""),
             "time_of_day": sc.get("time_of_day", ""),
             "summary": sc.get("summary", ""),
-            "shots": shots_out,
-        })
+            "shots": [_shot_payload(s) for s in shots],
+        }
+
+    # While a script is being written, the assembled script only lands at the
+    # END of the run — but each scene's shot checkpoint (scenes/<sid>_shots.json)
+    # appears the moment that scene finishes. Populate the list from those
+    # checkpoints so the user sees the shots appear scene-by-scene, and expose a
+    # per-scene pass-progress map so the current scene's stage is visible.
+    writing: dict[str, Any] = {}
+    if script:
+        for sc in (script or {}).get("scenes", []):
+            scenes_out.append(_scene_payload(sc, sc.get("shots", [])))
+    else:
+        import re as _re
+        from .planner import _SCENE_PASSES, read_episode_plan
+        plan = read_episode_plan(show, ep_num)
+        plan_scenes = [s for s in (plan.get("scenes") or [])
+                       if isinstance(s, dict) and s.get("id")]
+        sc_dir = d / "scenes"
+        for ps in plan_scenes:
+            sid = ps.get("id", "")
+            shots: list[dict[str, Any]] = []
+            ck = sc_dir / f"{sid}_shots.json"
+            if ck.exists():
+                try:
+                    shots = json.loads(ck.read_text(encoding="utf-8")).get("shots") or []
+                except Exception:
+                    shots = []
+            if shots:
+                scenes_out.append(_scene_payload(ps, shots))
+                writing[sid] = {"pass": "done", "shots": len(shots)}
+                continue
+            best = -1
+            try:
+                for f in sc_dir.glob(f"{sid}.p*.json"):
+                    m = _re.fullmatch(_re.escape(sid) + r"\.p(\d+)\.json", f.name)
+                    if m:
+                        best = max(best, int(m.group(1)))
+            except Exception:
+                pass
+            writing[sid] = {"pass": _SCENE_PASSES[best]["name"]
+                            if 0 <= best < len(_SCENE_PASSES) else "",
+                            "shots": 0}
+    total_shots = sum(len(sc["shots"]) for sc in scenes_out)
+    hero_shots = sum(1 for sc in scenes_out for s in sc["shots"]
+                     if s.get("importance") == "hero")
+    dialogue_lines = sum(len(s.get("dialogue") or []) for sc in scenes_out
+                         for s in sc["shots"])
 
     objects: list[dict[str, Any]] = []
     od = d / "objects"
     if od.exists():
+        from .storyboard import _approved_object_slugs
+        approved = _approved_object_slugs(show, ep_num)
         for f in sorted(od.glob("*.png")):
             objects.append({"name": f.stem.replace("-", " ").title(),
-                            "slug": f.stem, "image": f.name})
+                            "slug": f.stem, "image": f.name,
+                            "approved": f.stem in approved})
 
     videos: dict[str, str] = {}
     vd = d / "video"
@@ -166,6 +238,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
     # Episode cast: every character the script's cast lists, with their ref image.
     cast: list[dict[str, Any]] = []
     if script:
+        from .storyboard import _approved_costume_labels
         char_by_name = {}
         for cid in show.list_characters():
             try:
@@ -186,9 +259,11 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
                 try:
                     data = json.loads(rj.read_text(encoding="utf-8"))
                     variants_map = data.get("variants") or {}
+                    approved = set(_approved_costume_labels(show, cid))
                     for label, f in variants_map.items():
                         if (rd / f).exists():
-                            variants.append({"label": label, "image": f})
+                            variants.append({"label": label, "image": f,
+                                             "approved": label in approved})
                             if label == "base":
                                 ref_img = f
                 except Exception:
@@ -199,6 +274,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
 
     from .storyboard import storyboard_status
     from .planner import read_episode_plan, read_scene_details
+    from .episode_repair import is_episode_paused
     sb = storyboard_status(show_id)
     cjson = d / "consistency.json"
     consistency = _read_json(cjson) if cjson.exists() else (sb.get("report") or [])
@@ -208,15 +284,17 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         if entry.get("shot"):
             final_cons[entry["shot"]] = entry
     consistency = list(final_cons.values())
-    ep_num = int(ep.replace("EP", "") or 1)
     plan = read_episode_plan(show, ep_num)
     scene_details = read_scene_details(show, ep_num)
+    from .storyboard import pending_ref_approvals
     return {
         "episode": ep,
         "script_file": latest.name if latest else None,
         "script": script,
         "reviews": reviews,
         "story": approval.story_state(show_id, ep),
+        "pending_refs": pending_ref_approvals(show, ep_num, script),
+        "writing": writing,
         "summary": {
             "scenes": len(scenes_out),
             "shots": total_shots,
@@ -230,6 +308,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         "videos": videos,
         "render": _render_status(show_id),
         "storyboard": sb,
+        "paused": is_episode_paused(show_id, ep_num),
         "consistency": consistency,
         "plan": plan,
         "scene_details": scene_details,
@@ -375,12 +454,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "approve":
                 msg = approval.approve_step(parts[2], body.get("step", ""),
-                                            char=body.get("char", ""), notes=body.get("notes", ""))
+                                            char=body.get("char", ""), notes=body.get("notes", ""),
+                                            costume=body.get("costume", ""),
+                                            slug=body.get("slug", ""),
+                                            episode=body.get("episode", ""))
                 self._send(200, {"ok": True, "messages": msg})
                 return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "reject":
                 msg = approval.reject_step(parts[2], body.get("step", ""),
-                                           char=body.get("char", ""), notes=body.get("notes", "no notes"))
+                                           char=body.get("char", ""),
+                                           notes=body.get("notes", "no notes"),
+                                           costume=body.get("costume", ""),
+                                           mode=body.get("mode", "edit"),
+                                           slug=body.get("slug", ""),
+                                           episode=body.get("episode", ""))
                 self._send(200, {"ok": True, "messages": msg})
                 return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "generate":
@@ -455,8 +542,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 show = Show(show_id)
                 action = parts[4] or parts[5]
                 if action == "approve":
+                    from .episode_repair import hold_manual_rebuild, release_manual_rebuild
                     from .planner import approve_scene_details
                     from .storyboard import build_storyboard
+                    # Hold the reconciler so it cannot race the manual build
+                    # thread (both would assemble + build the storyboard at once).
+                    hold_manual_rebuild(show_id, ep)
                     approve_scene_details(show, ep)
                     self._send(200, {"ok": True, "messages": [
                         "scene details approved — writing shots + storyboard (background)…"]})
@@ -471,6 +562,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             ACTIVITY[show_id] = {"detail": f"Episode build failed: {exc}",
                                                  "ts": time.time()}
                         finally:
+                            release_manual_rebuild(show_id, ep)
                             ACTIVITY.pop(show_id, None)
                     import threading
                     threading.Thread(target=_build, daemon=True).start()
@@ -490,6 +582,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     finally:
                         ACTIVITY.pop(show_id, None)
                     return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "shots" \
+                    and parts[4] == "regenerate":
+                from .clients.lmstudio import LMStudioClient
+                from .episode_repair import hold_manual_rebuild, release_manual_rebuild
+                from .planner import assemble_episode_script, clear_scene_shots
+                ep = int(body.get("episode", 1) or 1)
+                show_id = parts[2]
+                show = Show(show_id)
+                notes = body.get("notes", "")
+                # Hold the reconciler so it does not race the manual rebuild
+                # (both would run assemble + build_storyboard concurrently and
+                # fight over the exclusive GPU lock). Released when the rebuild
+                # thread finishes.
+                hold_manual_rebuild(show_id, ep)
+                clear_scene_shots(show, ep)
+                self._send(200, {"ok": True, "messages": [
+                    "shots cleared — rebuilding from the approved scene details (background)…"]})
+                ACTIVITY.pop(show_id, None)
+
+                def _rebuild():
+                    try:
+                        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=300)
+                        from .storyboard import build_storyboard
+                        assemble_episode_script(show, ep, llm=llm, notes=notes)
+                        build_storyboard(show, ep)
+                    except Exception as exc:
+                        ACTIVITY[show_id] = {"detail": f"Shot regen failed: {exc}",
+                                             "ts": time.time()}
+                    finally:
+                        release_manual_rebuild(show_id, ep)
+                        ACTIVITY.pop(show_id, None)
+                import threading
+                threading.Thread(target=_rebuild, daemon=True).start()
+                return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "storyboard":
                 from .storyboard import build_storyboard
                 ep = int(body.get("episode", 1) or 1)
@@ -526,6 +652,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     msg = approval.reject_story(show_id, ep, body.get("notes", "no notes"))
                     self._send(200, {"ok": True, "messages": msg})
                     return
+                if action == "stop":
+                    from .episode_repair import pause_episode
+                    pause_episode(show_id, int(ep.replace("EP", "")))
+                    self._send(200, {"ok": True, "messages": [f"{ep} paused"]})
+                    return
+                if action == "resume":
+                    from .episode_repair import resume_episode
+                    resume_episode(show_id, int(ep.replace("EP", "")))
+                    self._send(200, {"ok": True, "messages": [f"{ep} resumed"]})
+                    return
             self._send(404, {"error": "not found"})
         except ValueError as exc:
             self._send(400, {"ok": False, "error": str(exc)})
@@ -535,6 +671,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parts = self._path_parts()
         try:
+            if len(parts) == 5 and parts[:2] == ["api", "show"] \
+                    and parts[3] == "ep":
+                from .episode_repair import delete_episode
+                msg = delete_episode(parts[2], parts[4])
+                self._send(200, {"ok": True, "messages": msg})
+                return
             if len(parts) == 3 and parts[:2] == ["api", "show"]:
                 delete_show(parts[2])
                 self._send(200, {"ok": True})

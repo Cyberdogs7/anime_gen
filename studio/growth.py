@@ -96,7 +96,11 @@ def _plotline_ids(bible: dict[str, Any]) -> list[str]:
 
 
 def approve_new_plotline(show: Show, plotline: dict[str, Any], episode: int) -> dict[str, Any]:
-    """Persist an LLM-approved new plotline into the BIBLE (canon) + continuity."""
+    """Persist an LLM-approved new plotline into the BIBLE (canon) only.
+
+    Continuity is updated separately by the caller (commit_episode_plotlines) at
+    PLAN APPROVAL, so a rejected/regenerated episode never pollutes continuity.
+    """
     plotline = {k: v for k, v in (plotline or {}).items() if k in (
         "id", "name", "characters", "summary", "status")}
     plotline.setdefault("status", "active")
@@ -105,10 +109,6 @@ def approve_new_plotline(show: Show, plotline: dict[str, Any], episode: int) -> 
     if plotline.get("id") not in _plotline_ids(bible):
         bible.setdefault("plotlines", []).append(plotline)
         show.write_bible(bible)
-    cont = show.read_continuity()
-    cont.setdefault("plotlines", []).append(plotline)
-    cont["last_new_plotline_episode"] = episode
-    show.write_continuity(cont)
     return plotline
 
 
@@ -203,6 +203,10 @@ def process_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
     """Full growth path for a proposed new plotline: review -> approve -> persist
     -> create its new characters. Returns {"approved", "plotline", "characters",
     "notes"}.
+
+    NOTE: this persists immediately (bible + continuity + characters). The plan
+    pipeline uses it only AFTER the plan is approved; see
+    commit_plotline_on_approval.
     """
     verdict = review_new_plotline(show, proposal, episode, llm=llm, cfg=cfg)
     if not verdict["approved"]:
@@ -215,6 +219,7 @@ def process_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
                 "characters": [], "notes": verdict["notes"]}
 
     plotline = approve_new_plotline(show, verdict["plotline"], episode)
+    _persist_continuity(show, plotline, episode)
     names = [n for n in (plotline.get("characters") or []) if n]
     existing = {c.get("name") for c in
                 (show.read_character(cid) for cid in show.list_characters())}
@@ -226,3 +231,42 @@ def process_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
             created.append(sheet)
     return {"approved": True, "plotline": plotline, "characters": created,
             "notes": verdict["notes"]}
+
+
+def _persist_continuity(show: Show, plotline: dict[str, Any], episode: int) -> None:
+    """Append a newly approved plotline to continuity + mark it as seen."""
+    cont = show.read_continuity()
+    cont.setdefault("plotlines", []).append(plotline)
+    cont["last_new_plotline_episode"] = episode
+    show.write_continuity(cont)
+
+
+def commit_plotline_on_approval(show: Show, featured_ids: list[str],
+                                new_plotline: dict[str, Any] | None, episode: int,
+                                llm=None, cfg=None) -> None:
+    """Commit plotline bookkeeping ONLY when an episode plan is APPROVED.
+
+    Runs the persistence that used to happen inside develop_episode — stamping
+    last_seen on featured plotlines and persisting a reviewed new plotline (bible
+    canon + continuity + character sheets) — but only after the outline has been
+    approved. A rejected or deleted episode therefore never mutates continuity,
+    so regenerating EP01 cannot keep re-growing the same plotlines.
+    """
+    from .development import _overall_state, _plotline_state, _record_seen
+    bible = show.read_bible()
+    continuity = show.read_continuity()
+    plotlines = _plotline_state(show, bible)
+    overall = _overall_state(show, bible)
+    data = {"featured_plotlines": [{"id": i} for i in featured_ids],
+            "new_plotline": new_plotline}
+    _record_seen(show, continuity, episode, data, plotlines, overall)
+    # Persist the new plotline to the bible (canon) + its new characters, but only
+    # if it wasn't already persisted by a prior approval (idempotent).
+    if isinstance(new_plotline, dict) and new_plotline.get("id"):
+        if new_plotline["id"] not in _plotline_ids(show.read_bible()):
+            plotline = approve_new_plotline(show, new_plotline, episode)
+            names = [n for n in (plotline.get("characters") or []) if n]
+            existing = {c.get("name") for c in
+                        (show.read_character(cid) for cid in show.list_characters())}
+            for n in [x for x in names if x not in existing][:2]:
+                generate_new_character(show, n, plotline, episode, llm=llm, cfg=cfg)

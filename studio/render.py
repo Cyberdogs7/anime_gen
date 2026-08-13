@@ -379,7 +379,22 @@ def render_episode(show: Show, episode: int, cfg=None, progress=None,
 
 
 def build_render(show: Show, episode: int, cfg=None) -> None:
-    """Render all shots in a background thread with progress."""
+    """Render all shots in a background thread with progress.
+
+    Gated on the same ref-approval set as the storyboard previews: a final
+    render must not use a costume variant or recurring-object ref the human
+    hasn't approved. Pending refs -> the job parks in "waiting" instead of
+    burning GPU on an unapproved identity.
+    """
+    from .storyboard import pending_ref_approvals
+    pending = pending_ref_approvals(show, episode)
+    if pending:
+        RENDER_JOBS[show.show_id] = {
+            "state": "waiting", "done": 0, "total": 0,
+            "detail": "Waiting for ref approval: " + ", ".join(pending),
+        }
+        return
+
     def _run():
         job = {"state": "running", "done": 0, "total": 0, "detail": "Preparing render…"}
         RENDER_JOBS[show.show_id] = job

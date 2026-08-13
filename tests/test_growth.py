@@ -82,6 +82,48 @@ def test_normalize_keeps_unsheetd_script_cast_dialogue(tmp_path):
 
 # --- growth: approve / reject / persist --------------------------------------
 
+def test_development_is_read_only_then_commits_on_approval(tmp_path):
+    """develop_episode must NOT write continuity/bible (the EP01 regen-pollution
+    bug), and the plotline commit must only happen when the plan is approved."""
+    from studio.development import develop_episode
+    from studio.growth import commit_plotline_on_approval
+
+    show = _make_show(tmp_path)
+    before_bible = json.dumps(show.read_bible(), sort_keys=True)
+    before_cont = json.dumps(show.read_continuity(), sort_keys=True)
+
+    dev = develop_episode(show, 1, llm=GrowthLLM(approve=True), cfg=Config(tmp_path))
+    assert isinstance(dev, dict) and dev.get("synopsis")
+    assert dev["featured"] and "op" in dev["featured"]
+    assert dev["new_plotline"] and dev["new_plotline"]["id"] == "new_thread"
+
+    # Development is READ-ONLY: nothing persisted.
+    assert json.dumps(show.read_bible(), sort_keys=True) == before_bible
+    assert json.dumps(show.read_continuity(), sort_keys=True) == before_cont
+    assert "Mira" not in {show.read_character(cid).get("name")
+                          for cid in show.list_characters()}
+
+    # Approval commits: featured last_seen, new plotline into bible + continuity,
+    # and its new character sheet.
+    commit_plotline_on_approval(show, dev["featured"], dev["new_plotline"], 1,
+                                llm=GrowthLLM(approve=True), cfg=Config(tmp_path))
+    ids = [p.get("id") for p in show.read_bible().get("plotlines", [])]
+    assert "new_thread" in ids
+    cont = show.read_continuity()
+    assert any(p.get("id") == "new_thread" for p in cont.get("plotlines", []))
+    sheets = {show.read_character(cid).get("name")
+              for cid in show.list_characters()}
+    assert "Mira" in sheets
+
+    # Idempotent: committing the same plotline again doesn't duplicate it.
+    commit_plotline_on_approval(show, dev["featured"], dev["new_plotline"], 1,
+                                llm=GrowthLLM(approve=True), cfg=Config(tmp_path))
+    ids2 = [p.get("id") for p in show.read_bible().get("plotlines", [])]
+    assert ids2.count("new_thread") == 1
+    cont2 = show.read_continuity()
+    assert [p.get("id") for p in cont2.get("plotlines", [])].count("new_thread") == 1
+
+
 def test_process_new_plotline_approves_and_persists_to_bible(tmp_path):
     from studio.growth import process_new_plotline
     show = _make_show(tmp_path)

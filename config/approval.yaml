@@ -12,5 +12,7 @@ gates:
   story: auto              # plan + script (with Stage 2a reviewer notes attached)
   shot: auto               # shots auto-approved above QC threshold
   episode: gated           # the "air" gate
+  costume: gated           # costume-variant refs (per character) before any video uses them
+  object: gated            # recurring-object refs (per episode) before any video uses them
 
 auto_approve_after_hours: 0   # >0: a gated artifact auto-approves after N hours (safety valve, 0 = off)

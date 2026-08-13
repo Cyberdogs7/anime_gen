@@ -340,6 +340,58 @@ def fanservice_review_prompt(script: dict[str, Any], mature_spec: dict[str, Any]
     )
 
 
+def plan_reviewer_system(role: str, baseline: str = "ranma-1-2") -> str:
+    """System prompt for the plan-level (outline) reviewer — distinct from the
+    script reviewers because it examines the outline, not the assembled script."""
+    return (
+        f"You are the '{role}' outline reviewer in an anime production's writers' room. "
+        f"Your quality bar is a classic '{baseline}'-tier series.\n"
+        "You review an EPISODE OUTLINE (JSON) and produce a notes report flagging "
+        "narrative and structural incoherence. Notes use the form "
+        "'[Scene s01] <item> - <note>'. Keep your own notes separate and attributed to you.\n"
+        "Return ONLY valid JSON matching the requested schema. No markdown, no commentary."
+    )
+
+
+def plan_structure_review_prompt(plan: dict[str, Any], bible: dict[str, Any],
+                                 episode: int = 0) -> str:
+    """Structure reviewer for the episode OUTLINE.
+
+    Catches the class of failures the script reviewers cannot: the plot/synopsis/
+    scenes layers contradicting each other, a climax that repeats the setup, a
+    threat that is never resolved, and (for episode 1) a cold open into battle
+    that gives the audience zero context.
+    """
+    schema = {
+        "score": "0.0-1.0 (0=excellent, 1=unusable)",
+        "notes": [{"scene": "s01 or 'overall'", "item": "where",
+                   "note": "what's wrong + how to fix"}],
+        "pass": "bool",
+    }
+    return (
+        "Review this EPISODE OUTLINE for narrative and structural coherence, NOT prose "
+        "polish. Flag every issue you find with a concrete fix. Check specifically:\n"
+        "- PLOT vs SYNOPSIS vs SCENES must tell the SAME story. Flag contradictions: "
+        "different characters performing the same key action, reversed roles, events in "
+        "the plot/synopsis that the scenes never play out, or scene summaries that "
+        "disagree with the beats.\n"
+        "- Each scene's beats must follow from its summary (Setup -> Change -> Consequence).\n"
+        "- Act structure: Hook (s01) -> rising action -> a DISTINCT climax -> resolution/"
+        "cooldown. A climax that just repeats an earlier beat (e.g. the same joint is "
+        "hit three times with no escalation) is a FAIL.\n"
+        "- The threat_of_the_week must be engaged and resolved or mitigated by the end.\n"
+        "- Each scene's 'characters' list must be consistent with who the beats say is "
+        "on screen; a group like 'pods' must not flip allegiance without reason.\n"
+        "- plotline_updates must correspond to events actually present in the scenes.\n"
+        f"- EPISODE 1 CONTEXT (episode={episode}): the opening MUST establish who the cast "
+        "is, the world, and the enemy before or during the first encounter. A cold open "
+        "straight into combat with zero context for the audience is a FAIL for episode 1.\n\n"
+        f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
+        f"Episode outline: {json.dumps(plan, ensure_ascii=False)}\n\n"
+        f"Schema:\n{json.dumps(schema, indent=2)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 - script generation
 # ---------------------------------------------------------------------------
@@ -350,7 +402,9 @@ def script_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, An
         "episode": "int",
         "summary": "one-paragraph episode summary (the full story of this episode, for the viewer)",
         "cast": ["EXACT names of EVERY character who appears on screen or speaks in this episode, "
-                 "including any new supporting characters you invent (not just the main cast)"],
+                 "including any new supporting characters you invent AND any recurring "
+                 "enemy/mech/monster that needs a visual reference for the video model "
+                 "(not just the main cast)"],
         "scenes": [{
             "id": "slug (s01, s02, ...)",
             "location": "from the scene registry or a new location slug",
@@ -520,6 +574,124 @@ def revise_appearance_prompt(current: str, feedback: str) -> str:
     )
 
 
+def costume_description_prompt(label: str, char_name: str,
+                               personality: str = "", situation: str = "",
+                               feedback: str = "") -> str:
+    """Describe ONLY the costume a character wears, from personality + situation.
+
+    The label ("Standard Battle Gear") is just a name — this turns it into a
+    concrete outfit description the image-edit model can render. It MUST NOT
+    include the character's current look (appearance_canonical) — that would
+    poison the description into staying close to their usual outfit. Only
+    personality and use-case/situation drive the design.
+    """
+    prompt = (
+        "You are a costume designer for an anime. A character is going to wear a "
+        "costume, and we need a precise description of ONLY the costume — the "
+        "outfit they CHANGE INTO — so an image-edit model can render it.\n"
+        "Rules:\n"
+        "- Describe ONLY the clothing/armor/outfit. Never mention the character's "
+        "face, hair, body, pose, expression, background, or scenery.\n"
+        "- The costume should match the character's personality and the use case.\n"
+        "- Be concrete and image-generation-ready (2-4 sentences): silhouette, "
+        "garment pieces, materials, colors, trim, accents, weathering.\n"
+        "- Reply with JSON: {\"costume\": \"...\"}\n\n"
+        f"COSTUME LABEL: {label}\n"
+        f"CHARACTER'S PERSONALITY: {personality or '(not specified)'}\n"
+        f"SITUATION / USE CASE: {situation or '(not specified)'}\n"
+    )
+    if feedback.strip():
+        prompt += (f"DIRECTOR'S FEEDBACK (revise the costume description accordingly):\n"
+                   f"{feedback}\n")
+    return prompt
+
+
+def costume_reconcile_prompt(character: dict[str, Any], known_costumes: list[str],
+                             candidate_labels: list[dict[str, Any]]) -> str:
+    """After-pass: map free-form per-shot costume labels onto a canonical wardrobe.
+
+    The shot writer invents a label per shot (e.g. "Base Combat Attire (leaning in
+    closer)", "Base Armorer Garb (wet sheen)"), so one real costume becomes dozens
+    of near-identical labels. This prompt makes the LLM look at the SCENE each
+    label is used in and decide, for every label: reuse an existing canonical
+    costume label verbatim, drop it as a transient variant of the base outfit
+    (wet/bloody/posed/etc.), or create ONE new canonical costume ONLY when the
+    scene genuinely requires a distinct outfit.
+
+    ``known_costumes`` are the canonical labels the studio already has refs for.
+    ``candidate_labels`` = [{label, count, example_shots: [context strings]}].
+    Returns a prompt asking for a JSON mapping.
+    """
+    name = character.get("name", "")
+    appearance = (character.get("appearance_canonical") or "")[:400]
+    schema = {
+        "labels": [{
+            "label": "the ORIGINAL label from the script (verbatim)",
+            "action": "'reuse' | 'drop' | 'create'",
+            "target": ("if reuse: the EXACT existing costume label to use; "
+                       "if drop: null (the character stays in base outfit); "
+                       "if create: a short canonical NEW label for a genuinely new costume"),
+        }],
+    }
+    known_txt = "\n".join(f"- {k}" for k in (known_costumes or [])) or "(none yet — base outfit only)"
+    labels_txt = "\n".join(
+        f"- label: {c['label']!r}\n    shots: {c.get('count', 1)}\n    "
+        f"example scene: {c['example_shots'][0] if c.get('example_shots') else '(no context)'}"
+        for c in candidate_labels)
+    return (
+        "You are the costume-continuity editor for an anime series. The shot "
+        "writer referenced costumes with loose, per-shot labels; you must collapse "
+        "them onto the character's canonical wardrobe.\n\n"
+        f"CHARACTER: {name}\n"
+        f"BASE OUTFIT (appearance_canonical): {appearance or '(not specified)'}\n\n"
+        "CANONICAL COSTUMES ALREADY IN PRODUCTION (reuse these EXACT labels verbatim "
+        "when the shot's outfit matches one):\n"
+        f"{known_txt}\n\n"
+        "LABELS USED IN THIS EPISODE, WITH THEIR SHOT CONTEXT:\n"
+        f"{labels_txt}\n\n"
+        "DECISION RULES:\n"
+        "- REUSE: if the label describes the same outfit as an existing canonical "
+        "costume (possibly with wet/dirty/scorched/pose/expression variation), map "
+        "it to that existing label VERBATIM. This is the default when a label "
+        "matches.\n"
+        "- DROP: if the label is just the character's BASE outfit with a transient "
+        "descriptor (wet, damp, bloody, scorched, smoking, pose, expression, "
+        "camera framing like 'close-up'/'focus on', 'out of frame', 'watching', "
+        "'leaning in', 'post-strike', etc.), action=drop, target=null — the "
+        "character stays in their base outfit. Small situational changes are NOT "
+        "new costumes.\n"
+        "- CREATE: ONLY when the shot describes an outfit that is genuinely "
+        "different from every canonical costume AND from the base outfit AND the "
+        "situation 100% requires a distinct outfit (e.g. a formal gown at a gala, "
+        "a full battle armor when base is civilian clothes). Provide a SHORT "
+        "canonical label (3-6 words). Do NOT create for wet/bloody/dirty/posed "
+        "variants.\n"
+        "- Normalize spelling/whitespace, but do NOT invent new labels where an "
+        "existing canonical label fits.\n"
+        "- Map EVERY input label exactly once.\n"
+        f"Return ONLY valid JSON:\n{json.dumps(schema, indent=2)}"
+    )
+
+
+def revise_costume_prompt(current: str, feedback: str) -> str:
+    """Rewrite ONLY a costume-variant generation prompt from director feedback.
+
+    A costume rejection must touch only that costume's image prompt, keeping the
+    character's identity/body. The text drives Krea 2 generation, so it describes
+    the character in that costume — never background or scenery.
+    """
+    return (
+        "Revise ONLY the costume appearance prompt below in response to the "
+        "director's feedback. This text drives image generation for a character "
+        "reference image of the character in this costume. Keep the character's "
+        "identity, body and face consistent; change only the costume details the "
+        "feedback flags. Do not add background or scenery. Reply with JSON "
+        "containing exactly one key: {\"prompt\": \"...\"}.\n\n"
+        f"CURRENT COSTUME PROMPT:\n{current}\n\n"
+        f"DIRECTOR'S FEEDBACK:\n{feedback}"
+    )
+
+
 def revise_scene_setting_prompt(current: str, feedback: str) -> str:
     """Rewrite ONLY a scene's setting_prompt from director feedback.
 
@@ -552,7 +724,10 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
         "title": "Episode Title",
         "threat_of_the_week": "Brief description of the episodic hazard/enemy",
         "plot": "one paragraph: the full story of this episode from setup to resolution",
-        "characters": ["EXACT names of the characters who appear"],
+        "characters": ["EXACT names of EVERY character who appears — this INCLUDES the "
+                       "threat/enemy/monster from threat_of_the_week if it is a recurring "
+                       "visual entity. Any on-screen entity that needs a reference image "
+                       "for the video model MUST be listed here."],
         "scenes": [{
             "id": "s01",
             "location": "location name",
@@ -657,39 +832,62 @@ def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
     return base
 
 
-def scene_shots_prompt(bible: dict[str, Any], episode_summary: str, plan_scene: dict[str, Any],
-                       cast: list[dict[str, Any]], target_seconds: int) -> str:
-    """Write the shots for ONE scene (chunk 3, localized context)."""
-    schema = {"shots": [{
-        "id": "slug (s01_sh01, ...)",
-        "type": "'ref2va' if it uses character references else 'fl2va'",
-        "importance": "'hero' for money shots (~1 per scene) else 'standard'",
-        "duration_s": "float 4-15 (dialogue ~10.125, inserts ~5.167)",
-        "camera": "shot/camera description",
-        "action": "what happens",
-        "dialogue": [{"char": "exact character name", "line": "str", "on_camera": "bool"}],
-        "soundscape": "str",
-        "music": "str",
-        "references": {"characters": ["EXACT names on screen"],
-                       "costumes": {"CharacterName": "costume variant they wear in this shot, or omit for base"},
-                       "scene": "location name"},
-    }]}
-    cast_snip = [(c.get("name"), (c.get("appearance_canonical") or "")[:200])
-                 for c in cast if c.get("name")]
+def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
+                      episode_summary: str, plan_scene: dict[str, Any],
+                      cast: list[dict[str, Any]], draft: list[dict[str, Any]] | None,
+                      target_seconds: int, notes: str = "") -> str:
+    """Build ONE focused 'job description' prompt for a single scene shot pass.
+
+    Each pass is one small, single-responsibility LLM call over the same scene:
+    blocking -> camera -> action -> references -> costumes -> soundscape -> dialogue.
+    ``pass_cfg`` (defined in planner._SCENE_PASSES) carries the role/job text, the
+    pass's own output schema, its field instructions (with ``{target_s}``,
+    ``{n_shots}`` and ``{n_lines}`` formatted), and which cast attribute to show
+    (appearance for visual passes, traits/personality for dialogue).
+
+    The first pass (``draft is None``) creates the shot skeleton from the scene
+    treatment; every later pass receives the accumulated draft and must return ONLY
+    its own field(s), keeping all shot ids verbatim.
+    """
+    job = pass_cfg["job"]
+    schema = pass_cfg["schema"]
+    instructions = pass_cfg.get("instructions", "").format(
+        target_s=target_seconds,
+        n_shots=max(4, target_seconds // 10),
+        n_lines=max(2, target_seconds // 6))
+    cast_key = pass_cfg.get("cast_key", "appearance_canonical")
+    if cast_key == "personality":
+        cast_snip = [(c.get("name"), ((c.get("traits_for_llm") or "")[:260]
+                                      or " ".join((c.get("personality") or [])[:2])[:260]))
+                     for c in cast if c.get("name")]
+    else:
+        cast_snip = [(c.get("name"), (c.get(cast_key) or "")[:200])
+                     for c in cast if c.get("name")]
+    if draft is None:
+        context = ("There is no draft yet. Break the scene treatment into a shot "
+                   "skeleton and return it. Do NOT invent dialogue, camera, references, "
+                   "sound, or music — dedicated passes fill those in later.")
+    else:
+        context = ("CURRENT SCENE SHOT DRAFT — every field already written by an earlier "
+                   "pass is FINAL; preserve it exactly. Write ONLY your own field(s) and "
+                   "return the FULL shot list.\n"
+                   f"{json.dumps(draft, indent=2, ensure_ascii=False)}")
+    if notes.strip():
+        context += ("\n\nDIRECTOR'S FEEDBACK ON THE CURRENT SHOTS (ABSOLUTE — apply every "
+                    f"point in this pass):\n{notes}")
     return (
-        "You are writing the SHOTS for ONE scene of an anime episode. Each shot is one "
-        "H3 video generation (4-15s).\n\n"
-        f"Shot schema:\n{json.dumps(schema, indent=2)}\n\n"
+        f"You are the {job} for ONE scene of an anime episode. Each shot is one H3 video "
+        f"generation (4-15s).\n\n"
+        f"Your output schema (return ONLY this shape):\n{json.dumps(schema, indent=2)}\n\n"
         f"Episode summary: {episode_summary}\n"
         f"Series bible: {json.dumps(bible)}\n"
-        f"Cast (name -> appearance): {cast_snip}\n\n"
-        f"SCENE TO WRITE:\n{json.dumps(plan_scene, indent=2, ensure_ascii=False)}\n\n"
-        f"Write enough shots to fill roughly {target_seconds}s of runtime for this scene "
-        f"(~{max(4, int(target_seconds / 10))} shots, each 4-15s). Fully realize every "
-        "beat. Name EVERY character on screen and their costume variant in references.\n"
-        "- Dialogue uses only cast names.\n"
+        f"Cast (name -> {cast_key}): {cast_snip}\n\n"
+        f"SCENE TO WORK ON:\n{json.dumps(plan_scene, indent=2, ensure_ascii=False)}\n\n"
+        f"{context}\n\n"
+        f"YOUR JOB:\n{instructions}\n"
+        "- Keep every shot id exactly as given; never add, remove, or reorder shots.\n"
         "- Fictional characters only; no minors; no real persons.\n"
-        "- Return ONLY valid JSON matching the shot schema."
+        "- Return ONLY valid JSON matching the schema. No markdown fences, no commentary."
     )
 
 
@@ -844,6 +1042,77 @@ def new_character_prompt(bible: dict[str, Any], cast: list[str], name: str,
         f"Plotline they join: {json.dumps(plotline, indent=2, ensure_ascii=False)}\n"
         "The appearance_canonical is the single source of truth for image generation - "
         "make it vivid and specific. voice.mode must be 'manual'."
+    )
+
+
+def recurring_objects_prompt(script: dict[str, Any], cast: list[str],
+                             locations: list[str], episode_summary: str = "") -> str:
+    """Ask the showrunner to pick the episode's KEY RECURRING ITEMS from the
+    whole script.
+
+    This is the ONLY way objects are chosen — never a regex. The model reads the
+    full episode (story, every scene's action and camera) and returns only items
+    that MATTER for visual continuity: signature weapons, vehicles, plot devices,
+    distinctive landmarks. Generic scenery (debris, rubble, ground, dust) is not
+    a recurring item.
+    """
+    schema = {"objects": ["cleanest single name of one key recurring item", "…"]}
+    parts = []
+    if episode_summary.strip():
+        parts.append(f"EPISODE STORY: {episode_summary.strip()[:400]}")
+    # Compact shot log: ACTION only (the CAMERA field is cinematography noise and
+    # doubles the prompt size — the output guards already reject camera phrases).
+    # Truncated + capped so the whole thing fits a local model's context window.
+    n = 0
+    for sc in script.get("scenes", []):
+        loc = sc.get("location") or ""
+        parts.append(f"\n{sc.get('id')} ({loc})")
+        for shot in sc.get("shots", []):
+            act = (shot.get("action") or "").strip()
+            if not act:
+                continue
+            if len(act) > 140:
+                act = act[:140].rsplit(" ", 1)[0] + "…"
+            parts.append(f"  {shot.get('id')}: {act}")
+            n += 1
+            if n >= 140:
+                break
+        if n >= 140:
+            break
+    body = "\n".join(parts) or "— no shots —"
+    return (
+        "You are the props master / continuity manager for ONE anime episode. Read the "
+        "episode below and list the KEY RECURRING ITEMS that must keep one consistent "
+        "appearance across 2+ shots, because a continuity break would be visible.\n\n"
+        "A recurring item is an object of SIGNIFICANCE:\n"
+        "- A signature weapon or tool (a character's personal weapon, the macguffin "
+        "the team is trying to steal).\n"
+        "- A vehicle / prop tied to a character or the plot (a character's motorcycle, "
+        "the team's plane, an heirloom).\n"
+        "- A plot device or object of narrative importance (a data core, a prototype, "
+        "a key).\n"
+        "- A DISTINCTIVE landmark / location backdrop that recurs (a neon sign, a "
+        "statue, a reactor core) — a named set piece, not generic scenery.\n\n"
+        "NEVER list:\n"
+        "- Generic environment filler: debris, rubble, dust, rocks, ground, chunks, "
+        "concrete, walls, roads, benches, containers, weather, crowds.\n"
+        "- Camera / film-technique phrases: 'shallow depth of field', 'rack focus', "
+        "'dutch angle', 'close-up', 'bokeh', lens or lighting terms.\n"
+        "- Character names, people, body parts, expressions, clothing or costumes.\n"
+        "- A location itself (locations have their own refs) — only a distinctive "
+        "set piece INSIDE a location counts.\n\n"
+        "Rules:\n"
+        "- Only include an object that appears in 2+ shots AND is important enough "
+        "that viewers would notice if it changed.\n"
+        "- When several shots describe the SAME object differently ('ferrocrete ground "
+        "debris' and 'ferrocrete pulverized chunks'), merge them into ONE clean, "
+        "short name — never two near-duplicates.\n"
+        "- Return at most 6 items. Prefer a short, specific name.\n\n"
+        f"Episode cast (never items): {cast}\n"
+        f"Locations (never items): {locations}\n\n"
+        f"SHOT LOG:\n{body}\n\n"
+        f"Return ONLY valid JSON matching: {json.dumps(schema)}\n"
+        "Return an empty array [] if there are no key recurring items."
     )
 
 

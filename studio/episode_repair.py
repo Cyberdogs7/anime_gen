@@ -12,7 +12,9 @@ hammer the LLM every poll).
 """
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 import threading
 import time
 from typing import Any
@@ -35,9 +37,118 @@ _guard = threading.Lock()
 _cooldowns: dict[tuple[str, int, str], float] = {}
 _COOLDOWN_S = 120.0
 
+# Per-episode pause flag. Persisted so it survives dashboard restarts.
+_paused_episodes: set[tuple[str, int]] = set()
+_paused_lock = threading.Lock()
+
+# Transient per-episode hold for MANUAL background rebuilds (dashboard approve /
+# regenerate-shots threads). While held, the reconciler skips the episode so it
+# never races the manual thread by running assemble/storyboard itself. Unlike
+# pause_episode it is NOT persisted and does NOT clear running job dicts.
+_manual_holds: set[tuple[str, int]] = set()
+_manual_holds_lock = threading.Lock()
+
+
+def hold_manual_rebuild(show_id: str, episode: int) -> None:
+    with _manual_holds_lock:
+        _manual_holds.add((show_id, episode))
+
+
+def release_manual_rebuild(show_id: str, episode: int) -> None:
+    with _manual_holds_lock:
+        _manual_holds.discard((show_id, episode))
+
+
+def _paused_path(show: Show) -> Any:
+    return show.dir / "runs" / ".paused.json"
+
+
+def _load_paused(show: Show) -> None:
+    global _paused_episodes
+    pp = _paused_path(show)
+    if pp.exists():
+        try:
+            data = json.loads(pp.read_text(encoding="utf-8"))
+            with _paused_lock:
+                for entry in (data or []):
+                    _paused_episodes.add((entry["show"], entry["episode"]))
+        except Exception:
+            pass
+
+
+def _save_paused(show: Show) -> None:
+    pp = _paused_path(show)
+    pp.parent.mkdir(parents=True, exist_ok=True)
+    with _paused_lock:
+        entries = [{"show": s, "episode": e} for s, e in _paused_episodes if s == show.show_id]
+    pp.write_text(json.dumps(entries), encoding="utf-8")
+
+
+def is_episode_paused(show_id: str, episode: int) -> bool:
+    show = Show(show_id)
+    _load_paused(show)
+    with _paused_lock:
+        return (show_id, episode) in _paused_episodes
+
+
+def pause_episode(show_id: str, episode: int) -> None:
+    from .storyboard import STORYBOARD_JOBS
+    show = Show(show_id)
+    _load_paused(show)
+    with _paused_lock:
+        _paused_episodes.add((show_id, episode))
+    _save_paused(show)
+    # Clear any running storyboard/render job for this show so the UI updates.
+    STORYBOARD_JOBS.pop(show_id, None)
+    from .render import RENDER_JOBS
+    RENDER_JOBS.pop(show_id, None)
+
+
+def resume_episode(show_id: str, episode: int) -> None:
+    show = Show(show_id)
+    _load_paused(show)
+    with _paused_lock:
+        _paused_episodes.discard((show_id, episode))
+    _save_paused(show)
+
 
 def _episode_label(episode: int) -> str:
     return f"EP{episode:02d}"
+
+
+def delete_episode(show_id: str, episode: int | str) -> list[str]:
+    """Delete one episode's generated artifacts without regenerating it."""
+    from .bootstrap import run_show_locked
+
+    raw_episode = str(episode).strip().upper()
+    if raw_episode.startswith("EP"):
+        raw_episode = raw_episode[2:]
+    try:
+        ep = int(raw_episode)
+    except ValueError as exc:
+        raise ValueError(f"invalid episode label: {episode!r}") from exc
+    if ep < 1:
+        raise ValueError("episode must be a positive integer")
+    show = Show(show_id)
+    path = show.dir / "runs" / _episode_label(ep)
+    if not path.is_dir():
+        raise ValueError(f"episode {ep} does not exist")
+    from .storyboard import STORYBOARD_JOBS
+    from .render import RENDER_JOBS
+    STORYBOARD_JOBS.pop(show_id, None)
+    RENDER_JOBS.pop(show_id, None)
+    with _paused_lock:
+        _paused_episodes.discard((show_id, ep))
+    _save_paused(show)
+
+    def _delete() -> None:
+        shutil.rmtree(path)
+        for key in list(_cooldowns):
+            if key[:2] == (show_id, ep):
+                _cooldowns.pop(key, None)
+
+    run_show_locked(show_id, _delete)
+    return [f"EP{ep:02d} deleted"]
 
 
 def _episode_dirs(show: Show) -> list[int]:
@@ -99,7 +210,13 @@ def _stage_state(show: Show, episode: int) -> dict[str, Any]:
     detail_ids = {s.get("id") for s in (details.get("scenes") or [])}
     missing_detail = [s.get("id") for s in plan_scenes if s.get("id") not in detail_ids]
     shots = [s for sc in (script or {}).get("scenes", []) for s in sc.get("shots", [])]
-    keyframes = sorted((d / "storyboard").glob("*.png")) if (d / "storyboard").exists() else []
+    keyframes = []
+    sbd = d / "storyboard"
+    if sbd.exists():
+        # Storyboard "done" = every shot has a 1s preview mp4 (new) OR a legacy
+        # keyframe png. Count distinct shot ids so png+mp4 of one shot = 1.
+        sids = set(p.stem for p in sbd.glob("*.mp4")) | set(p.stem for p in sbd.glob("*.png"))
+        keyframes = sorted(sids)
     videos = sorted((d / "video").glob("*.mp4")) if (d / "video").exists() else []
     return {
         "has_plan": bool(plan),
@@ -123,6 +240,11 @@ def needs_episode_reconcile(show_id: str, episode: int, show: Show | None = None
     show = show or Show(show_id)
     if not (show.bootstrap_state() or {}).get("complete"):
         return False
+    if is_episode_paused(show_id, episode):
+        return False
+    with _manual_holds_lock:
+        if (show_id, episode) in _manual_holds:
+            return False
     st = _stage_state(show, episode)
     auto = _story_auto()
     if not st["has_plan"]:
@@ -169,6 +291,30 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
     if st["plan_status"] != "approved":
         if not auto:
             return log_      # gated -> wait for human
+        plan = read_episode_plan(show, episode) or {}
+        # A REJECTED outline must regenerate from its rejection notes, never be
+        # rubber-stamped back to approved. That was the bug: reject_story marked
+        # the plan rejected, but the reconciler just re-approved the SAME stale
+        # broken outline and rebuilt everything from it.
+        if plan.get("status") == "rejected" and plan.get("rejected_notes"):
+            if _in_cooldown(show_id, episode, "plan"):
+                return log_
+            ACTIVITY[show_id] = {"detail": f"Episode {episode}: rewriting plan from rejection notes…",
+                                 "ts": time.time()}
+            try:
+                generate_episode_plan(show, episode, notes=plan["rejected_notes"])
+                log_.append(f"EP{episode:02d}: plan regenerated from rejection notes")
+            except Exception as exc:
+                log.warning("plan rewrite failed for %s EP%02d: %s", show_id, episode, exc)
+                _mark_cooldown(show_id, episode, "plan")
+                return log_
+            st = _stage_state(show, episode)
+            plan = read_episode_plan(show, episode) or {}
+        # Never auto-approve an outline that failed structural review — halt for a
+        # human instead of letting a broken outline drive script + storyboard.
+        if (plan.get("plan_review") or {}).get("passed") is False:
+            log.warning("EP%02d plan failed structural review; holding for human", episode)
+            return log_
         try:
             approve_plan(show, episode)
             log_.append(f"EP{episode:02d}: plan auto-approved")
@@ -216,12 +362,36 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
         st = _stage_state(show, episode)
 
     # 4) Storyboard (background job). Skip if a storyboard job is already running
-    #    for this show (jobs are keyed per show, not per episode).
+    #    for this show (jobs are keyed per show, not per episode). A job whose
+    #    worker thread is dead is a zombie — restart it so a crash can't stall
+    #    the episode forever. Also skipped entirely when pipeline.pause_storyboard
+    #    is set (debugging).
     from .storyboard import storyboard_status
     from .render import render_status
+    if get_config().get("pipeline", "pause_storyboard", False):
+        return log_
     if st["keyframe_count"] < st["shot_count"]:
-        if storyboard_status(show_id).get("state") == "running":
-            return log_      # already working; don't re-kick it
+        sb = storyboard_status(show_id)
+        if sb.get("state") in ("running", "waiting"):
+            if sb.get("state") == "running" and sb.get("alive") is False:
+                # A "running" job whose worker thread died is a true zombie —
+                # restart it so a crash can't stall the episode forever.
+                log.warning("storyboard job %s is a zombie (thread dead); restarting", show_id)
+            elif sb.get("state") == "waiting":
+                # Parked on the ref-approval gate. Resume ONLY once the gate has
+                # actually cleared (a ref was just approved) — otherwise skip.
+                # Restarting a parked job on every poll would re-run the whole
+                # ref phase (reconcile + LLM object extraction + refs) endlessly
+                # while the human reviews the refs.
+                from .storyboard import pending_ref_approvals
+                script_latest = _script_latest(show, episode)
+                if script_latest is None:
+                    return log_
+                if pending_ref_approvals(show, episode, script_latest):
+                    return log_      # still blocked on a human; leave it parked
+                log.info("storyboard ref gate cleared for %s; resuming", show_id)
+            else:
+                return log_      # genuinely working; don't re-kick it
         if _in_cooldown(show_id, episode, "storyboard"):
             return log_
         if not st["shot_count"]:
@@ -229,13 +399,16 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
         ACTIVITY[show_id] = {"detail": f"Episode {episode}: storyboard…", "ts": time.time()}
         try:
             build_storyboard(show, episode)
-            log_.append(f"EP{episode:02d}: storyboard started ({st['keyframe_count']}/{st['shot_count']} keyframes)")
+            log_.append(f"EP{episode:02d}: storyboard started ({st['keyframe_count']}/{st['shot_count']} previews)")
         except Exception as exc:
             log.warning("storyboard failed to start for %s EP%02d: %s", show_id, episode, exc)
             _mark_cooldown(show_id, episode, "storyboard")
         return log_
 
     # 5) Render (background job). Skip if a render job is already running.
+    #    build_render itself re-checks the ref-approval gate and parks in
+    #    "waiting" until the refs clear, so a render started while refs are
+    #    unapproved never burns GPU on them.
     if st["video_count"] < st["shot_count"]:
         if render_status(show_id).get("state") == "running":
             return log_
@@ -268,6 +441,7 @@ def reconcile_show_episodes(show_id: str, show: Show | None = None) -> list[str]
 
     A brand-new episode is started only when the latest one is fully produced
     (config: pipeline.auto_start_episode, default true, plus story-gate auto).
+    A deleted episode that leaves a gap will be backfilled first.
     """
     show = show or Show(show_id)
     log_: list[str] = []
@@ -282,23 +456,32 @@ def reconcile_show_episodes(show_id: str, show: Show | None = None) -> list[str]
             log_.extend(reconcile_episode(show_id, ep, show))
             return log_
 
-    # 2) All existing episodes are complete: start the next, if enabled.
+    # 2) All existing episodes are complete. Check for gaps first (deleted
+    #    episodes that need backfilling), then start the next.
     auto_start = cfg.get("pipeline", "auto_start_episode", True)
-    if auto_start and _story_auto(cfg) and eps and _episode_complete(show, eps[-1]):
-        next_ep = eps[-1] + 1
+    if auto_start and _story_auto(cfg):
+        # Find the first missing episode number (gap from deletion).
+        next_ep = 1
+        for ep in eps:
+            if ep == next_ep:
+                next_ep += 1
+            elif ep > next_ep:
+                break
         log_.extend(reconcile_episode(show_id, next_ep, show))
     return log_
 
 
 def needs_any_episode_reconcile(show_id: str, show: Show | None = None) -> bool:
-    """True when any episode of the show needs work (or a NEW episode should start).
+    """True when any episode of the show needs work (or a NEW episode should start
+    or a deleted episode leaves a gap to backfill).
 
-    A new episode only auto-starts when the show is hands-free AND the latest
-    episode is fully produced (script + keyframes + video) — never while the
-    current episode is still mid-flight, so the pipeline stays strictly serial.
+    A new episode only auto-starts when the show is hands-free AND either the
+    latest episode is fully produced OR there's a gap in the sequence.
     """
     show = show or Show(show_id)
     if not (show.bootstrap_state() or {}).get("complete"):
+        return False
+    if get_config().get("pipeline", "pause_storyboard", False):
         return False
     for ep in _episode_dirs(show):
         if needs_episode_reconcile(show_id, ep, show):
@@ -307,8 +490,10 @@ def needs_any_episode_reconcile(show_id: str, show: Show | None = None) -> bool:
     auto_start = cfg.get("pipeline", "auto_start_episode", True)
     if auto_start and _story_auto(cfg):
         eps = _episode_dirs(show)
-        if eps and _episode_complete(show, eps[-1]):
-            return True
+        # Gap in the sequence (e.g. EP01 deleted but EP02–05 exist).
+        for n in range(1, (eps[-1] + 1) if eps else 2):
+            if n not in eps:
+                return True
     return False
 
 
@@ -318,15 +503,22 @@ def reconcile_episodes_if_stalled(show_id: str) -> bool:
     Returns True when a reconcile thread was started. No-op when the show is not
     bootstrap-complete, has no work, or is already being reconciled.
     """
-    if show_id in _reconciling:
-        return False
+    # Dashboard polling is concurrent; claim the show atomically before doing
+    # any filesystem or LLM work so duplicate threads cannot be spawned.
+    with _guard:
+        if show_id in _reconciling:
+            return False
+        _reconciling.add(show_id)
     try:
         if not needs_any_episode_reconcile(show_id):
+            with _guard:
+                _reconciling.discard(show_id)
             return False
     except Exception:
         log.exception("episode reconcile precheck failed for %s", show_id)
+        with _guard:
+            _reconciling.discard(show_id)
         return False
-    _reconciling.add(show_id)
 
     def _run() -> None:
         try:

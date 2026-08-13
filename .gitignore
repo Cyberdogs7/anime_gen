@@ -23,3 +23,4 @@ config/remotes.yaml
 .trash/
 *.egg-info/
 runs/
+.gpu-manager.lock

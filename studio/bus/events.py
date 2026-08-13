@@ -71,6 +71,10 @@ CHAR_REFS_PENDING, CHAR_REFS_APPROVED, CHAR_REFS_REJECTED = (
 VOICE_SAMPLE_PENDING, VOICE_APPROVED, VOICE_REJECTED = (
     "VoiceSamplePending", "VoiceApproved", "VoiceRejected",
 )
+COSTUME_APPROVED, COSTUME_REJECTED = "CostumeApproved", "CostumeRejected"
+OBJECT_REF_PENDING, OBJECT_REF_APPROVED, OBJECT_REF_REJECTED = (
+    "ObjectRefPending", "ObjectRefApproved", "ObjectRefRejected",
+)
 BOOTSTRAP_COMPLETE = "BootstrapComplete"
 PLAN_PENDING, PLAN_APPROVED, PLAN_REJECTED = "PlanPending", "PlanApproved", "PlanRejected"
 SCRIPT_PENDING, SCRIPT_APPROVED, SCRIPT_REJECTED = "ScriptPending", "ScriptApproved", "ScriptRejected"

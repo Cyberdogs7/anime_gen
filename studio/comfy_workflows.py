@@ -9,10 +9,22 @@ LLM in the loop.
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any
 
 from .clients.comfy import ComfyClient
+
+
+def resolve_seed(seed: int) -> int:
+    """A seed of 0 means 'randomize' — the sampler never uses literal 0.
+
+    Without this, a caller passing seed=0 would render the SAME image every run
+    (deterministic), which is why regenerated keyframes looked byte-identical.
+    """
+    if seed in (0, None):
+        return random.randrange(2**63)
+    return seed
 
 # ResolutionSelector aspect labels (must match the node's choices exactly).
 ASPECT_LABELS = {
@@ -53,7 +65,7 @@ def parameterize_keyframe(
     import copy
     wf = copy.deepcopy(workflow)
     wf[NODE_PROMPT]["inputs"]["value"] = prompt
-    wf[NODE_SEED]["inputs"]["seed"] = seed
+    wf[NODE_SEED]["inputs"]["seed"] = resolve_seed(seed)
     wf[NODE_ASPECT]["inputs"]["aspect_ratio"] = ASPECT_LABELS.get(aspect_ratio, aspect_ratio)
     wf[NODE_ASPECT]["inputs"]["megapixels"] = megapixels
     wf[NODE_REFINE]["inputs"]["value"] = False            # never LLM-enhance
@@ -62,9 +74,9 @@ def parameterize_keyframe(
 
 
 def run_t2i(client: ComfyClient, workflow: dict[str, Any], out_path: Path | str,
-            timeout_s: float = 900.0) -> Path:
+            timeout_s: float = 900.0, front: bool = False) -> Path:
     """Submit the workflow, wait, and save the generated image to out_path."""
-    prompt_id = client.submit(workflow)
+    prompt_id = client.submit(workflow, front=front)
     entry = client.wait(prompt_id, timeout_s=timeout_s)
     images = []
     for node_id, output in (entry.get("outputs") or {}).items():
@@ -82,9 +94,10 @@ def run_t2i(client: ComfyClient, workflow: dict[str, Any], out_path: Path | str,
 
 def generate_keyframe(client: ComfyClient, workflow: dict[str, Any], prompt: str,
                       seed: int, out_path: Path | str, aspect_ratio: str = "16:9",
-                      megapixels: float = 1.0, use_lora: bool = False) -> Path:
+                      megapixels: float = 1.0, use_lora: bool = False,
+                      front: bool = False) -> Path:
     wf = parameterize_keyframe(workflow, prompt, seed, aspect_ratio, megapixels, use_lora)
-    return run_t2i(client, wf, out_path)
+    return run_t2i(client, wf, out_path, front=front)
 
 
 def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int,
@@ -103,7 +116,7 @@ def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int
     import copy
     wf = copy.deepcopy(workflow)
     wf[NODE_PROMPT]["inputs"]["value"] = prompt
-    wf[NODE_SEED]["inputs"]["seed"] = seed
+    wf[NODE_SEED]["inputs"]["seed"] = resolve_seed(seed)
     wf[NODE_ASPECT]["inputs"]["aspect_ratio"] = ASPECT_LABELS.get(aspect_ratio, aspect_ratio)
     wf[NODE_ASPECT]["inputs"]["megapixels"] = 1.0
     wf[NODE_REFINE]["inputs"]["value"] = False

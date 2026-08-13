@@ -86,7 +86,9 @@ def _record_seen(show: Show, continuity: dict[str, Any], episode: int,
     if isinstance(new_plotline, dict) and new_plotline.get("id"):
         new_plotline.setdefault("status", "active")
         new_plotline["last_seen_episode"] = episode
-        merged.append(new_plotline)
+        # Idempotent: a previous approved episode may already carry this thread.
+        if new_plotline["id"] not in {p.get("id") for p in merged}:
+            merged.append(new_plotline)
         continuity["last_new_plotline_episode"] = episode
     continuity["plotlines"] = merged
     if overall:
@@ -101,9 +103,18 @@ def _episodes_since_new_plotline(continuity: dict[str, Any], episode: int) -> in
     return episode if last is None else max(0, episode - int(last))
 
 
-def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "") -> str:
-    """Pick plotlines (overall always featured), optionally introduce a new one, and
-    return the episode synopsis. New plotlines are LLM-reviewed + persisted canon."""
+def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "") -> dict[str, Any]:
+    """Pick plotlines (overall always featured), optionally vet a new plotline, and
+    return the episode synopsis + what to feature.
+
+    READ-ONLY: this stage must NOT mutate continuity or the bible. Plotline
+    bookkeeping (last_seen stamps, new-plotline canon persistence, new character
+    sheets) happens later at PLAN APPROVAL via
+    growth.commit_plotline_on_approval. Otherwise every rejected/regenerated
+    episode would keep re-growing the same plotlines (the EP01 Apex-734 pile-up).
+
+    Returns {"synopsis": str, "featured": [ids], "new_plotline": dict|None}.
+    """
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"))
     bible = show.read_bible()
@@ -133,29 +144,32 @@ def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "
                      "it this episode):\n- " + "\n- ".join(dir_notes))
     except Exception:
         pass
+    fallback = {"synopsis": _fallback_synopsis(episode, overall, plotlines),
+                "featured": [], "new_plotline": None}
     try:
         data = llm.chat_json([{"role": "system", "content": system},
                               {"role": "user", "content": user}],
                              model=model, temperature=0.7, max_tokens=4096)
     except Exception:
-        return _fallback_synopsis(episode, overall, plotlines)
+        return fallback
     if not isinstance(data, dict) or not data.get("synopsis"):
-        return _fallback_synopsis(episode, overall, plotlines)
-    # New plotline goes through the LLM review gate and, if approved, is persisted
-    # to the BIBLE (canon) + continuity, and its new characters get sheets.
+        return fallback
+    # Vet a proposed new plotline with the LLM reviewer (read-only). It is NOT
+    # persisted here — only reviewed so a rejected proposal is dropped now and an
+    # approved one is committed at plan approval.
+    new_plotline = None
     if isinstance(data.get("new_plotline"), dict) and data["new_plotline"].get("id"):
         try:
-            from .growth import process_new_plotline
-            result = process_new_plotline(show, data["new_plotline"], episode,
-                                          llm=llm, cfg=cfg)
+            from .growth import review_new_plotline
+            result = review_new_plotline(show, data["new_plotline"], episode,
+                                         llm=llm, cfg=cfg)
             if result.get("approved"):
-                data["new_plotline"] = result["plotline"]
-            else:
-                # Rejected by the reviewer: not canon, do not persist to continuity.
-                data["new_plotline"] = None
+                new_plotline = result["plotline"]
         except Exception as exc:
             log = __import__("logging").getLogger(__name__)
-            log.warning("growth gate failed for episode %s: %s", episode, exc)
-            data["new_plotline"] = None
-    _record_seen(show, continuity, episode, data, plotlines, overall)
-    return data["synopsis"]
+            log.warning("growth review failed for episode %s: %s", episode, exc)
+            new_plotline = None
+    featured = [f.get("id") for f in (data.get("featured_plotlines") or [])
+                if isinstance(f, dict) and f.get("id")]
+    return {"synopsis": data["synopsis"], "featured": featured,
+            "new_plotline": new_plotline}

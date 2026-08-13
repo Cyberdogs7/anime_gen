@@ -24,6 +24,9 @@
   .badge.approved { background:rgba(52,199,123,.16); color:var(--ok); }
   .badge.pending { background:rgba(224,184,76,.16); color:var(--warn); }
   .badge.rejected { background:rgba(255,92,92,.16); color:var(--bad); }
+.badge.working { background:rgba(90,200,250,.18); color:var(--ok); animation:blink 1.2s ease-in-out infinite; }
+.badge.idle { background:rgba(154,163,178,.16); color:var(--dim); }
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:.45; } }
   .badge.stub { background:rgba(154,163,178,.16); color:var(--dim); }
   .card pre { margin:0; padding:12px 16px; overflow:auto; max-height:340px; font:12px/1.5 Consolas,monospace;
               color:#c8d2e0; white-space:pre-wrap; word-break:break-word; }
@@ -37,6 +40,19 @@
   .char { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
   .char h3 { margin:0 0 6px; font-size:14px; }
   .char-ref { width:100%; border-radius:8px; margin:8px 0 4px; display:block; }
+  .outfit-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:10px; margin:6px 0; }
+  .outfit { border:1px solid var(--line); border-radius:8px; padding:8px; text-align:center; }
+  .outfit.rejected { border-color:var(--warn); background:rgba(224,184,76,.06); display:flex;
+                     flex-direction:column; align-items:center; justify-content:center;
+                     min-height:120px; }
+  .outfit-actions { display:flex; gap:6px; justify-content:center; margin-top:6px; }
+  .outfit-actions .btn { padding:5px 10px; font-size:11px; }
+  .outfit .char-ref { margin:0 0 6px; }
+  .outfit-meta { font-size:11px; color:var(--dim); margin-bottom:6px; word-break:break-word; }
+  .outfit .chips { justify-content:center; margin:2px 0 6px; }
+  .costume-prompt { margin:6px 0; text-align:left; }
+  .costume-prompt pre { max-height:180px; overflow:auto; font:11px/1.4 Consolas,monospace;
+                        color:#c8d2e0; white-space:pre-wrap; word-break:break-word; }
   .voice-sample { width:100%; margin:4px 0 8px; }
   .scene-ref { width:100%; border-radius:8px; margin:6px 0 10px; display:block; }
   .scene { margin:4px 0 12px; }
@@ -81,13 +97,17 @@
   .hide { display:none; }
   .flash { position:fixed; right:16px; bottom:16px; background:#262b35; border:1px solid var(--line);
            border-radius:8px; padding:10px 14px; max-width:420px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,.5); }
-  .busybar { background:var(--warn); color:#0d0f13;
-             text-align:center; padding:8px; font-weight:600; }
+  .busybar { position:sticky; top:0; z-index:6; background:var(--warn); color:#0d0f13;
+             text-align:center; padding:12px 16px; font-weight:600; font-size:14px;
+             height:44px; line-height:20px; display:flex; align-items:center; justify-content:center;
+             visibility:visible; opacity:1; transition:opacity .2s, height .2s, padding .2s; }
+  .busybar.off { visibility:hidden; opacity:0; height:0; padding:0 16px; }
+  body.busy-active header { top:44px; }
   .liveout { position:fixed; bottom:0; left:0; right:0; z-index:39; max-height:160px; overflow:auto;
              background:#10141b; color:#cfd6e0; border-top:1px solid var(--line);
              font:11px/1.4 Consolas,monospace; padding:8px 16px; white-space:pre-wrap; }
-  #modal { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; z-index:30; }
-  #modal.hide { display:none !important; }
+  #modal, #costumeModal { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; z-index:30; }
+  #modal.hide, #costumeModal.hide { display:none !important; }
   .modal-card { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:min(760px,92vw);
                 max-height:86vh; overflow:auto; padding:16px; }
   .modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:15px; }
@@ -97,10 +117,17 @@
   .prop h3 { margin:0 0 4px; font-size:15px; }
   .prop .log { font-style:italic; color:#d8dde6; margin:4px 0; }
   .prop .kv { margin:2px 0; }
+  .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.85); z-index:60;
+              display:flex; align-items:center; justify-content:center; cursor:zoom-out; }
+  .lightbox.hide { display:none; }
+  .lightbox img { max-width:94vw; max-height:92vh; border-radius:8px; box-shadow:0 8px 40px rgba(0,0,0,.6); }
+  .lightbox .lb-cap { position:absolute; left:0; right:0; bottom:12px; text-align:center;
+                      color:#cfd6e0; font-size:13px; text-shadow:0 1px 4px #000; }
+  img.shot-img, img.char-ref { cursor:zoom-in; }
 </style>
 </head>
 <body>
-<div id="busy" class="hide busybar"></div>
+<div id="busy" class="off busybar"></div>
 <header>
   <h1>Studio · human approval &amp; review</h1>
   <select id="showSel"></select>
@@ -132,8 +159,47 @@
     </div>
   </div>
 </div>
+<div id="costumeModal" class="hide">
+  <div class="modal-card" style="width:min(980px,94vw)">
+    <div class="modal-head">
+      <b id="costumeModalTitle">Costumes</b>
+      <button class="ghost btn" onclick="closeCostumeModal()">✕</button>
+    </div>
+    <div id="costumeModalBody" class="body"></div>
+    <div class="actions" style="border-top:1px solid var(--line)">
+      <button class="ghost btn" onclick="closeCostumeModal()">Close (Esc)</button>
+    </div>
+  </div>
+</div>
+<div id="lightbox" class="lightbox hide">
+  <img id="lightboxImg" alt="expanded view">
+  <div class="lb-cap" id="lightboxCap"></div>
+</div>
 <script>
 let SHOW = "", EPISODES = [], CUR_EP = "";
+// Costumes awaiting regeneration after a reject: {charName: {label: true, ...}}
+const COSTUME_PENDING = {};
+let COSTUME_MODAL_CHAR = "";
+
+// ---- Click-to-zoom lightbox: any keyframe / object / character-ref image ----
+function openLightbox(src, cap) {
+  const lb = document.getElementById("lightbox");
+  document.getElementById("lightboxImg").src = src;
+  document.getElementById("lightboxCap").textContent = cap || "";
+  lb.classList.remove("hide");
+}
+function closeLightbox() {
+  document.getElementById("lightbox").classList.add("hide");
+}
+document.addEventListener("click", e => {
+  const img = e.target.closest("img.shot-img, img.char-ref");
+  if (img) {
+    openLightbox(img.currentSrc || img.src, img.getAttribute("alt") || "");
+    e.stopPropagation();
+  }
+});
+document.getElementById("lightbox").addEventListener("click", closeLightbox);
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -232,7 +298,7 @@ function askNotes() {
 }
 async function act(url, payload, busyMsg) {
   const busy = document.getElementById("busy");
-  if (busyMsg && busy) { busy.dataset.busy = "1"; busy.textContent = busyMsg; busy.classList.remove("hide"); }
+  if (busyMsg && busy) { busy.dataset.busy = "1"; busy.textContent = busyMsg; busy.classList.remove("off"); document.body.classList.add("busy-active"); }
   const poll = setInterval(async () => {
     try {
       const a = await api(`/api/show/${SHOW}/activity`);
@@ -259,7 +325,12 @@ function flash(msg) {
   clearTimeout(f._t);
   f._t = setTimeout(() => f.remove(), 3200);
 }
-function actRow(step, char, label) {
+function actRow(step, char, label, status) {
+  if (status === "approved") {
+    return `<div class="kv muted" style="padding:12px 16px;border-top:1px solid var(--line)">
+      <span style="color:var(--ok)">✓ Approved</span> — locked as canon${label ? ` for ${label}` : ""}.
+      Reject to regenerate it from notes.</div>`;
+  }
   return `<div class="actions">
     <button class="btn approve" onclick="doApprove('${step}','${char||''}')">Approve ${label}</button>
     <button class="btn reject" onclick="doReject('${step}','${char||''}')">Reject</button>
@@ -317,6 +388,92 @@ async function doRejectScene(sid) {
             "Rejected — regenerating scene image (may take 1–3 min)…");
 }
 
+function openCostumes(charName) {
+  COSTUME_MODAL_CHAR = charName;
+  renderCostumeModal();
+  document.getElementById("costumeModal").classList.remove("hide");
+}
+
+function renderCostumeModal() {
+  const charName = COSTUME_MODAL_CHAR;
+  const d = window._showPayload;
+  const c = (d && d.characters || []).find(x => x.name === charName);
+  if (!c) return;
+  const cc = c.content || {};
+  const body = document.getElementById("costumeModalBody");
+  document.getElementById("costumeModalTitle").textContent = `${charName} — Costumes`;
+  const costumes = (c.costumes || []).filter(v => v.label !== "base");
+  const pending = COSTUME_PENDING[charName] || {};
+  if (!costumes.length && !Object.keys(pending).length) {
+    body.innerHTML = '<p class="muted">No costume variants generated yet.</p>';
+  } else {
+    body.innerHTML = `<div class="outfit-grid">` + costumes.map(v => {
+      const eps = (v.episodes || []).map(e => `<span class="chip">${esc(e)}</span>`).join("") || '<span class="muted">unused yet</span>';
+      const prompt = v.prompt ? `<details class="costume-prompt"><summary class="muted">generation prompt</summary><pre>${esc(v.prompt)}</pre></details>` : "";
+      const status = v.approved
+        ? `<span class="badge approved">Approved</span>`
+        : `<span class="badge">Awaiting approval</span>`;
+      return `<div class="outfit">
+        <img class="char-ref" alt="${esc(v.label)}" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(v.image)}?v=${Date.now()}">
+        <div class="outfit-meta">${esc(v.label)} ${status}</div>
+        <div class="kv muted">Used in: <div class="chips">${eps}</div></div>
+        ${prompt}
+        <div class="outfit-actions">
+          ${v.approved ? "" : `<button class="btn approve" onclick="doApproveCostume('${esc(charName)}','${esc(v.label)}')">✓ Approve</button>`}
+          <button class="btn ghost" onclick="doRejectCostume('${esc(charName)}','${esc(v.label)}','edit')">✎ Edit &amp; regenerate</button>
+          <button class="btn ghost" onclick="doRejectCostume('${esc(charName)}','${esc(v.label)}','regen')">↻ Regenerate fresh</button>
+        </div>
+      </div>`;
+    }).join("") +
+    // Costumes still awaiting regeneration after a reject.
+    Object.keys(pending).map(label =>
+      `<div class="outfit rejected">
+        <div class="outfit-meta">${esc(label)}</div>
+        <div class="kv" style="color:var(--warn)">✕ Rejected — regenerating…</div>
+      </div>`).join("") + `</div>`;
+  }
+}
+
+function closeCostumeModal() {
+  COSTUME_MODAL_CHAR = "";
+  document.getElementById("costumeModal").classList.add("hide");
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeCostumeModal(); });
+document.getElementById("costumeModal").addEventListener("click", e => {
+  if (e.target && e.target.id === "costumeModal") closeCostumeModal();
+});
+
+async function doApproveCostume(charName, label) {
+  await act(`/api/show/${SHOW}/approve`,
+            { step: "costume", char: charName, costume: label },
+            "Costume approved — refs gate unlocked…");
+  if (COSTUME_MODAL_CHAR === charName) renderCostumeModal();
+}
+
+async function doRejectCostume(charName, label, mode) {
+  // edit = Qwen image-edit (optionally with feedback notes)
+  // regen = fresh krea2 render (no feedback, no identity anchor)
+  const notes = mode === "edit" ? (askNotes() ?? "") : "";
+  if (mode === "edit" && notes === null) return;
+  // Mark pending so the modal shows a rejected/regenerating state immediately.
+  (COSTUME_PENDING[charName] || (COSTUME_PENDING[charName] = {}))[label] = true;
+  renderCostumeModal();
+  await act(`/api/show/${SHOW}/reject`,
+            { step: "costume", char: charName, costume: label, mode, notes },
+            mode === "edit" ? "Rejected — editing & regenerating costume…"
+                            : "Rejected — regenerating costume fresh…");
+  // act() reloads the payload; refresh the modal body so the regenerated image
+  // (or a still-pending state) shows in place.
+  delete (COSTUME_PENDING[charName] || {})[label];
+  if (COSTUME_MODAL_CHAR === charName) renderCostumeModal();
+}
+
+async function doRejectCharRef(charName) {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/reject`, { step: "char_ref", char: charName, notes },
+            "Rejected — revising the appearance & regenerating the base ref (1–3 min)…");
+}
+
 // ---------------- Setup (Gate 0) ----------------
 // Human-readable rendering of dicts/lists instead of raw JSON.
 function pretty(v, depth) {
@@ -347,40 +504,63 @@ function labelize(k) {
 
 async function loadSetup() {
   const d = await api(`/api/show/${SHOW}`);
+  window._showPayload = d;
   const el = document.getElementById("view-setup");
   if (!d.show_id) { el.innerHTML = '<p class="muted">show not found</p>'; return; }
   let html = "";
   html += card("Concept", badge(d.bootstrap.concept.status),
                (regenNote(d.bootstrap.concept) || "") +
                (d.concept ? pretty(d.concept) : '<p class="muted">no concept yet</p>'),
-               actRow("concept", "", "concept"));
+               actRow("concept", "", "concept", d.bootstrap.concept.status));
   const bibleBody = !d.bible ? '<p class="muted">no bible yet</p>'
     : isStubBible(d.bible)
       ? '<p class="muted">Bible not generated yet — it generates after the concept is approved (takes a couple of minutes).</p>'
       : pretty(d.bible);
   html += card("Bible", badge(d.bootstrap.bible.status),
                (regenNote(d.bootstrap.bible) || "") + bibleBody,
-               actRow("bible", "", "bible"));
+               actRow("bible", "", "bible", d.bootstrap.bible.status));
   let charHtml = '<div class="char-grid">';
   for (const c of d.characters) {
     const cc = c.content || {};
+    const baseRef = (c.variants || []).find(v => v.label === "base");
+    const outfits = (c.variants || []).filter(v => v.label !== "base");
+    // Show only the base image here; costumes live in the outfit grid below
+    // (ref_images lists every PNG, which would duplicate them).
+    const variantFiles = (c.variants || []).map(v => v.image);
+    const baseImg = (baseRef && baseRef.image) ||
+      (c.ref_images || []).find(f => f !== "refs.json" && !variantFiles.includes(f));
+    let imgs = "";
+    if (baseImg && (c.ref_images || []).length) {
+      imgs = `<img class="char-ref" alt="ref" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(baseImg)}?v=${Date.now()}">`;
+    } else if (c.refs !== "approved") {
+      imgs = '<div class="kv muted">image generating…</div>';
+    }
+    const nCostumes = (c.costumes || []).length;
+    const costumeBtn = nCostumes
+      ? `<button class="btn ghost" onclick="openCostumes('${esc(c.name)}')">Costumes (${nCostumes})</button>`
+      : "";
+    // Character is approved when proposal + refs + voice all say so.
+    const charApproved = c.proposal === "approved" && c.refs === "approved" && c.voice === "approved";
+    const primaryActions = charApproved
+      ? `<div class="kv muted" style="padding:4px 0"><span style="color:var(--ok)">✓ Approved</span> — locked as canon. Regenerate individual assets below if needed.</div>`
+      : `<button class="btn approve" onclick="doApprove('character','${esc(c.name)}')">Approve</button>` +
+        `<button class="btn reject" onclick="doReject('character','${esc(c.name)}')">Reject</button>`;
+    const assetActions = (c.ref_images.length || c.voice_file)
+      ? `<span class="muted" style="font-size:11px">or</span>` +
+        (c.ref_images.length ? ` <button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Reject base image</button>` : "") +
+        (c.voice_file ? ` <button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : "")
+      : "";
     charHtml += `<div class="char"><h3>${esc(c.name)}</h3>
       <div class="kv">Role: <b>${esc(cc.role || "—")}</b></div>
       <div class="kv">Proposal: ${badge(c.proposal)} &nbsp; Refs: ${badge(c.refs || (c.ref_images.length ? "ready" : "stub"))} &nbsp; Voice: ${badge(c.voice)}</div>
-      ${(c.ref_images || []).length
-        ? (c.ref_images || []).map(f =>
-          `<img class="char-ref" alt="ref" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(f)}?v=${Date.now()}">`).join("")
-        : (c.refs === "approved" ? "" : '<div class="kv muted">image generating…</div>')}
+      ${baseImg ? `<div class="kv muted">Base ref:</div>${imgs}` : imgs}
       ${c.voice_file
         ? `<audio class="voice-sample" controls preload="none" src="/api/show/${SHOW}/media/assets/voice/${esc(c.voice_file)}?v=${Date.now()}"></audio>`
         : (c.voice === "pending" ? '<div class="kv">voice sample generating…</div>' : "")}
       <div class="actions" style="border-top:0;padding:8px 0 2px">
-        <button class="btn approve" onclick="doApprove('character','${esc(c.name)}')">Approve</button>
-        <button class="btn reject" onclick="doReject('character','${esc(c.name)}')">Reject</button>
-        ${(c.ref_images.length || c.voice_file) ? '<span class="muted" style="font-size:11px">or</span>' : ""}
-        ${c.ref_images.length ? `<button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Reject image</button>` : ""}
-        ${c.voice_file ? `<button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : ""}
+        ${primaryActions} ${assetActions}
       </div>
+      ${costumeBtn ? `<div class="actions" style="border-top:0;padding:4px 0 0">${costumeBtn}</div>` : ""}
       ${c.rejected_notes ? `<div class="kv">Rejected: <b>${esc(c.rejected_notes)}</b></div>` : ""}
       <details><summary class="muted">proposal details</summary><div class="prop-body">${pretty(cc)}</div></details>
     </div>`;
@@ -401,7 +581,7 @@ async function loadSetup() {
   sceneHtml += '</div>';
   html += card("Scenes", badge(d.bootstrap.scenes.status),
                (regenNote(d.bootstrap.scenes) || "") + sceneHtml || '<p class="muted">no scenes</p>',
-               actRow("scenes", "", "scenes"));
+               actRow("scenes", "", "scenes", d.bootstrap.scenes.status));
   if (d.bootstrap.complete) {
     const prev = d.next_episode > 1 ? `episode ${d.next_episode - 1} generated — review it in the Story tab.` : "generate the first episode (Development plotlines → script → writers' room review).";
     html += card("Next stage", "",
@@ -414,22 +594,32 @@ async function loadSetup() {
 // ---------------- Story (Gate 3) ----------------
 // Live pipeline status: always show what's happening right now (background
 // storyboard/consistency jobs, not just button-triggered actions).
+let _pollActive = null;
 async function pollActivity() {
   const busy = document.getElementById("busy");
   const out = document.getElementById("liveout");
+  let a;
   try {
-    const a = await api(`/api/show/${SHOW}/activity`);
-    if (a && a.active) {
-      if (busy) { busy.textContent = "● " + (a.detail || "Working…"); busy.classList.remove("hide"); }
-      if (out) {
-        out.textContent = a.output ? a.output.slice(-800) : "";
-        out.classList.remove("hide");
-      }
-    } else {
-      if (busy && !busy.dataset.busy) busy.classList.add("hide");
-      if (out) out.classList.add("hide");
+    a = await api(`/api/show/${SHOW}/activity`);
+  } catch (e) { /* show not loaded yet */ return; }
+  const active = !!(a && a.active);
+  if (active) {
+    // Update the busy bar + live transcript on EVERY poll (not just on the
+    // active->true transition) so the user sees the current stage tick by tick
+    // — the writing room, as it writes.
+    _pollActive = true;
+    document.body.classList.add("busy-active");
+    if (busy) { busy.textContent = "● " + (a.detail || "Working…"); busy.classList.remove("off"); }
+    if (out) {
+      out.textContent = a.output ? a.output.slice(-800) : "";
+      out.classList.remove("hide");
     }
-  } catch (e) { /* show not loaded yet */ }
+  } else if (_pollActive) {
+    _pollActive = false;
+    document.body.classList.remove("busy-active");
+    if (busy && !busy.dataset.busy) busy.classList.add("off");
+    if (out) out.classList.add("hide");
+  }
 }
 setInterval(pollActivity, 2000);
 
@@ -438,13 +628,14 @@ function episodeStatus(d) {
   const sb = d.storyboard || {};
   const cons = d.consistency || [];
   const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
-  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.keyframe).length, 0);
+  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.preview || s.keyframe).length, 0);
   const fails = cons.filter(c => c.result !== "pass").length;
   if (st.status === "rejected") return "Rejected — regenerating";
   if (st.status === "approved") return "Approved ✓";
   if (sb.state === "failed") return `Failed: ${sb.detail || "unknown"}`;
+  if (sb.state === "waiting") return "Waiting on you — approve the costume & object refs below to continue";
   if (sb.state === "running") return `Generating: ${sb.detail || "storyboard…"}`;
-  if (done < shots) return `Storyboard incomplete (${done}/${shots} keyframes) — not final`;
+  if (done < shots) return `Storyboard incomplete (${done}/${shots} previews) — not final`;
   if (fails > 0) return `${fails} shot${fails > 1 ? "s" : ""} still flagged — consistency auto-iterated to its cap`;
   if (st.status === "pending") return "Awaiting your approval";
   return "Draft — not yet approved";
@@ -468,28 +659,179 @@ async function loadStory() {
   let html = '<div class="card"><div class="body">';
   for (const ep of EPISODES) {
     const st = ep.story || {};
+    const sb = ep.storyboard || {};
+    const paused = ep.paused;
+    const sbActive = sb.state === "running" || sb.state === "waiting";
+    let ctrl = "";
+    if (paused) {
+      ctrl = `<button class="btn ghost" onclick="doStoryResume('${ep.episode}')">Resume</button>`;
+    } else if (sbActive) {
+      ctrl = `<button class="btn ghost" onclick="doStoryStop('${ep.episode}')">Stop</button>`;
+    }
     html += `<div class="ep-row">
       <b>${esc(ep.episode)}</b>
       <span class="muted">${esc(ep.script_file || "no script")}</span>
-      ${badge(st.status || "pending")}
+      ${paused ? badge("paused") : badge(st.status || "pending")}
       <span class="spacer"></span>
-      <button class="btn approve" onclick="doStoryApprove('${ep.episode}')">Approve</button>
-      <button class="btn reject" onclick="doStoryReject('${ep.episode}')">Reject</button>
+      ${ctrl}
+       <button class="btn approve" onclick="doStoryApprove('${ep.episode}')">Approve</button>
+       <button class="btn reject" onclick="doStoryReject('${ep.episode}')">Reject</button>
+       <button class="btn ghost" onclick="doStoryDelete('${ep.episode}')">Delete</button>
     </div>`;
   }
   html += '</div></div>';
   // Only the selected episode's full storyboard detail.
-  let anyRunning = false;
   const d2 = await api(`/api/show/${SHOW}/ep/${CUR_EP}`);
-  if ((d2.storyboard || {}).state === "running") anyRunning = true;
-  html += episodeStoryboard(EPISODES.find(e => e.episode === CUR_EP), d2);
+  html += `<div id="story-detail">${episodeStoryboard(EPISODES.find(e => e.episode === CUR_EP), d2)}</div>`;
   el.innerHTML = tabs + html;
-  if (anyRunning) setTimeout(loadStory, 4000);
+  // Live: instead of re-rendering the whole page every few seconds (which
+  // reloads every keyframe thumbnail and jumps the layout), patch only the
+  // status / progress text and any keyframes that actually changed.
+  if ((d2.storyboard || {}).state === "running" || (d2.render || {}).state === "running") {
+    startStoryLive();
+  } else {
+    // Writing room: if this episode is being (re)written right now — its story
+    // is rejected (regen queued), or plan + scene details are approved but the
+    // new script hasn't landed — open the live writing-room view so the user
+    // sees the progress even after a page refresh mid-rebuild.
+    const st0 = d2.story || {};
+    const rebuilding = st0.status === "rejected"
+      || (!d2.script_file && (d2.plan || {}).status === "approved"
+          && (d2.scene_details || {}).status === "approved");
+    if (rebuilding) startWritingLive(CUR_EP);
+  }
+}
+
+let _storyLiveTimer = null;
+let _storyLiveKf = {};   // shot id -> last seen keyframe filename
+
+function startStoryLive() {
+  if (_storyLiveTimer) return;
+  _storyLiveTimer = setInterval(async () => {
+    try {
+      const d2 = await api(`/api/show/${SHOW}/ep/${CUR_EP}`);
+      const st = document.getElementById("ep-status-line");
+      if (st) st.innerHTML = episodeStatus(d2);
+      const sbc = document.getElementById("sb-controls");
+      if (sbc) sbc.innerHTML = storyboardControls(d2);
+      const rdc = document.getElementById("rd-controls");
+      if (rdc) rdc.innerHTML = renderControls(d2);
+      // Refresh only preview/keyframe media whose file actually changed.
+      for (const sc of (d2.scenes || [])) {
+        for (const s of (sc.shots || [])) {
+          const prev = s.preview ? s.preview : (s.keyframe ? s.keyframe : "");
+          if (!prev) continue;
+          const el = document.querySelector(`[data-shot="${s.id}"]`);
+          if (!el) continue;
+          if (_storyLiveKf[s.id] !== prev) {
+            _storyLiveKf[s.id] = prev;
+            const url = `/api/show/${SHOW}/media/runs/${esc(d2.episode)}/storyboard/${esc(prev)}?v=${Date.now()}`;
+            if (el.tagName === "VIDEO") el.src = url;
+            else el.src = url;
+          }
+        }
+      }
+      const running = (d2.storyboard || {}).state === "running" || (d2.render || {}).state === "running";
+      if (!running) {
+        clearInterval(_storyLiveTimer);
+        _storyLiveTimer = null;
+      }
+    } catch (e) { /* show not loaded yet */ }
+  }, 4000);
+}
+
+// ---- Writing room: live view of a script being (re)written -----------------
+// When an episode is rejected / shots regenerated, the old script is removed and
+// the pipeline rebuilds plan -> details -> shots -> storyboard in the background.
+// This poller turns the episode view into a window into that process: it shows
+// the live stage detail + the raw draft the LLM is typing, and re-renders the
+// (media-free) episode cards as the new plan/scenes/script land. It hands off to
+// the patch-based startStoryLive once previews/renders begin, and does a clean
+// final render when the remake is done.
+let _writingTimer = null;
+
+function writingRoomPanel(d, act) {
+  const st = d.story || {};
+  const sum = d.summary || {};
+  const scenes = (d.scenes || []).length;
+  const shots = sum.shots || 0;
+  const lines = sum.dialogue_lines || 0;
+  const writing = !!(act.active) || st.status === "rejected" || !d.script_file;
+  return `<div class="card" id="writing-room">
+    <h2>Writing room ${writing ? badge("working") : badge("idle")}</h2>
+    <div class="body">
+      <div class="kv"><b>${esc(act.detail || (writing ? "Queued — regenerating…" : "Idle"))}</b></div>
+      <div class="kv muted">Scenes: <b>${scenes}/${(d.plan && (d.plan.scenes || []).length) || "—"}</b> · Shots: <b>${shots}</b> · Dialogue lines: <b>${lines}</b></div>
+    </div></div>`;
+}
+
+function writingProgress(d) {
+  const w = d.writing || {};
+  const ids = Object.keys(w);
+  if (!ids.length) return "";
+  const chips = ids.map(sid => {
+    const s = w[sid];
+    const label = s.pass === "done"
+      ? `${sid} · done (${s.shots} shots)`
+      : (s.pass ? `${sid} · ${s.pass}…` : sid);
+    const cls = s.pass === "done" ? "approved" : (s.pass ? "working" : "pending");
+    return `<span class="badge ${cls}" title="${esc(label)}">${esc(label)}</span>`;
+  }).join(" ");
+  return `<div class="card"><h2>Scene writing progress</h2><div class="chips">${chips}</div></div>`;
+}
+
+function startWritingLive(ep) {
+  clearInterval(_storyLiveTimer); _storyLiveTimer = null;
+  if (_writingTimer) return;
+  _writingTimer = setInterval(async () => {
+    try {
+      const [d, act] = await Promise.all([
+        api(`/api/show/${SHOW}/ep/${ep}`),
+        api(`/api/show/${SHOW}/activity`),
+      ]);
+      const sb = d.storyboard || {}, rd = d.render || {};
+      const mediaRunning = sb.state === "running" || rd.state === "running";
+      // Previews/renders began: hand off to the patch-based live updater.
+      if (mediaRunning) {
+        clearInterval(_writingTimer); _writingTimer = null;
+        _storyLiveKf = {};
+        await loadStory();
+        startStoryLive();
+        return;
+      }
+      const hasMedia = (d.scenes || []).some(sc => (sc.shots || []).some(s => s.preview || s.keyframe));
+      const st = d.story || {};
+      // Remake finished: a fresh script + previews exist and nothing is running.
+      if (!act.active && !mediaRunning && hasMedia && d.script_file && st.status !== "rejected") {
+        clearInterval(_writingTimer); _writingTimer = null;
+        _storyLiveKf = {};
+        await loadStory();
+        return;
+      }
+      // Writing phase: re-render the episode detail so the new plan, scene
+      // treatments and shots appear the moment they land. Only while the view
+      // has no media yet — once previews exist, re-rendering would reload every
+      // thumbnail and jump the layout (startStoryLive patches instead).
+      if (!hasMedia) {
+        const det = document.getElementById("story-detail");
+        if (det) {
+          const epRec = { episode: ep, story: st, script_file: d.script_file,
+                          storyboard: sb, render: rd, paused: d.paused };
+          det.innerHTML = writingRoomPanel(d, act) + episodeStoryboard(epRec, d);
+        }
+      }
+    } catch (e) { /* show not loaded yet */ }
+  }, 4000);
 }
 
 function selectEpisode(ep) {
   if (CUR_EP === ep) return;
   CUR_EP = ep;
+  clearInterval(_storyLiveTimer);
+  _storyLiveTimer = null;
+  clearInterval(_writingTimer);
+  _writingTimer = null;
+  _storyLiveKf = {};
   loadStory();
 }
 
@@ -503,6 +845,7 @@ function episodeStoryboard(ep, d) {
     a[k] = (a[k] || 0) + 1; return a;
   }, {});
   let h = "";
+  h += refGateBanner(d);
   const plan = d.plan || {};
   if (plan && plan.status) {
     const planScenes = (plan.scenes || []).map(sc =>
@@ -535,24 +878,31 @@ function episodeStoryboard(ep, d) {
       sd.status === "pending"
         ? `<div class="actions"><button class="btn approve" onclick="doSceneDetails('approve','${esc(d.episode)}')">Approve scenes</button>` +
           `<button class="btn reject" onclick="doSceneDetails('reject','${esc(d.episode)}')">Reject scenes</button></div>`
-        : (sd.status === "approved" ? `<div class="kv muted">Scene details approved — writing shots</div>` : ""));
+        : (sd.status === "approved"
+          ? `<div class="kv muted">Scene details approved</div>` +
+            `<div class="actions"><button class="btn reject" onclick="doRegenerateShots('${esc(d.episode)}')">Regenerate shots</button></div>`
+          : ""));
   }
   h += card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
-    `<div class="kv">Status: <b>${esc(episodeStatus(d))}</b></div>` +
+    `<div class="kv">Status: <b id="ep-status-line">${esc(episodeStatus(d))}</b></div>` +
     (sum.episode ? `<div class="ep-summary"><b>Episode summary:</b> ${esc(sum.episode)}</div>` : "") +
     `<div class="kv">Scenes: <b>${sum.scenes || 0}</b> · Shots: <b>${sum.shots || 0}</b> · ` +
     `Dialogue lines: <b>${sum.dialogue_lines || 0}</b> · Hero shots: <b>${sum.hero_shots || 0}</b></div>` +
     (consCounts.pass || consCounts.regenerated || consCounts.failed
       ? `<div class="kv">Consistency: <b>${consCounts.pass || 0} pass</b> · <b>${consCounts.regenerated || 0} regenerated</b> · <b>${consCounts.failed || 0} failed</b></div>` : "") +
-    storyboardControls(d) + renderControls(d));
+    `<div id="sb-controls">${storyboardControls(d)}</div><div id="rd-controls">${renderControls(d)}</div>`);
+  h += writingProgress(d);
   for (const sc of (d.scenes || [])) {
     let sh = `<div class="scene"><b>${esc(sc.id)}</b> — ${esc(sc.location || "")} ` +
              `<span class="muted">${esc(sc.time_of_day || "")}</span>` +
              `<div class="kv">${esc(sc.summary || "")}</div><div class="shot-grid">`;
     for (const s of (sc.shots || [])) {
-      const img = s.keyframe
-        ? `<img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/storyboard/${esc(s.keyframe)}?v=${Date.now()}">`
-        : '<div class="muted shot-empty">keyframe pending</div>';
+      // 1-second H3 preview video (preferred) or legacy keyframe still.
+      const prev = s.preview
+        ? `<video class="shot-video" controls muted preload="none" data-shot="${esc(s.id)}" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/storyboard/${esc(s.preview)}"></video>`
+        : (s.keyframe
+          ? `<img class="shot-img" data-shot="${esc(s.id)}" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/storyboard/${esc(s.keyframe)}">`
+          : '<div class="muted shot-empty">preview pending</div>');
       const vid = (d.videos || {})[s.id]
         ? `<video class="shot-video" controls preload="none" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/video/${esc(d.videos[s.id])}"></video>`
         : "";
@@ -561,7 +911,7 @@ function episodeStoryboard(ep, d) {
       const costs = Object.entries(s.costumes || {}).map(([n, l]) =>
         `<span class="badge ghost" title="costume">${esc(n)}: ${esc(l)}</span>`).join(" ");
       const consBadge = consMap[s.id] ? ` ${badge(consMap[s.id])}` : "";
-      sh += `<div class="shot">${img}${vid}
+      sh += `<div class="shot">${prev}${vid}
         <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}</div>
         <div class="shot-costumes">${costs}</div>
         <div class="kv">${esc(s.camera || "")}</div>
@@ -573,17 +923,36 @@ function episodeStoryboard(ep, d) {
   if ((d.objects || []).length) {
     const objs = (d.objects || []).map(o =>
       `<div class="obj"><img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/objects/${esc(o.image)}?v=${Date.now()}">` +
-      `<div class="kv">${esc(o.name)}</div></div>`).join("");
+      `<div class="kv">${esc(o.name)} ${o.approved ? '<span class="badge approved">Approved</span>' : '<span class="badge">Awaiting approval</span>'}</div>` +
+      `<div class="outfit-actions">` +
+      (o.approved ? "" : `<button class="btn approve" onclick="doApproveObject('${esc(d.episode)}','${esc(o.slug)}')">✓ Approve</button>`) +
+      `<button class="btn ghost" onclick="doRejectObject('${esc(d.episode)}','${esc(o.slug)}')">↻ Regenerate</button>` +
+      `</div></div>`).join("");
     h += card("Recurring objects (continuity refs)", "", `<div class="obj-grid">${objs}</div>`);
   }
   if ((d.cast || []).length) {
     const cast = (d.cast || []).map(c => {
-      const variants = (c.variants || []).map(v =>
+      // Base ref portrait with feedback (edit & regenerate from notes). The base
+      // variant is the character's canonical look — always editable.
+      const baseVariant = (c.variants || []).find(v => v.label === "base");
+      const baseRef = baseVariant && baseVariant.image
+        ? `<div class="obj"><div class="kv"><b>Base ref</b></div>` +
+          `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(baseVariant.image)}?v=${Date.now()}">` +
+          `<div class="outfit-actions">` +
+          `<button class="btn ghost" onclick="doRejectCharRef('${esc(c.name)}')">✎ Edit &amp; regenerate</button>` +
+          `</div></div>` : "";
+      const variants = (c.variants || []).filter(v => v.label !== "base").map(v =>
         `<div class="obj">${v.image
           ? `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(v.image)}?v=${Date.now()}">`
           : '<div class="muted shot-empty">no ref</div>'}
-        <div class="kv"><b>${esc(v.label)}</b></div></div>`).join("");
-      return `<div class="obj"><div class="kv"><b>${esc(c.name)}</b> <span class="muted">${esc(c.role || "")}</span></div>${variants}</div>`;
+        <div class="kv"><b>${esc(v.label)}</b> ${v.approved
+          ? '<span class="badge approved">Approved</span>'
+          : '<span class="badge">Awaiting approval</span>'}</div>
+        ${v.approved ? "" : `<div class="outfit-actions">` +
+          `<button class="btn approve" onclick="doApproveCostume('${esc(c.name)}','${esc(v.label)}')">✓ Approve</button>` +
+          `<button class="btn ghost" onclick="doRejectCostume('${esc(c.name)}','${esc(v.label)}','regen')">↻ Regenerate</button>` +
+          `</div>`}</div>`).join("");
+      return `<div class="obj"><div class="kv"><b>${esc(c.name)}</b> <span class="muted">${esc(c.role || "")}</span></div>${baseRef}${variants}</div>`;
     }).join("");
     h += card("Episode cast (character refs)", "", `<div class="obj-grid">${cast}</div>`);
   }
@@ -603,19 +972,37 @@ function episodeStoryboard(ep, d) {
   return h;
 }
 
+function refGateBanner(d) {
+  const pending = d.pending_refs || [];
+  const sb = d.storyboard || {}, rd = d.render || {};
+  const waiting = sb.state === "waiting" || rd.state === "waiting";
+  if (!pending.length && !waiting) return "";
+  const items = pending.map(x => `<li>${esc(x)}</li>`).join("");
+  const ctd = waiting ? "Previews and video are paused until they're approved." : "These refs are not yet approved.";
+  return `<div class="card" style="border:1px solid var(--warn)">
+    <h2>Action needed — approve reference images ${badge("pending")}</h2>
+    <div class="body">
+      <div class="kv" style="color:var(--warn)"><b>${esc(ctd)}</b> Review the costume variants and recurring objects below and click ✓ Approve (or regenerate) each one.</div>
+      ${items ? `<ul class="kv muted">${items}</ul>` : ""}
+    </div></div>`;
+}
+
 function storyboardControls(d) {
   const sb = d.storyboard || {};
   const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
-  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.keyframe).length, 0);
+  const done = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).filter(s => s.preview || s.keyframe).length, 0);
   if (sb.state === "running") {
     return `<div class="kv muted">Storyboard generating… ${sb.done || 0}/${sb.total || shots} — ${esc(sb.detail || "")}</div>`;
   }
+  if (sb.state === "waiting") {
+    return `<div class="kv" style="color:var(--warn)"><b>Previews paused</b> — approve the costume & object refs flagged below to unlock preview generation.</div>`;
+  }
   let h = "";
   if (shots && done < shots) {
-    h += `<div class="actions"><button class="btn approve" onclick="genStoryboard('${esc(d.episode)}')">Generate storyboard (${done}/${shots} keyframes)</button></div>`;
+    h += `<div class="actions"><button class="btn approve" onclick="genStoryboard('${esc(d.episode)}')">Generate storyboard previews (${done}/${shots})</button></div>`;
   }
   if (done && shots && done >= shots) {
-    h += `<div class="kv muted">Storyboard complete (${done} keyframes) — consistency review auto-runs</div>`;
+    h += `<div class="kv muted">Storyboard complete (${done} previews) — consistency review auto-runs</div>`;
   }
   return h;
 }
@@ -626,12 +1013,28 @@ function genStoryboard(ep) {
       "Starting storyboard generation (background)…");
 }
 
+async function doApproveObject(ep, slug) {
+  await act(`/api/show/${SHOW}/approve`,
+            { step: "object", episode: ep, slug },
+            "Object ref approved — refs gate unlocked…");
+}
+
+async function doRejectObject(ep, slug) {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/reject`,
+            { step: "object", episode: ep, slug, notes },
+            "Object ref rejected — regenerating…");
+}
+
 function renderControls(d) {
   const rd = d.render || {};
   const shots = (d.scenes || []).reduce((n, sc) => n + (sc.shots || []).length, 0);
   const videos = Object.keys(d.videos || {}).length;
   if (rd.state === "running") {
     return `<div class="kv muted">Video rendering… ${rd.done || 0}/${rd.total || shots} — ${esc(rd.detail || "")}</div>`;
+  }
+  if (rd.state === "waiting") {
+    return `<div class="kv" style="color:var(--warn)"><b>Video render paused</b> — approve the costume & object refs flagged below to unlock rendering.</div>`;
   }
   if (!shots) return "";
   let h = "";
@@ -670,6 +1073,15 @@ async function doSceneDetails(action, ep) {
             action === "approve"
               ? "Scene details approved — writing shots + storyboard (background)…"
               : "Rejected — regenerating scene details with your notes…");
+  startWritingLive(ep);
+}
+
+async function doRegenerateShots(ep) {
+  const notes = askNotes(); if (notes === null) return;
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  await act(`/api/show/${SHOW}/shots/regenerate`, { episode: n, notes },
+            "Regenerating shots from the approved scene details (background)…");
+  startWritingLive(ep);
 }
 
 async function doStoryApprove(ep) {
@@ -678,7 +1090,28 @@ async function doStoryApprove(ep) {
 }
 async function doStoryReject(ep) {
   const notes = askNotes(); if (notes === null) return;
+  // Immediately clear the episode view so stale assets don't hang around.
+  const el = document.getElementById("view-story");
+  el.innerHTML = '<div class="card"><div class="body"><p>Rejecting — plan reset, full regen queued…</p></div></div>';
   await act(`/api/show/${SHOW}/ep/${ep}/reject`, { notes });
+  // Watch the writing room: show the live progress of the new script.
+  startWritingLive(ep);
+}
+async function doStoryStop(ep) {
+  await act(`/api/show/${SHOW}/ep/${ep}/stop`, {}, "Pausing episode…");
+}
+async function doStoryResume(ep) {
+  await act(`/api/show/${SHOW}/ep/${ep}/resume`, {}, "Resuming episode…");
+}
+async function doStoryDelete(ep) {
+  if (!confirm(`Delete episode ${ep} and all of its generated files? This cannot be undone.`)) return;
+  const result = await api(`/api/show/${SHOW}/ep/${ep}`, { method: "DELETE" });
+  if (!result.ok) {
+    alert(result.error || "Episode could not be deleted.");
+    return;
+  }
+  CUR_EP = null;
+  await loadStory();
 }
 
 // ---------------- helpers ----------------

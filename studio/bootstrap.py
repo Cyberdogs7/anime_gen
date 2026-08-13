@@ -18,8 +18,8 @@ from . import prompts
 from .bus import make_broker
 from .bus.events import (
     BIBLE_APPROVED, BIBLE_PENDING, BOOTSTRAP_COMPLETE, CHAR_PROPOSAL_APPROVED,
-    CHAR_PROPOSAL_PENDING, CHAR_REFS_PENDING, CONCEPT_APPROVED, CONCEPT_PENDING,
-    SCENE_REGISTRY_APPROVED, SCENE_REGISTRY_PENDING, VOICE_APPROVED,
+    CHAR_PROPOSAL_PENDING, CHAR_REFS_APPROVED, CHAR_REFS_PENDING, CONCEPT_APPROVED,
+    CONCEPT_PENDING, SCENE_REGISTRY_APPROVED, SCENE_REGISTRY_PENDING, VOICE_APPROVED,
     VOICE_SAMPLE_PENDING, Event, new_event,
 )
 from .clients import LMStudioClient, TTSService
@@ -93,6 +93,10 @@ def needs_reconcile(show_id: str, show: Show | None = None) -> bool:
         return False
     for ch in st.get("characters", []):
         if ch.get("proposal") == "pending" or ch.get("voice") == "pending":
+            return False
+        # Refs gate independently: a generated ref ("real") awaits human
+        # approval before the chain can advance past it.
+        if ch.get("refs") not in ("approved", "", None):
             return False
     if (st.get("scenes") or {}).get("status") == "pending":
         # The registry itself awaits the human, but its location ref images are
@@ -332,6 +336,32 @@ class BootstrapChain:
         self.show.write_character(char)
         return new
 
+    def revise_costume_prompt(self, name: str, current: str, feedback: str) -> str:
+        """LLM rewrites ONLY a costume-variant generation prompt from feedback."""
+        self._report(f"Revising {name}'s costume from your notes…")
+        profile = self.cfg["show_profile"]
+        system = prompts.showrunner_system(profile, "mature",
+                                           profile.get("baseline", "ranma-1-2"))
+        out = self._ask("showrunner", system,
+                        prompts.revise_costume_prompt(current, feedback))
+        return ((out or {}).get("prompt") or "").strip() or current
+
+    def describe_costume(self, label: str, char_name: str,
+                         personality: str = "", situation: str = "",
+                         feedback: str = "") -> str:
+        """LLM writes a concrete description of ONLY the costume, driven by the
+        character's personality + the use case — never their current look.
+        """
+        self._report(f"Designing costume '{label}' for {char_name}…")
+        profile = self.cfg["show_profile"]
+        system = prompts.showrunner_system(profile, "mature",
+                                           profile.get("baseline", "ranma-1-2"))
+        out = self._ask("showrunner", system,
+                        prompts.costume_description_prompt(label, char_name,
+                                                           personality, situation,
+                                                           feedback))
+        return ((out or {}).get("costume") or "").strip()
+
     def revise_scene_setting(self, scene: dict[str, Any], sid: str, feedback: str) -> str:
         """LLM rewrites ONLY a scene's setting_prompt from rejection feedback."""
         import yaml
@@ -513,12 +543,24 @@ class BootstrapChain:
                 log_.append(f"character {name}: voice sample -> pending")
                 did = True
 
+            # Refs gate independently: the generated reference image needs human
+            # approval even if the proposal text was auto-approved. Only auto
+            # when the master auto_approve switch is on.
+            if char_state.get("refs") not in ("approved", "", None):
+                if not self._auto():
+                    self.show.set_bootstrap_state(st)
+                    return False
+                char_state["refs"] = "approved"
+                self._emit(new_event(CHAR_REFS_APPROVED, show_id=self.show.show_id,
+                                     payload={"char": char.get("id"), "auto_approved": True}))
+                log_.append(f"character {name}: refs approved (auto)")
+                did = True
+
             if char_state.get("proposal") != "approved" or char_state.get("voice") != "approved":
                 if not self._auto():
                     self.show.set_bootstrap_state(st)
                     return False
                 char_state["proposal"] = "approved"
-                char_state["refs"] = "approved"
                 char_state["voice"] = "approved"
                 self._emit(new_event(CHAR_PROPOSAL_APPROVED, show_id=self.show.show_id,
                                      payload={"char": char.get("id"), "auto_approved": True}))

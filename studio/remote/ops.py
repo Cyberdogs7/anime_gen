@@ -70,13 +70,18 @@ class ServiceOps:
         return {"ok": rc == 0 or _port_open(port), "detail": out or f"started on :{port}"}
 
     def lms_load(self, model: str | None = None, gpu_ratio: str | None = None) -> dict[str, Any]:
-        model = model or (self.cfg.get("env", "lmstudio", {}).get("models", {}) or {}).get(
-            "showrunner")
+        model = (model
+                 or self.cfg.get("llm", "roles", {}).get("showrunner")
+                 or self.cfg.get("llm", "model")
+                 or self.cfg.get("env", "lmstudio", {}).get("models", {}).get("showrunner"))
         if not model:
             return {"ok": False, "detail": "no model configured (env.yaml lmstudio.models)"}
         gpu = gpu_ratio or self._lms_ratio()
-        rc, out = _run([self.lms, "load", model, "--gpu", gpu, "-c", str(self._lms_ctx()), "-y"],
-                       timeout=600)
+        # LM Studio can keep multiple models resident. That is never valid on
+        # this node: managed loads always replace the previous model.
+        self.lms_unload()
+        rc, out = _run([self.lms, "load", model, "--gpu", gpu, "-c", str(self._lms_ctx()),
+                        "-p", "1", "-y"], timeout=600)
         time.sleep(2)
         return {"ok": rc == 0, "detail": out or f"load issued: {model} (gpu={gpu})"}
 
@@ -207,20 +212,23 @@ class ServiceOps:
             return False
 
     def _launch_krea2(self) -> bool:
-        """Start the BEAST5 krea2 comfy (LanguageLearner portable) on krea2.port.
+        """Start the krea2 comfy on the project's anime-h3 instance (krea2.port).
 
         Transient: caller must call _stop_krea2() once generation is done.
         Returns True once the instance answers on /system_stats.
         """
         inst = self._comfy_cfg("krea2")
         tree = inst.get("dir", "")
-        port = int(inst.get("port", 8189) or 8189)
+        port = int(inst.get("port", 8188) or 8188)
         if not tree or not os.path.isdir(tree):
             log.warning("krea2 comfy dir not configured (env.yaml comfyui.krea2.dir); using fallback")
             return False
-        py = Path(tree) / "python_embeded" / "python.exe"
+        # Prefer a venv layout (D:/anime-h3), fall back to portable python_embeded.
+        py = Path(tree) / "venv" / "Scripts" / "python.exe"
         if not py.exists():
-            log.warning("krea2 comfy python_embeded missing at %s; using fallback", py)
+            py = Path(tree) / "python_embeded" / "python.exe"
+        if not py.exists():
+            log.warning("krea2 comfy python not found under %s; using fallback", tree)
             return False
         cmd = [str(py), "-s", "ComfyUI/main.py", "--windows-standalone-build",
                "--listen", "127.0.0.1", "--port", str(port), "--disable-auto-launch"]
@@ -258,10 +266,10 @@ class ServiceOps:
         """Pick the krea2 instance to use for one generation.
 
         Returns (ComfyClient, stop_fn | None):
-          - primary (BEAST5 LanguageLearner krea2) started on demand ONLY when
-            H3 (idle_guard_url) isn't rendering; stopped after the job.
-          - if primary is already up it is in use by someone else -> Beast3.
-          - if H3 is rendering, or the transient launch fails -> Beast3.
+          - primary (BEAST5 LanguageLearner krea2, 16 GB) is used whenever it is
+            up, or started on demand when H3 (idle_guard_url) isn't rendering.
+          - only falls back to Beast3 when the primary is down/unusable or a
+            render (H3) is occupying the local GPU.
         """
         from ..clients.comfy import ComfyClient
         inst = self._comfy_cfg("krea2")
@@ -270,8 +278,9 @@ class ServiceOps:
         fb = ComfyClient(fallback or primary or "http://192.168.50.173:8189")
 
         if primary and self._comfy_up(primary):
-            log.info("krea2 primary already running (%s) -> in use, using fallback", primary)
-            return fb, None
+            # Prefer the 16 GB primary when it is answering.
+            log.info("krea2 primary up (%s) -> using primary", primary)
+            return ComfyClient(primary), None
         if guard and not self._comfy_idle(ComfyClient(guard)):
             log.info("H3 comfy (%s) is rendering -> using krea2 fallback", guard)
             return fb, None
@@ -356,16 +365,19 @@ class ServiceOps:
         gen owns all VRAM. On exit the LLM is reloaded. Yields the ComfyClient.
         """
         from ..clients.comfy import ComfyClient as _CC
+        from ..gpu_manager import ServiceType, get_gpu_manager
         client, stop = self._krea2_client()
         remote = evict_remote and "127.0.0.1" not in (client.base_url or "127.0.0.1")
-        host = "beast3" if remote else "local"
-        self._evict_llm(host)
-        try:
-            yield client
-        finally:
-            if stop:
-                stop()
-            self._reload_llm(host)
+        if remote:
+            self._evict_llm("beast3")
+        with get_gpu_manager(self.cfg).acquire(ServiceType.COMFYUI):
+            try:
+                yield client
+            finally:
+                if stop:
+                    stop()
+                if remote:
+                    self._reload_llm("beast3")
 
     @contextmanager
     def krea2_batch(self, evict_remote: bool = True) -> Iterator[None]:
@@ -375,9 +387,10 @@ class ServiceOps:
         all VRAM) and reloads it when the batch finishes. ``evict_remote=False``
         skips the Beast3 fallback eviction for callers that stay local.
         """
-        # Determine whether this session will use the Beast3 fallback: the krea2
-        # primary is down (not responding) -> fallback -> shares Beast3's GPU
-        # with the fallback LLM.
+        from ..gpu_manager import ServiceType, get_gpu_manager
+        # The GPU manager serialises ALL local GPU users (LLM / ComfyUI / TTS).
+        # Its load/unload hooks handle LLM eviction on the local node. Keep
+        # the remote (Beast3) LLM eviction which the manager doesn't cover.
         k = self._comfy_cfg("krea2")
         primary = k.get("url", "")
         remote = False
@@ -388,12 +401,14 @@ class ServiceOps:
                 remote = bool(k.get("fallback_url"))
         except Exception:
             remote = bool(k.get("fallback_url"))
-        host = "beast3" if (remote and evict_remote) else "local"
-        self._evict_llm(host)
-        try:
-            yield
-        finally:
-            self._reload_llm(host)
+        if remote and evict_remote:
+            self._evict_llm("beast3")
+        with get_gpu_manager(self.cfg).acquire(ServiceType.COMFYUI):
+            try:
+                yield
+            finally:
+                if remote and evict_remote:
+                    self._reload_llm("beast3")
 
     def generate_image(self, prompt: str, seed: int = 0, aspect_ratio: str = "16:9",
                        out_path: str = "", use_lora: bool = False) -> dict[str, Any]:

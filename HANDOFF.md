@@ -67,11 +67,11 @@ Automatic after storyboard:
 - `studio/approval.py` — approve/reject for all gates (bootstrap + story).
 - `studio/development.py` — plotline selection (`develop_episode`, `_plotline_state`, `_record_seen`).
 - `studio/scriptgen.py` — single-pass writers' room (`WritersRoom.run`), `_normalize`, `_runtime_review`.
-- `studio/planner.py` — **chunked episode**: story engine, outline, scene details, assemble, state tracker.
+- `studio/planner.py` — **chunked episode**: story engine, outline, scene details, assemble, state tracker; per-scene shot pass chain (blocking → camera → action → references → costumes → soundscape → dialogue).
 - `studio/storyboard.py` — keyframes, `_char_ref_map`, `_shot_refs`, `ensure_variant_refs`, shot-line refs.
 - `studio/casting.py` — ref pass for new characters (diff of script `cast` vs approved refs).
 - `studio/consistency.py` — vision reviewer, prompt rewrite, regenerate, converge.
-- `studio/prompts.py` — ALL prompts incl. `story_engine_architect_prompt`, `scene_breakdown_prompt`, `scene_detail_prompt`, `scene_shots_prompt`, `episode_plan_prompt` (REVISE), `development_prompt`.
+- `studio/prompts.py` — ALL prompts incl. `story_engine_architect_prompt`, `scene_breakdown_prompt`, `scene_detail_prompt`, `scene_pass_prompt` (per-scene shot passes), `episode_plan_prompt` (REVISE), `development_prompt`.
 - `studio/comfy_workflows.py` — krea2 workflow builders incl. IPAdapter chaining.
 - `studio/clients/{lmstudio,comfy,tts,ffmpeg}.py` — clients (LM Studio streaming, Comfy uploads, Qwen3-TTS, ffprobe).
 - `studio/remote/ops.py` — `_pick_krea2` (transient launch / idle-guard / fallback), `_krea2_client`.

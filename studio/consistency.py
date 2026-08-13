@@ -53,12 +53,22 @@ REVIEW_PROMPT = (
 
 
 def _downscale(path: Path, max_dim: int = 512) -> Path:
-    """Downscale for the vision model (ffmpeg); falls back to the original."""
+    """Downscale for the vision model (ffmpeg); falls back to the original.
+
+    A video path (the 1s H3 preview) is first decoded to its frame 0, then
+    downscaled — so the consistency reviewer sees exactly what the video starts
+    with.
+    """
     try:
         out = Path(tempfile.gettempdir()) / f"cons_{path.stem}.jpg"
-        subprocess.run([get_config().ffmpeg_bin(), "-y", "-i", str(path),
-                        "-vf", f"scale='min({max_dim},iw)':-2", str(out)],
-                       capture_output=True, timeout=30)
+        if path.suffix.lower() == ".mp4":
+            subprocess.run([get_config().ffmpeg_bin(), "-y", "-i", str(path),
+                            "-frames:v", "1", str(out)],
+                           capture_output=True, timeout=60)
+        else:
+            subprocess.run([get_config().ffmpeg_bin(), "-y", "-i", str(path),
+                            "-vf", f"scale='min({max_dim},iw)':-2", str(out)],
+                           capture_output=True, timeout=30)
         if out.exists():
             return out
     except Exception:
@@ -79,7 +89,8 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 def _prev_keyframe(runs, scene: dict[str, Any], sid: str) -> Path | None:
-    """The storyboard PNG of the shot just before `sid` within the scene."""
+    """The storyboard preview (mp4) or keyframe (png) of the shot just before
+    `sid` within the scene."""
     shots = scene.get("shots", []) or []
     for i, sh in enumerate(shots):
         if sh.get("id") == sid:
@@ -88,8 +99,11 @@ def _prev_keyframe(runs, scene: dict[str, Any], sid: str) -> Path | None:
             prev_id = shots[i - 1].get("id")
             if not prev_id:
                 return None
-            p = runs / "storyboard" / f"{prev_id}.png"
-            return p if p.exists() else None
+            for ext in (".mp4", ".png"):
+                p = runs / "storyboard" / f"{prev_id}{ext}"
+                if p.exists():
+                    return p
+            return None
     return None
 
 
@@ -171,7 +185,9 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
         failures: list[dict[str, Any]] = []
         for sc, shot in pending:
             sid = shot.get("id", "")
-            kf = runs / "storyboard" / f"{sid}.png"
+            kf = runs / "storyboard" / f"{sid}.mp4"
+            if not kf.exists():
+                kf = runs / "storyboard" / f"{sid}.png"
             if not kf.exists():
                 continue
             names, refs = _shot_refs(show, shot)
@@ -199,32 +215,57 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
         if not failures:
             break
 
-        # Regenerate all failures through one transient krea2 session, then
-        # re-review ONLY those shots next round.
-        ops = ServiceOps(cfg)
-        client, stop = ops._krea2_client()
+        # Regenerate all failures as fresh 1s H3 previews (same workflow as the
+        # storyboard pass), then re-review ONLY those shots next round.
+        from .render import (_render_client, _shot_character_ref, _voice_sample_path,
+                             compile_shot_prompt, _shot_ref_paths)
+        from .h3 import build_h3_ref2va_workflow, run_h3_shot
+        client = _render_client(cfg)
         try:
             for f in failures:
                 sid = f["sid"]
                 ACTIVITY[show.show_id] = {"detail": f"Rewriting prompt for {sid} + regenerate…",
                                           "ts": __import__("time").time()}
                 enames, _ = _shot_refs(show, f["shot"])
-                base = _keyframe_prompt(f["shot"], f["scene"], enames)
+                base = _keyframe_prompt(f["shot"], f["scene"], enames,
+                                        _char_appearances(show))
                 base = revise_keyframe_prompt(llm, model, base,
                                               f.get("issue", ""), f.get("fix", ""))
-                # Rebuild the full ref chain (characters + objects + prev keyframe)
-                # with the same per-ref dominance weights the storyboard uses.
-                kf = runs / "storyboard" / f"{sid}.png"
-                eobj = _shot_object_refs(show, episode, f["shot"])
-                prev = _prev_keyframe(runs, f["scene"], sid)
-                full_refs = list(f["refs"]) + eobj + ([str(prev)] if prev else [])
-                weights = _shot_ref_weights(f["shot"], enames, len(f["refs"]),
-                                            len(eobj), bool(prev))
+                out = runs / "storyboard" / f"{sid}.mp4"
+                image_filenames: list[str] = []
+                for name in enames:
+                    ref = _shot_character_ref(show, name)
+                    if not ref:
+                        continue
+                    try:
+                        image_filenames.append(client.upload_image(ref))
+                    except Exception:
+                        continue
+                for p in _shot_ref_paths(show, episode, f["scene"], f["shot"]):
+                    try:
+                        fname = client.upload_image(p)
+                        if fname not in image_filenames:
+                            image_filenames.append(fname)
+                    except Exception:
+                        pass
+                h3_cfg = cfg.get("comfy", "h3", {})
+                wf = build_h3_ref2va_workflow(
+                    base, 1.0, 0, cfg=cfg,
+                    ref_image_filenames=image_filenames or None,
+                    width=int(h3_cfg.get("width", 864) or 864),
+                    height=int(h3_cfg.get("height", 480) or 480),
+                    steps=int(h3_cfg.get("steps", 8) or 8),
+                    sampler_name=h3_cfg.get("sampler") or "res_multistep",
+                    scheduler=h3_cfg.get("scheduler") or "simple",
+                    use_spectrum=bool(h3_cfg.get("spectrum", False)),
+                    use_first_block_cache=bool(h3_cfg.get("first_block_cache", False)),
+                )
+                for nid, node in wf.items():
+                    if node.get("class_type") == "MiniMaxH3ReferenceToVideo" and \
+                       isinstance(node.get("inputs"), dict):
+                        node["inputs"]["length"] = 22
                 try:
-                    generate_keyframe_with_ref(client, load_workflow(wf_path), base, 0,
-                                               full_refs, str(kf),
-                                               aspect_ratio="16:9", weight=0.8,
-                                               weights=weights or None)
+                    run_h3_shot(client, wf, out)
                     for entry in report:
                         if entry.get("shot") == sid:
                             entry["result"] = "regenerated"
@@ -232,9 +273,16 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
                     for entry in report:
                         if entry.get("shot") == sid:
                             entry["result"] = f"regen failed: {exc}"
+                finally:
+                    try:
+                        client.free_memory()
+                    except Exception:
+                        pass
         finally:
-            if stop:
-                stop()
+            try:
+                client.free_memory()
+            except Exception:
+                pass
         pending = [(f["scene"], f["shot"]) for f in failures]
 
     try:

@@ -11,6 +11,7 @@ Pattern adapted from LanguageLearner's gpu_manager.py. See DESIGN.md §15.4.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import subprocess
 import threading
@@ -49,18 +50,72 @@ def _port_open(port: int, host: str = "127.0.0.1") -> bool:
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace", timeout=20)
+    except subprocess.TimeoutExpired:
+        # A hung `lms`/launcher subprocess must not block a render or storyboard
+        # thread forever (it holds the exclusive GPU lock while it waits).
+        log.warning("[gpu] subprocess timed out: %s", " ".join(str(c) for c in cmd))
+        return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="timeout")
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, returncode=127, stdout="", stderr="not found")
+
+
+class _ProcessGpuLock:
+    """Cross-process lock for the machine's single shared GPU."""
+
+    def __init__(self, path):
+        self.path = path
+        self._file = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("a+b")
+        if self._file.seek(0, 2) == 0:
+            self._file.write(b"0")
+            self._file.flush()
+        self._file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.5)
+        else:
+            import fcntl
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+
+    def release(self) -> None:
+        if self._file is None:
+            return
+        try:
+            self._file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._file.close()
+            self._file = None
 
 
 class GPUManager:
     def __init__(self, cfg=None):
         self.cfg = cfg or get_config()
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         self._current: ServiceType | None = None
+        self._current_model: str | None = None
         self._holders = 0
         self._comfy_procs: dict[str, subprocess.Popen] = {}
+        self._process_lock = _ProcessGpuLock(self.cfg.root / ".gpu-manager.lock")
+        # Per-thread re-entrancy depth: a thread that already holds the GPU (e.g. a
+        # storyboard ref pass holding the COMFYUI lock) and then makes an LLM call
+        # must NOT acquire again — it would wait on its own condition forever.
+        self._local = threading.local()
 
     @property
     def current(self) -> ServiceType | None:
@@ -69,9 +124,9 @@ class GPUManager:
 
     # ---- lifecycle stubs (subclass/override for real loaders) ----
 
-    def _load(self, service: ServiceType) -> None:
+    def _load(self, service: ServiceType, model: str | None = None) -> None:
         if service == ServiceType.LLM:
-            self._load_llm()
+            self._load_llm(model)
         elif service == ServiceType.COMFYUI:
             self._load_comfyui()
         else:
@@ -89,7 +144,19 @@ class GPUManager:
 
     # ---- LM Studio (portable `lms` CLI) ----
 
-    def _load_llm(self) -> None:
+    def _load_llm(self, model: str | None = None) -> None:
+        # Safety eject: evict any ComfyUI models from VRAM before loading LLM.
+        inst = self._comfy_cfg()
+        port = int(inst.get("port", 8188))
+        if _port_open(port):
+            try:
+                url = inst.get("url") or f"http://127.0.0.1:{port}"
+                import httpx
+                with httpx.Client(timeout=30.0) as client:
+                    client.post(f"{url}/free",
+                                json={"unload_models": True, "free_memory": True})
+            except Exception:
+                pass
         lms = self.cfg.lms_cli()
         port = self.cfg.get("env", "lmstudio", {}).get("server_port", 1234)
         ctx = self.cfg.get("env", "lmstudio", {}).get("context", 32768)
@@ -98,11 +165,15 @@ class GPUManager:
         if not _port_open(port):
             _run([lms, "server", "start", "--port", str(port), "--cors"])
             time.sleep(4)
-        model = (self.cfg.get("env", "lmstudio", {}).get("models", {}) or {}).get("showrunner", "")
+        model = (model
+                 or self.cfg.get("llm", "roles", {}).get("showrunner")
+                 or self.cfg.get("llm", "model")
+                 or self.cfg.get("env", "lmstudio", {}).get("models", {}).get("showrunner", ""))
         if model:
             _run([lms, "unload", "--all"])
             time.sleep(1)
-            subprocess.Popen([lms, "load", model, "--gpu", gpu, "-c", str(ctx), "-y"])
+            subprocess.Popen([lms, "load", model, "--gpu", gpu, "-c", str(ctx),
+                              "--parallel", "1", "-y"])
             # wait for the API to answer (LM Studio model load can take a while)
             for _ in range(60):
                 time.sleep(3)
@@ -123,6 +194,9 @@ class GPUManager:
         return self.cfg.comfy_instance(which)
 
     def _load_comfyui(self) -> None:
+        # Safety eject: if a previous process or a manual load left an LLM
+        # model resident in LM Studio, evict it before ComfyUI claims VRAM.
+        self._unload_llm()
         inst = self._comfy_cfg()
         port = int(inst.get("port", 8188))
         if _port_open(port):
@@ -155,6 +229,18 @@ class GPUManager:
     def _unload_comfyui(self) -> None:
         inst = self._comfy_cfg()
         port = int(inst.get("port", 8188))
+        # First: tell ComfyUI to evict its models from VRAM. taskkill alone
+        # doesn't reclaim GPU memory; the models stay leaked. POST /free
+        # unloads them cleanly so the next tenant gets the full VRAM budget.
+        if _port_open(port):
+            try:
+                url = inst.get("url") or f"http://127.0.0.1:{port}"
+                import httpx
+                with httpx.Client(timeout=30.0) as client:
+                    client.post(f"{url}/free",
+                                json={"unload_models": True, "free_memory": True})
+            except Exception:
+                log.debug("[gpu] ComfyUI /free failed (already gone?)", exc_info=True)
         proc = self._comfy_procs.pop(str(port), None)
         if proc and proc.poll() is None:
             # Kill the whole tree: the `cmd /c run_*.bat` wrapper spawns python
@@ -165,7 +251,7 @@ class GPUManager:
         # start (e.g. a manual launch), so release() really frees the GPU.
         if bool(self.cfg.get("comfy", "manage_lifecycle", True)) and _port_open(port):
             out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                                 text=True, timeout=30).stdout
+                                  text=True, timeout=30).stdout
             for line in out.splitlines():
                 if f":{port} " in line and "LISTENING" in line.upper():
                     pid = line.strip().split()[-1]
@@ -177,22 +263,56 @@ class GPUManager:
     # ---- acquire / release ----
 
     @contextmanager
-    def acquire(self, service: ServiceType) -> Iterator[None]:
-        """Exclusive GPU access for `service`. Blocks until the GPU is free."""
-        with self._lock:
-            if self._current != service:
-                self._unload(self._current)
-                self._load(service)
-                self._current = service
+    def acquire(self, service: ServiceType, model: str | None = None) -> Iterator[None]:
+        """Exclusive GPU access for `service`. Blocks until the GPU is free.
+
+        Re-entrant per thread: when the calling thread already holds the GPU for
+        another service (e.g. a storyboard ref pass holds the COMFYUI lock for
+        krea2 and then calls the LLM), a nested acquire would wait on its own
+        condition forever (self-deadlock). The outer holder already owns VRAM, so
+        the nested call simply runs without re-acquiring.
+        """
+        if getattr(self._local, "depth", 0) > 0:
+            self._local.depth += 1
+            try:
+                yield
+            finally:
+                self._local.depth -= 1
+            return
+        with self._condition:
+            while self._holders and not (
+                    service == ServiceType.LLM
+                    and self._current == ServiceType.LLM
+                    and self._current_model == model):
+                self._condition.wait()
+            first_holder = self._holders == 0
+            if first_holder:
+                # The manager is used by multiple CLI/server processes. The
+                # in-memory lock alone cannot serialize those processes.
+                self._process_lock.acquire()
+                try:
+                    self._load(service, model)
+                    self._current = service
+                    self._current_model = model
+                except Exception:
+                    self._process_lock.release()
+                    raise
             self._holders += 1
+        self._local.depth = 1
         try:
             yield
         finally:
-            with self._lock:
+            self._local.depth = 0
+            with self._condition:
                 self._holders -= 1
                 if self._holders == 0:
-                    self._unload(self._current)
-                    self._current = None
+                    try:
+                        self._unload(self._current)
+                    finally:
+                        self._current = None
+                        self._current_model = None
+                        self._process_lock.release()
+                        self._condition.notify_all()
 
 
 _default: GPUManager | None = None

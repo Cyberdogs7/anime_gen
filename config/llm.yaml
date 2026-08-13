@@ -14,7 +14,7 @@ gpu_guard_urls:
   - "http://127.0.0.1:8188"
   - "http://127.0.0.1:8189"
 model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-context: 65536
+context: 131072   # gemma-4 12B: 256k native; 131072 (128k) keeps it fully GPU-resident
 
 # Role -> model assignment. Model names must be loaded in LM Studio's catalog.
 roles:

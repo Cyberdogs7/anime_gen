@@ -6,6 +6,13 @@ roles:
   - fan_service       # maturity delivery vs bible.mature_spec (the creative floor)
 # optional: - structure   # (pacing/three-act review) - add later, list is extensible
 
+# Plan-level (episode OUTLINE) review. The outline is reviewed BEFORE it drives
+# scene details + script, so plot/synopsis/scenes contradictions and cold-open
+# episode 1s are caught at the outline gate instead of after 20+ revisions.
+plan_max_revisions: 4
+plan_roles:
+  - structure          # plot vs synopsis vs scenes coherence, episode-1 context
+
 thresholds:
   slop_block: 0.45         # per-scene slop score above this forces a revision note
   continuity_block: true   # any HIGH-severity continuity note forces a revision

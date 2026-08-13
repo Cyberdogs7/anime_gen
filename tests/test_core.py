@@ -20,6 +20,26 @@ def test_config_loads_defaults():
     assert cfg.get("bus", "provider", "") in ("memory", "redis")
 
 
+def test_gpu_manager_reentrant_acquire(tmp_path):
+    """A thread that holds the GPU for one service (storyboard holds COMFYUI for
+    krea2) and then makes an LLM call must not self-deadlock on a nested acquire.
+    The nested acquire runs directly; the outer holder owns VRAM."""
+    from studio.gpu_manager import GPUManager, ServiceType
+
+    gm = GPUManager(Config(tmp_path))
+    gm._load = lambda *a, **k: None
+    gm._unload = lambda *a, **k: None
+
+    order = []
+    with gm.acquire(ServiceType.COMFYUI):
+        order.append("outer")
+        with gm.acquire(ServiceType.LLM, model="m"):
+            order.append("nested")
+    order.append("done")
+    assert order == ["outer", "nested", "done"]
+    assert gm._holders == 0
+
+
 def test_broker_round_trip():
     bus = InMemoryBroker("test")
     got = []

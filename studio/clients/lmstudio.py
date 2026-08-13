@@ -232,11 +232,41 @@ class LMStudioClient:
         for attempt in range(retries):
             url = self._acquire()
             try:
-                if on_progress:
-                    return self._chat_stream(url, messages, model, temperature,
-                                             max_tokens, on_progress)
-                data = self._post(url, "/chat/completions", body)
-                return data["choices"][0]["message"]["content"]
+                # A local LM Studio request is itself a GPU owner. Route-away
+                # requests use the fallback node and must not lock this GPU.
+                # The lease also evicts ComfyUI before loading exactly one LLM.
+                lease = None
+                if url == (self.router.primary if self.router else self.base_url):
+                    from ..gpu_manager import ServiceType, get_gpu_manager
+                    from ..config import get_config
+                    cfg = get_config()
+                    if cfg.get("llm", "gpu_offload", True):
+                        lease = get_gpu_manager(cfg).acquire(ServiceType.LLM, model=model)
+                elif self.router and self.router.fallback:
+                    # Routed to fallback because the primary's GPU is busy
+                    # rendering. A previous call may have left the primary's LLM
+                    # model loaded — evict it so ComfyUI gets the full VRAM.
+                    from ..config import get_config
+                    cfg = get_config()
+                    if cfg.get("llm", "gpu_offload", True):
+                        from ..gpu_manager import ServiceType, get_gpu_manager
+                        try:
+                            gpu = get_gpu_manager(cfg)
+                            gpu._unload_llm()
+                        except Exception:
+                            pass
+                if lease is None:
+                    if on_progress:
+                        return self._chat_stream(url, messages, model, temperature,
+                                                 max_tokens, on_progress)
+                    data = self._post(url, "/chat/completions", body)
+                    return data["choices"][0]["message"]["content"]
+                with lease:
+                    if on_progress:
+                        return self._chat_stream(url, messages, model, temperature,
+                                                 max_tokens, on_progress)
+                    data = self._post(url, "/chat/completions", body)
+                    return data["choices"][0]["message"]["content"]
             except (httpx.HTTPError, KeyError) as exc:
                 last = exc
                 self._fail(url)

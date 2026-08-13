@@ -5,11 +5,11 @@ from pathlib import Path
 
 MODELS_DIR = Path("D:/anime-h3/ComfyUI/models")
 
-# Expected sizes (GB) for the int8_convrot checkpoints ComfyUI loads.
+# Expected sizes (GB) for the H3 checkpoints ComfyUI loads.
 EXPECTED_GB = {
     "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors": 19.53,
     "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors": 18.31,
-    "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors": 23.70,
+    "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors": 14.61,
     "vae/minimax_h3_video_vae_fp16.safetensors": 4.84,
     "vae/minimax_h3_audio_vae_fp32.safetensors": 0.577,
 }

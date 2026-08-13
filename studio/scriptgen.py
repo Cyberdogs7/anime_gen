@@ -6,6 +6,7 @@ re-review, up to max_revisions. See DESIGN.md §9 Stage 2/2a.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,17 @@ from .compile.durations import snap_duration
 from .config import get_config
 from .review import all_pass, run_reviewers
 from .show import Show
+
+
+def _has_spoken_text(line: str) -> bool:
+    """True when a dialogue line contains actual speech (not just a stage direction).
+
+    A padded line like "(Grunting)" or "(Internal/Unvoiced)" carries no spoken
+    words and must not count toward the dialogue floor — it would reach TTS
+    otherwise. A leading delivery note like "(whispering) Stay close." is fine.
+    """
+    stripped = re.sub(r"\([^)]*\)", "", line or "")
+    return bool(re.search(r"\w", stripped))
 
 
 def _auto_synopsis(bible: dict[str, Any], episode: int, continuity: dict[str, Any]) -> str:
@@ -30,17 +42,31 @@ def _auto_synopsis(bible: dict[str, Any], episode: int, continuity: dict[str, An
 
 
 def _runtime_review(script: dict[str, Any], target: int) -> dict[str, Any] | None:
-    """Fail the script if its shot durations total well under the runtime target."""
+    """Fail the script if its shot durations total well under the runtime target,
+    or if dialogue is severely lacking for the planned length."""
     total = sum(s.get("duration_s", 0) for sc in script.get("scenes", [])
                 for s in sc.get("shots", []))
-    if total >= target * 0.8:
+    lines = sum(1 for sc in script.get("scenes", [])
+                for s in sc.get("shots", [])
+                for d in (s.get("dialogue", []) or [])
+                if _has_spoken_text(d.get("line") or ""))
+    min_lines = max(1, target // 6)   # ~67% spoken (~220 lines for a 22-min episode)
+    if total >= target * 0.8 and lines >= min_lines:
         return None
-    return {"pass": False, "score": 0,
-            "summary": f"runtime too short ({int(total)}s of {target}s target)",
-            "notes": [f"The script totals ~{int(total)}s but the target is {target}s "
+    notes: list[str] = []
+    if total < target * 0.8:
+        notes.append(f"The script totals ~{int(total)}s but the target is {target}s "
                       f"(~{target // 60} min). Expand the episode: add roughly "
                       f"{int((target - total) / 10) + 1} more shots across additional scenes "
-                      f"and beats so it fills the runtime."]}
+                      f"and beats so it fills the runtime.")
+    if lines < min_lines:
+        notes.append(f"The script has only {lines} dialogue lines but needs at least "
+                      f"{min_lines} for a {target // 60}-minute episode. Characters must "
+                      f"speak in most shots — dialogue drives the story, not silent action. "
+                      f"Add lines to shots that have characters on screen.")
+    return {"pass": False, "score": 0,
+            "summary": f"structural failure (runtime {int(total)}s, {lines} lines)",
+            "notes": notes}
 
 
 def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
@@ -61,8 +87,12 @@ def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
             shot.setdefault("importance", "standard")
             shot.setdefault("on_camera", True)
             shot["duration_s"] = snap_duration(float(shot.get("duration_s", 10.125)))[2]
+            # Drop unknown speakers AND padded lines that carry no spoken words
+            # ("(Grunting)") — they must not reach TTS, and they must not count
+            # toward the runtime review's dialogue floor.
             kept = [d for d in shot.get("dialogue", [])
-                    if d.get("char") in valid]
+                    if d.get("char") in valid
+                    and _has_spoken_text(d.get("line") or "")]
             if kept != shot.get("dialogue", []):
                 shot["dialogue"] = kept
             shot.setdefault("soundscape", "")
@@ -120,7 +150,12 @@ class WritersRoom:
         from .development import (_fallback_synopsis, _overall_state,
                                   _plotline_state, develop_episode)
         try:
-            return develop_episode(self.show, episode, llm=self.llm, cfg=self.cfg)
+            dev = develop_episode(self.show, episode, llm=self.llm, cfg=self.cfg)
+            if isinstance(dev, dict):
+                return dev.get("synopsis", "") or _fallback_synopsis(
+                    episode, _overall_state(self.show, bible),
+                    _plotline_state(self.show, bible))
+            return str(dev or "")
         except Exception:
             return _fallback_synopsis(episode, _overall_state(self.show, bible),
                                       _plotline_state(self.show, bible))

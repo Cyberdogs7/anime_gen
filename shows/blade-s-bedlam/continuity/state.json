@@ -12,7 +12,7 @@
       ],
       "status": "active",
       "summary": "Lily and Ivy constantly challenge each other in high-stakes combat scenarios, not merely for Blade's gaze, but to prove whose armoring expertise is superior. Their rivalry manifests as an intense engineering competition during battles\u2014who can craft the most resilient or offensively optimized hardsuit mid-fight\u2014driving them to achieve peak synergy when fighting alongside Lily and Ivy against overwhelming bio-mech threats.",
-      "last_seen_episode": 4
+      "last_seen_episode": 0
     },
     {
       "id": "roses_secrets",
@@ -23,7 +23,7 @@
       ],
       "status": "dormant",
       "summary": "While Rose and Dahlia maintain a close bond, their internal dynamic is one of strategic alliance rather than passive friendship. Each harbors professional or personal secrets that could shift the balance of power between them. When these truths emerge, they don't devolve into petty arguments; instead, they redefine how they coordinate tactics in battle, creating a sharper, more focused partnership against enemy forces.",
-      "last_seen_episode": 4
+      "last_seen_episode": 0
     },
     {
       "id": "blades-romance",
@@ -37,7 +37,7 @@
       ],
       "summary": "A battle-hardened mercenary, Blade, finds himself the center of a deadly romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly push their skills to the limit in service of him. They fight not just for his affection, but through intense, synergistic competition, ensuring they are always ready to protect him from the city's relentless threats.",
       "status": "active",
-      "last_seen_episode": 4
+      "last_seen_episode": 0
     },
     {
       "id": "dahlia-debt",
@@ -48,12 +48,34 @@
       ],
       "summary": "Dahlia is bound by a dangerous debt to underworld financier Jax, forcing her into high-risk retrieval missions outside the usual bio-mech skirmishes. This obligation threatens to shatter the trust she maintains with Rose and Blade regarding her past mercenary life.",
       "status": "active",
-      "last_seen_episode": 4
+      "last_seen_episode": 0
+    },
+    {
+      "id": "apex-734-destruction",
+      "name": "The Apex Scrapper's Rampage",
+      "characters": [
+        "Apex-734"
+      ],
+      "summary": "A massive, heavily armored bio-mech designed for urban demolition begins systematically tearing through the lower sectors of the city, targeting major transport hubs and threatening to destabilize entire districts. Its sheer destructive power forces Blade's crew to react immediately.",
+      "status": "active",
+      "last_seen_episode": 0
+    },
+    {
+      "id": "marauder-pod-swarm",
+      "name": "Chitinous Marauder Pod Swarm",
+      "characters": [
+        "Chitinous Marauder Pods (x6)",
+        "Blade",
+        "Lily"
+      ],
+      "summary": "Six heavily chitinous, insectoid combat units begin swarming the lower sector ruins directly behind Apex-734's main assault path, forcing Blade and Lily to constantly adjust their defensive perimeter against this highly mobile flanking threat.",
+      "status": "active",
+      "last_seen_episode": 0
     }
   ],
   "unresolved_threads": [],
   "continuity_rules": [],
-  "last_new_plotline_episode": 4,
+  "last_new_plotline_episode": null,
   "overall_plotline": {
     "id": "blades_romance",
     "name": "Blade's Romance",
@@ -65,7 +87,7 @@
       "Dahlia"
     ],
     "summary": "A battle-hardened mercenary, Blade, finds himself the center of a deadly romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly push their skills to the limit in service of him. They fight not just for his affection, but through intense, synergistic competition, ensuring they are always ready to protect him from the city's relentless threats.",
-    "last_seen_episode": 4,
+    "last_seen_episode": 0,
     "status": "active"
   }
 }

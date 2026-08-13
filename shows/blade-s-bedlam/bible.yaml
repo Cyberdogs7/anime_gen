@@ -47,6 +47,7 @@ plotlines:
     can craft the most resilient or offensively optimized hardsuit mid-fight—driving
     them to achieve peak synergy when fighting alongside Lily and Ivy against overwhelming
     bio-mech threats.
+  last_seen_episode: 0
 - id: roses_secrets
   name: Rose's Calculated Alliance
   characters:
@@ -73,7 +74,7 @@ plotlines:
     affection, but through intense, synergistic competition, ensuring they are always
     ready to protect him from the city's relentless threats.
   status: active
-  last_seen_episode: 1
+  last_seen_episode: 0
 - id: dahlia-debt
   name: Dahlia's Hidden Obligation
   characters:
@@ -84,7 +85,29 @@ plotlines:
     obligation threatens to shatter the trust she maintains with Rose and Blade regarding
     her past mercenary life.
   status: active
-  last_seen_episode: 4
+  last_seen_episode: 0
+- id: apex-734-destruction
+  name: The Apex Scrapper's Rampage
+  characters:
+  - Apex-734
+  summary: A massive, heavily armored bio-mech designed for urban demolition begins
+    systematically tearing through the lower sectors of the city, targeting major
+    transport hubs and threatening to destabilize entire districts. Its sheer destructive
+    power forces Blade's crew to react immediately.
+  status: active
+  last_seen_episode: 0
+- id: marauder-pod-swarm
+  name: Chitinous Marauder Pod Swarm
+  characters:
+  - Chitinous Marauder Pods (x6)
+  - Blade
+  - Lily
+  summary: Six heavily chitinous, insectoid combat units begin swarming the lower
+    sector ruins directly behind Apex-734's main assault path, forcing Blade and Lily
+    to constantly adjust their defensive perimeter against this highly mobile flanking
+    threat.
+  status: active
+  last_seen_episode: 0
 style_guide: The show's visual look is a blend of modern anime aesthetics with gritty
   realism, featuring detailed line art and vibrant colors for characters, contrasted
   against dark, rain-soaked cityscapes and the metallic sheen of hardsuits.
