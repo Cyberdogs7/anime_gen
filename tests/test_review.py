@@ -33,12 +33,12 @@ def test_reviewers_detect_problems(tmp_path):
     script = {"episode": 1, "scenes": [{"id": "s01", "shots": [{"id": "s01_sh01"}]}]}
     results = run_reviewers(script, cfg=cfg, llm=FakeReviewLLM(), episode=1, round_no=1,
                             notes_dir=tmp_path / "reviews")
-    assert set(results) == {"slop", "continuity", "fan_service"}
-    assert results["slop"]["pass"] is False          # 0.8 > 0.45 threshold
-    assert results["continuity"]["pass"] is False
-    assert results["fan_service"]["pass"] is False
+    EXPECTED = {"slop", "continuity", "fan_service", "voice", "exposition",
+                "pacing", "stakes", "visual", "agency", "serial"}
+    assert set(results) == EXPECTED
+    # The fake returns notes for every reviewer -> every gated reviewer fails.
     assert all_pass(results) is False
-    for r in ("slop", "continuity", "fan_service"):
+    for r in EXPECTED:
         assert (tmp_path / "reviews" / f"{r}.r1.json").exists()
 
 
@@ -48,6 +48,35 @@ def test_reviewer_slop_passes_under_threshold(tmp_path):
     results = run_reviewers(script, cfg=cfg, llm=FakeReviewLLM(slop_score=0.3),
                             episode=1, round_no=1, notes_dir=tmp_path / "reviews")
     assert results["slop"]["pass"] is True
+
+
+def test_additional_reviewer_block_modes(tmp_path):
+    """The new reviewers honor block_any / block_high / never gates."""
+    from studio.review import run_reviewers
+
+    class ModeLLM:
+        def __init__(self):
+            self.calls = 0
+        def chat_json(self, messages, **kwargs):
+            user = messages[-1]["content"]
+            self.calls += 1
+            if "SERIAL ARC & GROWTH" in user:
+                # serial_block is 'high' -> a LOW note should not fail it.
+                return {"score": 0.3, "pass": True,
+                        "notes": [{"severity": "LOW", "item": "arc",
+                                   "note": "minor nit"}]}
+            # others are block_any -> any note fails.
+            return {"score": 0.6, "pass": True,
+                    "notes": [{"severity": "LOW", "item": "x", "note": "nit"}]}
+
+    cfg = Config(ROOT)
+    llm = ModeLLM()
+    script = {"episode": 1, "scenes": []}
+    results = run_reviewers(script, cfg=cfg, llm=llm, episode=1, round_no=1,
+                            notes_dir=tmp_path / "reviews")
+    assert results["serial"]["pass"] is True          # low note, serial_block=high
+    assert results["voice"]["pass"] is False          # any note -> fail
+    assert results["exposition"]["pass"] is False
 
 
 def test_plan_reviewers_run_structure_reviewer(tmp_path):

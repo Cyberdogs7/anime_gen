@@ -33,11 +33,12 @@ class FakeWritersLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
-        if "WRITERS' ROOM NOTES" in user:      # revision prompt
-            return {"episode": 1, "scenes": [{"id": "s01", "shots": [
-                {"id": "s01_sh01", "duration_s": 10, "action": "revised",
-                 "dialogue": [{"char": "Ryou", "line": str(i), "on_camera": True}
-                              for i in range(3)]}]}]}
+        if "WRITERS' ROOM NOTES" in user:      # revision prompt (arbitrated edit letter)
+            return {"edit_letter": "resolved: tier 1 wins.",
+                    "script": {"episode": 1, "scenes": [{"id": "s01", "shots": [
+                        {"id": "s01_sh01", "duration_s": 10, "action": "revised",
+                         "dialogue": [{"char": "Ryou", "line": str(i), "on_camera": True}
+                                      for i in range(3)]}]}]}}
         if "Write the FULL script" in user:    # script prompt
             return {"episode": 1, "scenes": [{"id": "s01", "shots": [
                 {"id": "s01_sh01", "duration_s": 10, "action": "draft",
@@ -45,8 +46,10 @@ class FakeWritersLLM:
                               for i in range(3)]}]}]}
         self.review_calls += 1                 # reviewers
         passed = self.review_calls > 3         # round 1 fails, round 2 passes
+        # block_any gates on NOTES, so a passing reviewer must return no notes.
         return {"score": 0.1 if passed else 0.9,
-                "notes": [{"scene": "s01", "note": "fix this"}], "pass": passed}
+                "notes": [] if passed else [{"scene": "s01", "note": "fix this"}],
+                "pass": passed}
 
 
 def test_writers_room_revision_loop(tmp_path):

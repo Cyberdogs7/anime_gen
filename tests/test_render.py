@@ -150,3 +150,75 @@ def test_shot_ref_paths_and_voice_resolution(tmp_path):
     paths = _shot_ref_paths(show, 1, {}, shot)
     assert any("s01_sh01.png" in p for p in paths)
     assert not any("blade_ref_01.png" in p for p in paths)
+
+
+def test_silent_shot_is_explicit():
+    """A shot with no dialogue must state silence explicitly — H3 otherwise
+    invents gibberish speech on the joint audio track."""
+    script = {"summary": "They fight."}
+    scene = {"summary": "Blade vs Lily."}
+    shot = {"id": "s01_sh01", "action": "Blade draws his sword",
+            "camera": "medium shot", "duration_s": 5.167,
+            "dialogue": [], "silence": True,
+            "soundscape": "", "music": "drums"}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Blade", "Lily"])
+    assert "No one speaks; all characters remain silent." in prompt
+    assert "The shot carries no dialogue." in prompt
+    assert "<d>" not in prompt
+    # overall_soundscape N/A means complete silence — it may only appear for
+    # a silent shot, and here the compiler writes the silence out explicitly.
+    assert "Complete silence" in prompt
+    assert "all characters remain silent" in prompt
+    assert "<d>[English]" not in prompt
+
+
+def test_dialogue_shot_without_soundscape_is_not_marked_complete_silence():
+    """overall_soundscape: N/A means complete silence and must never be emitted
+    for a shot that carries dialogue."""
+    script = {"summary": "They talk."}
+    scene = {"summary": "Blade explains."}
+    shot = {"id": "s01_sh01", "action": "Blade raises his hand",
+            "dialogue": [{"char": "Blade", "line": "It's a long story.",
+                          "on_camera": True}],
+            "soundscape": "", "music": ""}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Blade"])
+    assert "No background ambience" in prompt
+    assert "overall_soundscape:\nN/A" not in prompt
+
+
+def test_off_screen_line_states_lips_remain_closed():
+    """Off-camera/voiceover lines keep the guide's explicit lips-closed clause."""
+    script = {"summary": "A refusal."}
+    scene = {"summary": "Lily responds."}
+    shot = {"id": "s01_sh01", "action": "Lily turns away",
+            "dialogue": [{"char": "Lily", "line": "Never.", "on_camera": False}]}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Lily"])
+    assert "off-screen voiceover" in prompt
+    assert "while their lips remain completely closed." in prompt
+    assert "<d>[English] Never.</d>" in prompt
+
+
+def test_delivery_note_goes_outside_the_token():
+    """Delivery/performance notes live OUTSIDE <d>, per the guide."""
+    script = {"summary": "A warning."}
+    scene = {"summary": "Blade warns."}
+    shot = {"id": "s01_sh01", "action": "Blade leans in",
+            "dialogue": [{"char": "Blade", "line": "Run.",
+                          "on_camera": True,
+                          "delivery": "in a low, breathy voice"}]}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Blade"])
+    assert ("<Subject 1> (S1) says in a low, breathy voice, "
+            "<d>[English] Run.</d>") in prompt
+
+
+def test_stage_direction_line_is_not_speech():
+    """A parenthetical stage direction must never become a <d> token — it would
+    be synthesized as gibberish speech."""
+    script = {"summary": "A reaction."}
+    scene = {"summary": "Blade reacts."}
+    shot = {"id": "s01_sh01", "action": "Blade stares, stunned",
+            "dialogue": [{"char": "Blade", "line": "(Grunting)"}]}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Blade"])
+    assert "all characters remain silent" in prompt
+    assert "<d>" not in prompt
+    assert "(Grunting)" not in prompt

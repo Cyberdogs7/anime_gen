@@ -95,6 +95,13 @@ def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:
                     and _has_spoken_text(d.get("line") or "")]
             if kept != shot.get("dialogue", []):
                 shot["dialogue"] = kept
+            # Speech state must be explicit in the data as well as the prompt:
+            # `silence` is true iff the shot has no REAL spoken line. Derived from
+            # the actual dialogue array so a stale flag can never contradict the
+            # prompt the renderer compiles (PROMPTING.md §5.4).
+            shot["silence"] = not any(
+                _has_spoken_text(d.get("line") or "")
+                for d in (shot.get("dialogue") or []))
             shot.setdefault("soundscape", "")
             shot.setdefault("music", "")
             shot.setdefault("references", {})
@@ -222,9 +229,14 @@ class WritersRoom:
                 f"Episode script — writing ({n} tokens generated…)", t))
 
     def _ask_revision(self, system: str, script, reviews) -> dict[str, Any]:
-        return self.llm.chat_json(
+        data = self.llm.chat_json(
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.revision_prompt(script, reviews)}],
             model=self._role_model("script"), temperature=0.6, max_tokens=65536,
             on_progress=lambda n, t: self._report_output(
                 f"Episode script — revising ({n} tokens generated…)", t))
+        # The revision prompt returns an arbitrated edit letter + the revised
+        # script; unwrap the script payload.
+        if isinstance(data, dict) and isinstance(data.get("script"), dict):
+            return data["script"]
+        return data or {}

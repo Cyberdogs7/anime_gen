@@ -145,15 +145,30 @@ def fill_outline_template(template: str, state: dict[str, Any], bible: dict[str,
     out = template
     for k, v in reps.items():
         out = out.replace(k, v)
+    # Dangling GENERATED_* placeholders were never data-driven — leaving them
+    # literal makes the model fill in tokens and bloat/truncate the output. Strip
+    # them deterministically so the prompt never carries unfilled braces.
+    import re as _re
+    out = _re.sub(r"\{\{\s*GENERATED_[A-Z_]+?\s*\}\}", "", out)
     return out
 
 
-def state_tracker_data(show: Show, episode: int) -> dict[str, Any]:
-    """Build the <state_tracker> + <episode_history> payload for the outline prompt."""
+def state_tracker_data(show: Show, episode: int,
+                       episode_type: str = "") -> dict[str, Any]:
+    """Build the <state_tracker> + <episode_history> payload for the outline prompt.
+
+    When ``episode_type`` is 'character', battle/combat plotlines are excluded from
+    the active set so the outline prompt cannot re-index on them (the Apex-734
+    problem). Battle episodes keep them available.
+    """
     from .development import _plotline_state
+    cfg = get_config()
+    battle_kinds = set(cfg.get("growth", "battle_plotline_kinds", ["battle"]))
     bible = show.read_bible()
     continuity = show.read_continuity()
     plotlines = _plotline_state(show, bible)
+    if str(episode_type or "").lower() == "character":
+        plotlines = [p for p in plotlines if p.get("kind") not in battle_kinds]
     active = [p for p in plotlines if p.get("status") == "active"]
     dormant = [p for p in plotlines if p.get("status") == "dormant"]
     cooling = [p for p in plotlines
@@ -227,39 +242,83 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
     # rejected/regenerated episode re-grows the same plotlines. Carry it on the
     # plan so approve_plan can commit it.
     plan_dev = {"featured": (dev or {}).get("featured", []),
-                "new_plotline": (dev or {}).get("new_plotline")}
-    state = state_tracker_data(show, episode)
+                "new_plotline": (dev or {}).get("new_plotline"),
+                "episode_type": (dev or {}).get("episode_type", ""),
+                "arc_lengths": (dev or {}).get("arc_lengths", {}),
+                "new_arc_length": (dev or {}).get("new_arc_length")}
+    state = state_tracker_data(show, episode,
+                               episode_type=(dev or {}).get("episode_type", ""))
     current_plan = None
     if notes.strip():
         prior = read_episode_plan(show, episode)
         current_plan = {k: v for k, v in prior.items()
                         if k not in ("status", "rejected_notes", "synopsis",
                                      "_plan_dev")} or None
-    if current_plan and notes.strip():
-        user_prompt = prompts.episode_plan_prompt(
-            bible, synopsis, continuity, names, _target(show), current_plan, notes, None, state)
-    else:
-        template = read_story_engine(show)
-        if not template:
-            template = ensure_story_engine(show, llm=llm, cfg=cfg)
-        user_prompt = fill_outline_template(template or "", state, bible)
-    # Durable director constraints shape the outline directly: append them to the
-    # prompt so they are part of the creative mandate, not just stored metadata.
+    # Durable director constraints shape the outline directly.
     dir_notes = read_director_notes(show)
-    if dir_notes:
-        user_prompt += (
-            "\n\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE, override the bible/plotlines/"
-            "outline wherever they conflict; apply every one):\n- "
-            + "\n- ".join(dir_notes))
-    plan = llm.chat_json(
-        [{"role": "system", "content": prompts.showrunner_system(
-            cfg["show_profile"], bible.get("content_policy", "mature"),
-            cfg["show_profile"].get("baseline", "ranma-1-2"))},
-         {"role": "user", "content": user_prompt}],
-        model=model, temperature=0.8, max_tokens=16384,
-        on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
-            "detail": f"Episode {episode}: writing plan ({n} tokens…)",
-            "output": t[-500:], "ts": time.time()}}))
+
+    system = prompts.showrunner_system(
+        cfg["show_profile"], bible.get("content_policy", "mature"),
+        cfg["show_profile"].get("baseline", "ranma-1-2"))
+
+    if current_plan and notes.strip():
+        # Revision path: rewrite the rejected outline in one call from the notes.
+        user_prompt = prompts.episode_plan_prompt(
+            bible, synopsis, continuity, names, _target(show), current_plan, notes,
+            dir_notes, state, fixed_episode_type=plan_dev.get("episode_type", ""))
+        plan = llm.chat_json(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user_prompt}],
+            model=model, temperature=0.6, max_tokens=32768,
+            on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+                "detail": f"Episode {episode}: revising plan ({n} tokens…)",
+                "output": t[-500:], "ts": time.time()}}))
+    else:
+        # CHUNKED create path: Phase 1 skeleton (one call), Phase 2 beats (one
+        # call per batch). This lets a full 10-12 scene outline fit the model's
+        # output budget where a single huge JSON would truncate.
+        n_scenes = int(cfg.get("pipeline", "plan_scenes_target", 12) or 12)
+        beats_batch = max(1, int(cfg.get("pipeline", "plan_beats_batch", 2) or 2))
+        skeleton_prompt = prompts.plan_skeleton_prompt(
+            bible, state, dev, dir_notes, n_scenes, _target(show))
+        ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: outlining scenes (skeleton)…",
+                                  "ts": time.time()}
+        skeleton = llm.chat_json(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": skeleton_prompt}],
+            model=model, temperature=0.6, max_tokens=32768,
+            on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+                "detail": f"Episode {episode}: scene skeleton ({n} tokens…)",
+                "output": t[-500:], "ts": time.time()}}))
+        plan = dict(skeleton or {})
+        plan_scenes = [s for s in (plan.get("scenes") or [])
+                       if isinstance(s, dict) and s.get("id")]
+        if not plan_scenes:
+            raise RuntimeError(f"episode {episode} skeleton returned no scenes")
+        # Phase 2: expand beats in batches.
+        expanded: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(plan_scenes), beats_batch):
+            batch = plan_scenes[i:i + beats_batch]
+            ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: writing beats "
+                                       f"({batch[0].get('id')}..{batch[-1].get('id')})…",
+                                      "ts": time.time()}
+            out = llm.chat_json(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": prompts.plan_beats_prompt(
+                     bible, batch, dev, dir_notes, n_scenes)}],
+                model=model, temperature=0.6, max_tokens=32768,
+                on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+                    "detail": f"Episode {episode}: scene beats ({n} tokens…)",
+                    "output": t[-500:], "ts": time.time()}}))
+            for sc in (out or {}).get("scenes", []):
+                if isinstance(sc, dict) and sc.get("id"):
+                    expanded[sc["id"]] = sc
+        merged = []
+        for sc in plan_scenes:
+            scid = sc.get("id", "")
+            full = expanded.get(scid) or dict(sc)
+            merged.append(full)
+        plan["scenes"] = merged
     # Director constraints are also part of the outline's recorded mandate.
     if dir_notes:
         plan.setdefault("director_constraints", dir_notes)
@@ -282,17 +341,21 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
                    if isinstance(s, dict) and s.get("id")]
     if plan_scenes:
         plan["scenes"] = plan_scenes
+    # A character episode must not carry a city-level threat: force the threat
+    # field to 'none' so the outline and downstream stages never re-index on it.
+    ep_type = str(plan.get("episode_type") or "").lower()
+    if ep_type == "character":
+        plan["threat_of_the_week"] = "none"
     # Plan-level structural review: review the outline itself (plot vs synopsis vs
     # scenes, cold-open-without-context for episode 1, resolved threat, distinct
     # climax). If it fails, revise the outline with the reviewer notes as ABSOLUTE
     # feedback and re-review, up to plan_max_revisions. The outcome is recorded on
     # the plan as plan_review so approve_plan can refuse an outline that never
     # cleared review.
-    system_prompt = prompts.showrunner_system(
-        cfg["show_profile"], bible.get("content_policy", "mature"),
-        cfg["show_profile"].get("baseline", "ranma-1-2"))
-    plan = _plan_review_loop(show, episode, plan, llm, cfg, model, system_prompt,
-                             bible, synopsis, continuity, names, state, dir_notes)
+    plan = _plan_review_loop(show, episode, plan, llm, cfg, model, system,
+                             bible, synopsis, continuity, names, state, dir_notes,
+                             fixed_episode_type=plan_dev.get("episode_type", ""),
+                             rejection_notes=notes)
     plan["status"] = "pending"
     plan["synopsis"] = synopsis
     # Deferred plotline commit: carry what this episode featured so approve_plan
@@ -332,7 +395,9 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
                       model: str, system: str, bible: dict[str, Any],
                       synopsis: str, continuity: dict[str, Any],
                       names: list[str], state: dict[str, Any],
-                      dir_notes: list[str]) -> dict[str, Any]:
+                      dir_notes: list[str],
+                      fixed_episode_type: str = "",
+                      rejection_notes: str = "") -> dict[str, Any]:
     """Review the episode outline and revise it up to plan_max_revisions.
 
     Mirrors ``_writer_review`` but on the OUTLINE: the structure reviewer checks
@@ -340,6 +405,16 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
     outline is revised with the reviewer notes as ABSOLUTE feedback. The final
     verdict is stored on the plan as ``plan_review`` so approval gates can refuse
     an outline that never cleared review.
+
+    ``fixed_episode_type`` (when set) is forced onto every draft and every
+    revision: development decides the episode type deterministically (battle
+    cadence), and the outline must NOT flip it back to battle/character on
+    revision.
+
+    ``rejection_notes`` (when set) is the human's rejection feedback. It is
+    carried as a STANDING ABSOLUTE constraint into every review revision so the
+    reviewer loop cannot silently undo what the human asked for (e.g. "don't
+    meet until scene 6").
     """
     max_revisions = int(cfg.get("reviewers", "plan_max_revisions", 2) or 2)
     notes_dir = show.dir / "runs" / f"EP{episode:02d}" / "reviews"
@@ -366,6 +441,14 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
             p["rejected_notes"] = plan["rejected_notes"]
         if "episode" in plan:
             p.setdefault("episode", plan["episode"])
+        if "episode_type" in plan:
+            p.setdefault("episode_type", plan["episode_type"])
+        # The episode type is decided deterministically by development — force it.
+        if fixed_episode_type:
+            p["episode_type"] = fixed_episode_type
+        # Character episodes never carry a city-level threat.
+        if str(p.get("episode_type") or "").lower() == "character":
+            p["threat_of_the_week"] = "none"
         return p
 
     round_no = 1
@@ -374,6 +457,11 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
     while not passed and round_no < max_revisions:
         round_no += 1
         feedback = _plan_review_feedback(reviews)
+        if rejection_notes.strip():
+            feedback = ("HUMAN REJECTION FEEDBACK (ABSOLUTE — the single most "
+                        "important instruction; the outline MUST satisfy it and "
+                        "the reviewer notes below must NOT contradict or undo it):\n"
+                        f"{rejection_notes}\n\n" + feedback)
         ACTIVITY[show.show_id] = {
             "detail": f"Episode {episode}: revising outline from plan review (round {round_no})…",
             "ts": time.time()}
@@ -381,8 +469,9 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.episode_plan_prompt(
                  bible, synopsis, continuity, names, _target(show), plan, feedback,
-                 dir_notes, state)}],
-            model=model, temperature=0.7, max_tokens=16384,
+                 dir_notes, state,
+                 fixed_episode_type=fixed_episode_type)}],
+            model=model, temperature=0.6, max_tokens=32768,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: revising outline ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
@@ -400,19 +489,23 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
     return plan
 
 
-def approve_plan(show: Show, episode: int, llm=None, cfg=None) -> dict[str, Any]:
+def approve_plan(show: Show, episode: int, llm=None, cfg=None, override: bool = False) -> dict[str, Any]:
     plan = read_episode_plan(show, episode)
     # Never rubber-stamp an outline that failed structural review — the fix must
     # land before approval (either it passed review or a human regenerated it).
+    # ``override=True`` is the explicit human override for a reviewer-rejected
+    # outline; it records the override reason so the approval is auditable.
     review = (plan or {}).get("plan_review") or {}
-    if review.get("passed") is False:
+    if review.get("passed") is False and not override:
         notes = "; ".join(str(n.get("note") or n.get("item") or n)
                           for n in (review.get("notes") or [])[:3]) or "failed structural review"
         raise ValueError(
             f"plan EP{episode:02d} failed structural review ({review.get('rounds', 1)} "
-            f"rounds): {notes} — reject it with notes to regenerate, or clear the "
-            "review before approving.")
+            f"rounds): {notes} — reject it with notes to regenerate, or approve with "
+            "override=True to override the reviewer.")
     plan["status"] = "approved"
+    if override:
+        plan["approved_override"] = True
     # Commit the plotline bookkeeping NOW (this is the real approval gate): stamp
     # last_seen on featured plotlines and persist a reviewed new plotline to the
     # bible + continuity. Development only carried it on the plan, so a rejected
@@ -421,7 +514,10 @@ def approve_plan(show: Show, episode: int, llm=None, cfg=None) -> dict[str, Any]
     try:
         from .growth import commit_plotline_on_approval
         commit_plotline_on_approval(show, dev.get("featured", []),
-                                    dev.get("new_plotline"), episode, llm=llm, cfg=cfg)
+                                    dev.get("new_plotline"), episode, llm=llm, cfg=cfg,
+                                    episode_type=dev.get("episode_type", ""),
+                                    arc_lengths=dev.get("arc_lengths", {}),
+                                    new_arc_length=dev.get("new_arc_length"))
     except Exception as exc:
         import logging as _logging
         _logging.getLogger(__name__).warning(
@@ -440,6 +536,11 @@ def reject_plan(show: Show, episode: int, notes: str = "") -> dict[str, Any]:
     plan["rejected_notes"] = notes
     _plan_path(show, episode).write_text(json.dumps(plan, indent=2, ensure_ascii=False),
                                          encoding="utf-8")
+    # A rejection note is a durable director constraint: it must survive past this
+    # regeneration and shape future episodes too. Persist it (deduped) so the
+    # outline prompt carries it as ABSOLUTE.
+    if notes.strip():
+        add_director_note(show, notes)
     return plan
 
 
@@ -731,18 +832,36 @@ _SCENE_PASSES: list[dict[str, Any]] = [
         "job": "DIALOGUE WRITER",
         "schema": {"shots": [{
             "id": "shot id (verbatim)",
-            "dialogue": [{"char": "exact cast name", "line": "spoken line",
-                          "on_camera": "bool"}],
+            "dialogue": [{"char": "exact cast name",
+                          "line": "exact spoken words (SHORT - 2-20 words, one thought, spoken not read)",
+                          "on_camera": "bool (speaker visible on screen; false = off-screen/voiceover)",
+                          "delivery": "optional one-phrase delivery note, e.g. 'in a low, breathy voice'"}],
+            "silence": "bool - true when NO ONE speaks in this shot (dialogue must be an empty array); false or omit when characters speak",
         }]},
         "instructions": (
-            "Write the scene's dialogue from its dialogue_beats / narrative. Most shots "
-            "that have characters on screen should carry spoken lines; roughly 70% of the "
-            "scene's runtime should be spoken. Aim for ~{n_lines} total spoken lines. "
-            "Every line must contain real spoken words — a leading delivery note like "
-            "'(whispering)' is allowed, but the line must have actual speech after it. "
-            "NEVER write a line that is only a stage direction, a grunt, or an internal "
-            "note. Use only exact cast names."),
-        "fields": ["dialogue"],
+            "Write the scene's dialogue from its dialogue_beats / narrative. These lines "
+            "become SYNTHESIZED AUDIO (voice + lip-sync), so every line is SPOKEN, not "
+            "read: keep each line SHORT (2-20 words, one thought per line), conversational "
+            "with natural spoken rhythm (contractions are fine), and rewrite anything that "
+            "reads awkwardly aloud. A ~10s shot carries at most 2-3 short lines (~20-30 "
+            "words total). Write numbers and abbreviations as they should be spoken (e.g. "
+            "'twenty-one', 'five-g'). EVERY shot must explicitly be either SPEAKING or "
+            "SILENT. SPEAKING: `silence: false` (or omit) with real spoken lines in the "
+            "`dialogue` array. SILENT: `silence: true` AND an EMPTY `dialogue` array — only "
+            "when genuinely no one speaks (a silent beat, a reaction shot, an action "
+            "insert). Roughly 60-70% of the scene's runtime should be spoken aiming for "
+            "~{n_lines} total spoken lines, but a silent beat is intentional, never faked: "
+            "every line must contain REAL spoken words — a leading delivery note like "
+            "'(whispering)' is allowed only before actual speech, and a line that is only "
+            "a stage direction, grunt, or internal note is FORBIDDEN (it would be spoken "
+            "as gibberish by the video model). Keep each character's VOICE distinct (see "
+            "their personality/traits below): before writing the scene, write 1-2 "
+            "voice-anchor lines per speaking character that could only come from that "
+            "character, then keep every line in that voice. If how a line is said matters "
+            "— shouted, whispered, teasing, flat — carry it in `delivery` (e.g. 'in a low, "
+            "breathy voice'); never use ALL-CAPS or stacked punctuation inside `line` to "
+            "convey emotion. Use only exact cast names."),
+        "fields": ["dialogue", "silence"],
         "cast_key": "personality",
     },
 ]
@@ -909,6 +1028,9 @@ def _writer_review(show: Show, episode: int, script: dict[str, Any],
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: writers' room revision ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
+        # The revision prompt returns an arbitrated edit letter + the script.
+        if isinstance(revised, dict) and isinstance(revised.get("script"), dict):
+            revised = revised["script"]
         if not isinstance(revised, dict) or not revised.get("scenes"):
             break
         script = _normalize(revised, cast_names)

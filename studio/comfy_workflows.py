@@ -75,9 +75,13 @@ def parameterize_keyframe(
 
 def run_t2i(client: ComfyClient, workflow: dict[str, Any], out_path: Path | str,
             timeout_s: float = 900.0, front: bool = False) -> Path:
-    """Submit the workflow, wait, and save the generated image to out_path."""
+    """Submit the workflow, wait, and save the generated image to out_path.
+
+    The wait is hard-capped at ``timeout_s`` (regardless of queue state) so a
+    wedged ComfyUI image job fails bounded instead of blocking the pipeline.
+    """
     prompt_id = client.submit(workflow, front=front)
-    entry = client.wait(prompt_id, timeout_s=timeout_s)
+    entry = client.wait(prompt_id, timeout_s=timeout_s, hard_timeout_s=timeout_s)
     images = []
     for node_id, output in (entry.get("outputs") or {}).items():
         if "images" in output:

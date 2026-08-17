@@ -27,6 +27,7 @@ from .planner import (
     generate_episode_plan, generate_scene_details, read_episode_plan,
     read_scene_details,
 )
+from .render import RENDER_JOBS
 from .show import Show
 
 log = logging.getLogger(__name__)
@@ -173,11 +174,146 @@ def _mark_cooldown(show_id: str, episode: int, stage: str) -> None:
     _cooldowns[(show_id, episode, stage)] = time.time() + _COOLDOWN_S
 
 
+def _stale_job_s(cfg=None) -> float:
+    """How long a storyboard/render job may go without any progress update before
+    it is declared hung. Every sub-operation in those jobs is now bounded (each
+    ComfyUI render carries a hard timeout that interrupts + raises), so no
+    progress for this long genuinely means the worker is stuck."""
+    cfg = cfg or get_config()
+    return float(cfg.get("pipeline", "stale_job_s", 1800) or 1800)
+
+
+def _job_stale(job: dict, cfg=None) -> bool:
+    """True when a running job's last-progress stamp is older than the stale cap.
+
+    A job without a ``ts`` stamp (legacy shape) is never treated as stale — we
+    only act on jobs we can positively confirm have stalled.
+    """
+    ts = job.get("ts")
+    if not ts:
+        return False
+    return time.time() - ts > _stale_job_s(cfg)
+
+
+def _interrupt_renderers(cfg=None) -> None:
+    """Best-effort interrupt of every configured ComfyUI instance.
+
+    Called when a background job is declared hung. A wedged renderer keeps its
+    prompt in queue_running forever, so the worker thread waiting on it never
+    sees its own timeout — sending /interrupt clears the running prompt so the
+    stuck wait() returns/raises promptly and the job can be restarted cleanly.
+    """
+    cfg = cfg or get_config()
+    from .clients.comfy import ComfyClient
+    urls: set[str] = set()
+    for inst in (cfg.get("env", "comfyui", {}) or {}).values():
+        if isinstance(inst, dict) and inst.get("url"):
+            urls.add(inst["url"])
+    for node in (cfg.get("comfy", "nodes", {}) or {}).values():
+        if isinstance(node, dict) and node.get("url"):
+            urls.add(node["url"])
+    for url in sorted(urls):
+        try:
+            ComfyClient(url).interrupt()
+            log.info("interrupted wedged ComfyUI at %s", url)
+        except Exception:
+            log.debug("interrupt failed for %s", url, exc_info=True)
+
+
+def _comfy_wedged(url: str, max_age_s: float) -> bool:
+    """True when a ComfyUI instance is hard-wedged: its port is occupied but it
+    does not answer /system_stats (executor hung — /interrupt can't clear its
+    queue), OR a queue_running job has been stuck for > ``max_age_s``.
+
+    A responsive instance with a *fresh* running job is never wedged — that is a
+    legitimate render and must not be restarted.
+    """
+    from .clients.comfy import ComfyClient
+    try:
+        if not ComfyClient(url).health():
+            return True
+    except Exception:
+        return True
+    try:
+        import httpx
+        with httpx.Client(timeout=5.0) as client:
+            q = client.get(f"{url}/queue").json()
+        now_ms = time.time() * 1000.0
+        for job in (q.get("queue_running") or []):
+            if len(job) > 3 and isinstance(job[3], (int, float)) \
+                    and now_ms - float(job[3]) > max_age_s * 1000.0:
+                return True
+    except Exception:
+        return False   # can't check the queue; don't assume wedged
+    return False
+
+
+def _restart_renderers(cfg=None) -> None:
+    """Escalation for a HARD-wedged renderer: restart every configured local
+    ComfyUI instance that is still wedged after an interrupt.
+
+    A wedged executor (port occupied but no /system_stats answer, or a
+    queue_running job stuck for ``pipeline.stale_job_s``) ignores /interrupt, so
+    the only recovery is stop + relaunch via the node's run script — the fresh
+    executor clears the stuck prompt, and the re-kicked job proceeds on it. The
+    bounded waits make this safe: any in-flight prompt is simply retried on the
+    next pass.
+
+    Best-effort and never raises. Runs WITHOUT the in-process GPU lock (the hung
+    worker thread already owns it), so it drives the instance lifecycle directly
+    via ServiceOps; the cross-process port teardown is unaffected by the lock.
+    """
+    cfg = cfg or get_config()
+    from .remote.ops import ServiceOps
+    ops = ServiceOps(cfg)
+    stale = _stale_job_s(cfg)
+    for which in ("krea2", "h3"):
+        inst = (cfg.get("env", "comfyui", {}) or {}).get(which) or {}
+        url = inst.get("url", "")
+        if not url:
+            continue
+        if not _comfy_wedged(url, stale):
+            continue
+        log.warning("ComfyUI '%s' (%s) is wedged; restarting it", which, url)
+        try:
+            ops.comfy_stop(which)
+            ops.comfy_start(which)
+            log.info("ComfyUI '%s' restarted", which)
+        except Exception:
+            log.warning("failed to restart ComfyUI '%s'", which, exc_info=True)
+
+
+def _recover_renderers(cfg=None) -> None:
+    """Two-stage recovery for a hung background job.
+
+    Stage 1 (soft): interrupt every configured ComfyUI instance — a responsive
+    executor abandons its stuck prompt and the worker's wait() returns/raises.
+    Stage 2 (hard): if an instance is still wedged after the interrupt, restart
+    it so the re-kicked job runs on a fresh executor.
+    """
+    _interrupt_renderers(cfg)
+    _restart_renderers(cfg)
+
+
 def _story_auto(cfg=None) -> bool:
     """Story-gate auto-approval: master switch or per-gate mode."""
     cfg = cfg or get_config()
     return bool(cfg.get("approval", "global", {}).get("auto_approve", False)) \
         or cfg.get("approval", "gates", {}).get("story") == "auto"
+
+
+def _plan_auto(cfg=None) -> bool:
+    """Plan (outline) gate auto-approval.
+
+    Independent of the story gate so a human can approve just the plot before
+    scene details + script are generated (fast iteration). Defaults to the story
+    gate's behaviour when ``gates.plan`` is unset.
+    """
+    cfg = cfg or get_config()
+    if cfg.get("approval", "global", {}).get("auto_approve", False):
+        return True
+    return cfg.get("approval", "gates", {}).get("plan",
+        cfg.get("approval", "gates", {}).get("story", "auto")) == "auto"
 
 
 def _episode_complete(show: Show, episode: int) -> bool:
@@ -247,11 +383,19 @@ def needs_episode_reconcile(show_id: str, episode: int, show: Show | None = None
             return False
     st = _stage_state(show, episode)
     auto = _story_auto()
+    plan_auto = _plan_auto()
     if not st["has_plan"]:
         return True
+    if st["plan_status"] == "rejected":
+        # A rejected outline must be REGENERATED from its rejection notes — never
+        # left stranded. The reconciler picks it up and rewrites it.
+        return True
     if st["plan_status"] != "approved":
-        return auto          # gated & not auto -> blocked on human
+        return plan_auto      # plan gate gated & not auto -> blocked on human
     if not st["has_details"] or st["missing_detail"]:
+        return True
+    if st["details_status"] == "rejected":
+        # Rejected scene details are regenerated from notes in place.
         return True
     if st["details_status"] != "approved":
         return auto          # gated & not auto -> blocked on human
@@ -273,6 +417,7 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
     log_: list[str] = []
     st = _stage_state(show, episode)
     auto = _story_auto()
+    plan_auto = _plan_auto()
     show_id = show.show_id
 
     # 1) Plan.
@@ -289,14 +434,15 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
             return log_
         st = _stage_state(show, episode)
     if st["plan_status"] != "approved":
-        if not auto:
-            return log_      # gated -> wait for human
         plan = read_episode_plan(show, episode) or {}
         # A REJECTED outline must regenerate from its rejection notes, never be
-        # rubber-stamped back to approved. That was the bug: reject_story marked
-        # the plan rejected, but the reconciler just re-approved the SAME stale
-        # broken outline and rebuilt everything from it.
-        if plan.get("status") == "rejected" and plan.get("rejected_notes"):
+        # rubber-stamped back to approved (and never left stranded by the gate).
+        # This runs regardless of the plan gate — a rejection is an instruction
+        # to regenerate, not a "wait for human" state.
+        if st["plan_status"] == "rejected":
+            if not plan.get("rejected_notes"):
+                log.warning("EP%02d plan rejected with no notes; waiting for human", episode)
+                return log_
             if _in_cooldown(show_id, episode, "plan"):
                 return log_
             ACTIVITY[show_id] = {"detail": f"Episode {episode}: rewriting plan from rejection notes…",
@@ -310,6 +456,8 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
                 return log_
             st = _stage_state(show, episode)
             plan = read_episode_plan(show, episode) or {}
+        if not plan_auto:
+            return log_      # plan gate -> wait for human outline approval
         # Never auto-approve an outline that failed structural review — halt for a
         # human instead of letting a broken outline drive script + storyboard.
         if (plan.get("plan_review") or {}).get("passed") is False:
@@ -334,6 +482,23 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
                         if st["missing_detail"] else f"EP{episode:02d}: scene details generated")
         except Exception as exc:
             log.warning("scene details failed for %s EP%02d: %s", show_id, episode, exc)
+            _mark_cooldown(show_id, episode, "details")
+            return log_
+        st = _stage_state(show, episode)
+    if st["details_status"] == "rejected":
+        # Rejected scene details regenerate from their rejection notes in place —
+        # never auto-approve a stale rejected treatment.
+        details = read_scene_details(show, episode)
+        notes = (details or {}).get("rejected_notes", "") or ""
+        if _in_cooldown(show_id, episode, "details"):
+            return log_
+        ACTIVITY[show_id] = {"detail": f"Episode {episode}: rewriting scene details from rejection notes…",
+                             "ts": time.time()}
+        try:
+            generate_scene_details(show, episode, notes=notes)
+            log_.append(f"EP{episode:02d}: scene details regenerated from rejection notes")
+        except Exception as exc:
+            log.warning("scene details rewrite failed for %s EP%02d: %s", show_id, episode, exc)
             _mark_cooldown(show_id, episode, "details")
             return log_
         st = _stage_state(show, episode)
@@ -364,8 +529,11 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
     # 4) Storyboard (background job). Skip if a storyboard job is already running
     #    for this show (jobs are keyed per show, not per episode). A job whose
     #    worker thread is dead is a zombie — restart it so a crash can't stall
-    #    the episode forever. Also skipped entirely when pipeline.pause_storyboard
-    #    is set (debugging).
+    #    the episode forever. A job whose worker is ALIVE but has made no
+    #    progress for ``pipeline.stale_job_s`` is a hung renderer (wedged
+    #    ComfyUI / deadlock) — interrupt the instances to un-block its wait,
+    #    then restart the job. Also skipped entirely when
+    #    pipeline.pause_storyboard is set (debugging).
     from .storyboard import storyboard_status
     from .render import render_status
     if get_config().get("pipeline", "pause_storyboard", False):
@@ -377,6 +545,17 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
                 # A "running" job whose worker thread died is a true zombie —
                 # restart it so a crash can't stall the episode forever.
                 log.warning("storyboard job %s is a zombie (thread dead); restarting", show_id)
+            elif sb.get("state") == "running" and _job_stale(sb):
+                # A live worker stuck with no progress: the renderer is wedged
+                # (job parked in queue_running forever). Interrupt the instances
+                # and restart any that are hard-wedged, stop the job so the
+                # re-entrancy guard lets a fresh one start, then re-kick below.
+                log.warning("storyboard job %s has made no progress for %.0fs; "
+                            "recovering renderers and restarting",
+                            show_id, time.time() - (sb.get("ts") or time.time()))
+                _recover_renderers()
+                from .storyboard import stop_storyboard
+                stop_storyboard(show_id)
             elif sb.get("state") == "waiting":
                 # Parked on the ref-approval gate. Resume ONLY once the gate has
                 # actually cleared (a ref was just approved) — otherwise skip.
@@ -408,10 +587,22 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
     # 5) Render (background job). Skip if a render job is already running.
     #    build_render itself re-checks the ref-approval gate and parks in
     #    "waiting" until the refs clear, so a render started while refs are
-    #    unapproved never burns GPU on them.
+    #    unapproved never burns GPU on them. A render whose worker thread died
+    #    is a zombie — restart it; one that has made no progress for
+    #    pipeline.stale_job_s is a hung renderer — interrupt + restart.
     if st["video_count"] < st["shot_count"]:
-        if render_status(show_id).get("state") == "running":
-            return log_
+        rd = render_status(show_id)
+        if rd.get("state") == "running":
+            if rd.get("alive") is False:
+                log.warning("render job %s is a zombie (thread dead); restarting", show_id)
+            elif _job_stale(rd):
+                log.warning("render job %s has made no progress for %.0fs; "
+                            "recovering renderers and restarting",
+                            show_id, time.time() - (rd.get("ts") or time.time()))
+                _recover_renderers()
+                RENDER_JOBS.pop(show_id, None)
+            else:
+                return log_
         if _in_cooldown(show_id, episode, "render"):
             return log_
         if not st["shot_count"]:
@@ -495,6 +686,16 @@ def needs_any_episode_reconcile(show_id: str, show: Show | None = None) -> bool:
             if n not in eps:
                 return True
     return False
+
+
+def is_episode_reconciling(show_id: str) -> bool:
+    """True while a background episode-reconcile thread for this show is alive.
+
+    Lets the dashboard distinguish 'working right now' from a stale ACTIVITY
+    detail left behind by a job that already finished.
+    """
+    with _guard:
+        return show_id in _reconciling
 
 
 def reconcile_episodes_if_stalled(show_id: str) -> bool:

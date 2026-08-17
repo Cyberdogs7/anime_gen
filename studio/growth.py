@@ -243,16 +243,36 @@ def _persist_continuity(show: Show, plotline: dict[str, Any], episode: int) -> N
 
 def commit_plotline_on_approval(show: Show, featured_ids: list[str],
                                 new_plotline: dict[str, Any] | None, episode: int,
-                                llm=None, cfg=None) -> None:
+                                llm=None, cfg=None, episode_type: str = "",
+                                arc_lengths: dict[str, int] | None = None,
+                                new_arc_length: int | None = None) -> None:
     """Commit plotline bookkeeping ONLY when an episode plan is APPROVED.
 
     Runs the persistence that used to happen inside develop_episode — stamping
-    last_seen on featured plotlines and persisting a reviewed new plotline (bible
-    canon + continuity + character sheets) — but only after the outline has been
-    approved. A rejected or deleted episode therefore never mutates continuity,
-    so regenerating EP01 cannot keep re-growing the same plotlines.
+    last_seen on featured plotlines, applying the ARC/COOLDOWN roll, and
+    persisting a reviewed new plotline (bible canon + continuity + character
+    sheets) — but only after the outline has been approved. A rejected or deleted
+    episode therefore never mutates continuity, so regenerating EP01 cannot keep
+    re-growing the same plotlines.
+
+    Arc bookkeeping (from ``roll_episode_plotlines``):
+    - A plotline just rolled into an arc gets ``arc_remaining = length - 1`` (the
+      current episode consumed one).
+    - A plotline that was already running gets its ``arc_remaining`` decremented.
+    - When ``arc_remaining`` hits 0 the thread enters a cooldown (no longer
+      selectable) for ``cooldown_episodes``.
+    - Every plotline's ``cooldown_remaining`` ticks down by 1 each approved
+      episode; when it reaches 0 the thread is eligible again (a fresh arc length
+      is rolled the next time it is selected).
+    - A newly invented plotline (NEW roll) is persisted with its rolled arc.
+
+    Also records ``last_battle_episode`` when a battle episode is approved so the
+    battle cadence throttle in development knows how recently combat aired.
     """
     from .development import _overall_state, _plotline_state, _record_seen
+    cfg = cfg or get_config()
+    cooldown_episodes = int(cfg.get("growth", "cooldown_episodes", 4) or 4)
+    arc_lengths = arc_lengths or {}
     bible = show.read_bible()
     continuity = show.read_continuity()
     plotlines = _plotline_state(show, bible)
@@ -260,13 +280,48 @@ def commit_plotline_on_approval(show: Show, featured_ids: list[str],
     data = {"featured_plotlines": [{"id": i} for i in featured_ids],
             "new_plotline": new_plotline}
     _record_seen(show, continuity, episode, data, plotlines, overall)
+
+    # Apply the arc/cooldown roll for every plotline.
+    cont = show.read_continuity()
+    by_id = {p.get("id"): p for p in cont.get("plotlines", []) or []}
+    featured_set = set(featured_ids)
+    for pid, p in by_id.items():
+        # Tick down any active cooldown.
+        cd = int(p.get("cooldown_remaining", 0) or 0)
+        if cd > 0:
+            p["cooldown_remaining"] = max(0, cd - 1)
+        else:
+            p.setdefault("cooldown_remaining", 0)
+        # Feature this thread this episode: start/continue its arc.
+        if pid in featured_set:
+            if pid in arc_lengths:
+                # Freshly rolled this episode: length - 1 episodes remain.
+                p["arc_remaining"] = max(0, int(arc_lengths[pid]) - 1)
+            else:
+                # Already running: consume one episode.
+                p["arc_remaining"] = max(0, int(p.get("arc_remaining", 0) or 0) - 1)
+            if int(p.get("arc_remaining", 0) or 0) <= 0:
+                p["cooldown_remaining"] = cooldown_episodes
+    # A NEW plotline that was invented gets its own arc applied.
+    if isinstance(new_plotline, dict) and new_plotline.get("id"):
+        nid = new_plotline["id"]
+        if nid in by_id:
+            by_id[nid]["arc_remaining"] = max(0, int(new_arc_length or 1) - 1)
+            by_id[nid]["cooldown_remaining"] = 0
+    cont["plotlines"] = list(by_id.values())
+    if str(episode_type or "").lower() == "battle":
+        cont["last_battle_episode"] = episode
+    show.write_continuity(cont)
+
     # Persist the new plotline to the bible (canon) + its new characters, but only
     # if it wasn't already persisted by a prior approval (idempotent).
     if isinstance(new_plotline, dict) and new_plotline.get("id"):
         if new_plotline["id"] not in _plotline_ids(show.read_bible()):
-            plotline = approve_new_plotline(show, new_plotline, episode)
-            names = [n for n in (plotline.get("characters") or []) if n]
+            np = approve_new_plotline(show, new_plotline, episode)
+            np["arc_remaining"] = max(0, int(new_arc_length or 1) - 1)
+            np["cooldown_remaining"] = 0
+            names = [n for n in (np.get("characters") or []) if n]
             existing = {c.get("name") for c in
                         (show.read_character(cid) for cid in show.list_characters())}
             for n in [x for x in names if x not in existing][:2]:
-                generate_new_character(show, n, plotline, episode, llm=llm, cfg=cfg)
+                generate_new_character(show, n, np, episode, llm=llm, cfg=cfg)

@@ -144,6 +144,15 @@ def reconcile_if_stalled(show_id: str, brief: str = "") -> bool:
             ACTIVITY.pop(show_id, None)
             _reconciling.discard(show_id)
 
+
+def is_bootstrap_reconciling(show_id: str) -> bool:
+    """True while a background Gate-0 reconcile thread for this show is alive.
+
+    Lets the dashboard treat an ACTIVITY detail as genuinely in-flight instead
+    of a stale string left behind by a finished/crashed job.
+    """
+    return show_id in _reconciling
+
     threading.Thread(target=_run, name=f"reconcile-{show_id}", daemon=True).start()
     return True
 

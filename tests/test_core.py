@@ -73,6 +73,21 @@ def test_h3_prompt_format():
     assert "[Shot 2] At 00:05.167, hands over package" in prompt
     assert "overall_soundscape: wind" in prompt
     assert "non_diegetic_music: bass" in prompt
+    # no dialogue in either shot -> explicit silence on the timeline
+    assert prompt.count("no one speaks; all characters remain silent") == 2
+
+
+def test_h3_prompt_stage_directions_are_not_speech():
+    """A parenthetical stage direction must never become a <d> token, and the
+    shot stays explicitly silent instead."""
+    prompt = compile_h3_prompt(
+        "x",
+        [{"id": "a", "action": "reacts", "duration_s": 5.167,
+          "dialogue": [{"subject": "<Subject 1>", "line": "(Grunting)"}],
+          "subjects": ["<Subject 1>"]}],
+    )
+    assert "<d>[English] (Grunting)</d>" not in prompt
+    assert "no one speaks; all characters remain silent" in prompt
 
 
 def test_db_schema_and_continuity(tmp_path):

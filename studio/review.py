@@ -18,12 +18,45 @@ from .show import Show
 
 def reviewer_models(cfg) -> dict[str, str]:
     roles = cfg.get("llm", "roles", {})
+    fallback = cfg.get("llm", "model")
     return {
-        "slop": roles.get("slop_reviewer") or cfg.get("llm", "model"),
-        "continuity": roles.get("continuity_reviewer") or cfg.get("llm", "model"),
-        "fan_service": roles.get("fan_service_reviewer") or cfg.get("llm", "model"),
-        "structure": roles.get("structure_reviewer") or cfg.get("llm", "model"),
+        "slop": roles.get("slop_reviewer") or fallback,
+        "continuity": roles.get("continuity_reviewer") or fallback,
+        "fan_service": roles.get("fan_service_reviewer") or fallback,
+        "structure": roles.get("structure_reviewer") or fallback,
+        "voice": roles.get("voice_reviewer") or fallback,
+        "exposition": roles.get("exposition_reviewer") or fallback,
+        "pacing": roles.get("pacing_reviewer") or fallback,
+        "stakes": roles.get("stakes_reviewer") or fallback,
+        "visual": roles.get("visual_reviewer") or fallback,
+        "agency": roles.get("agency_reviewer") or fallback,
+        "serial": roles.get("serial_reviewer") or fallback,
     }
+
+
+def _prior_episode_summaries(show: Show, episode: int) -> list[dict[str, Any]]:
+    """One-line plot summaries of earlier episodes, for the serial reviewer."""
+    import json as _json
+    runs = show.dir / "runs"
+    out: list[dict[str, Any]] = []
+    if not runs.exists():
+        return out
+    for d in sorted(runs.iterdir()):
+        if not d.is_dir() or not d.name.startswith("EP"):
+            continue
+        ep = int(d.name[2:]) if d.name[2:].isdigit() else 0
+        if ep >= episode:
+            continue
+        plan_f = d / "plan.json"
+        if not plan_f.exists():
+            continue
+        try:
+            pl = _json.loads(plan_f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({"episode": ep,
+                    "plot": pl.get("plot") or pl.get("summary") or ""})
+    return out
 
 
 def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
@@ -39,6 +72,14 @@ def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
     cfg = cfg or get_config()
     roles = cfg.get("reviewers", "plan_roles", ["structure"])
     bible = show.read_bible() if show else {}
+    # The reviewer must know the FULL cast — including enemy/visual entities that
+    # have character sheets (Apex-734, pods) but aren't in bible.cast (which only
+    # lists the humans). Without this it flags legitimate threat characters as
+    # "not part of the established cast" and the outline can never pass.
+    cast = []
+    if show:
+        cast = [c.get("name") for c in (show.read_character(cid)
+                for cid in show.list_characters()) if c.get("name")]
     baseline = cfg.get("show_profile", "baseline", "ranma-1-2")
     model = cfg.get("llm", "roles", {}).get("structure_reviewer") or cfg.get("llm", "model")
 
@@ -46,7 +87,7 @@ def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
     for reviewer in roles:
         if reviewer != "structure":
             continue
-        user = prompts.plan_structure_review_prompt(plan, bible, episode)
+        user = prompts.plan_structure_review_prompt(plan, bible, episode, cast=cast)
         system = prompts.plan_reviewer_system(reviewer, baseline)
         data = llm.chat_json([{"role": "system", "content": system},
                               {"role": "user", "content": user}],
@@ -90,6 +131,7 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
     mature_spec = bible.get("mature_spec", {}) if show else {}
 
     results: dict[str, dict[str, Any]] = {}
+    prior = _prior_episode_summaries(show, episode) if show else []
     for reviewer in roles:
         if reviewer == "slop":
             user = prompts.slop_review_prompt(script)
@@ -97,6 +139,21 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
             user = prompts.continuity_review_prompt(script, continuity, characters)
         elif reviewer == "fan_service":
             user = prompts.fanservice_review_prompt(script, mature_spec)
+        elif reviewer == "voice":
+            user = prompts.voice_review_prompt(script, characters)
+        elif reviewer == "exposition":
+            user = prompts.exposition_review_prompt(script)
+        elif reviewer == "pacing":
+            target = int(bible.get("runtime_target_s", 1320) or 1320) if bible else 1320
+            user = prompts.pacing_review_prompt(script, target)
+        elif reviewer == "stakes":
+            user = prompts.stakes_review_prompt(script, characters)
+        elif reviewer == "visual":
+            user = prompts.visual_review_prompt(script)
+        elif reviewer == "agency":
+            user = prompts.agency_review_prompt(script, characters)
+        elif reviewer == "serial":
+            user = prompts.serial_review_prompt(script, continuity, characters, prior)
         else:
             continue
         system = prompts.reviewer_system(reviewer, cfg.get("show_profile", "baseline", "ranma-1-2"))
@@ -107,10 +164,23 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
         passed = bool(data.get("pass", True))
         if reviewer == "slop" and float(data.get("score", 0)) > float(thresholds.get("slop_block", 0.45)):
             passed = False
+        # Configurable gate sensitivity for the added reviewers:
+        #   block_any  -> fail if any note is returned
+        #   block_high -> fail only on HIGH-severity notes
+        #   never      -> advisory only, never blocks
+        block_mode = str(thresholds.get(f"{reviewer}_block", "any") or "any").lower()
+        notes = data.get("notes", []) or []
+        if reviewer in ("voice", "exposition", "pacing", "stakes", "visual", "agency", "serial"):
+            if block_mode == "any" and notes:
+                passed = False
+            elif block_mode == "high":
+                sev = [str(n.get("severity", "")).upper() for n in notes if isinstance(n, dict)]
+                if any(s == "HIGH" for s in sev):
+                    passed = False
         results[reviewer] = {
             "score": data.get("score", 0.0),
             "pass": passed,
-            "notes": data.get("notes", []),
+            "notes": notes,
             "raw": data,
         }
 

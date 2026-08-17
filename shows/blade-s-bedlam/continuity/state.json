@@ -1,19 +1,18 @@
 {
   "episode": 0,
-  "world": {},
+  "world": {
+    "setting": "A rain-drenched mega-city, filled with towering skyscrapers, neon lights, and a vast slum sprawl. The city is overrun by bio-mechs - synthetic lifeforms that wreak havoc on the population.",
+    "rules": [
+      "The only way to survive in this city is through strength and cunning.",
+      "Technology is king; those who master it have the power."
+    ],
+    "established_facts": [
+      "Bio-mechs are a constant threat, originating from unknown sources.",
+      "The city's government has been corrupted by powerful corporations that exploit the populace for profit."
+    ]
+  },
   "characters": {},
   "plotlines": [
-    {
-      "id": "lilys_rivalry",
-      "name": "Lily's Competitive Edge",
-      "characters": [
-        "Lily",
-        "Ivy"
-      ],
-      "status": "active",
-      "summary": "Lily and Ivy constantly challenge each other in high-stakes combat scenarios, not merely for Blade's gaze, but to prove whose armoring expertise is superior. Their rivalry manifests as an intense engineering competition during battles\u2014who can craft the most resilient or offensively optimized hardsuit mid-fight\u2014driving them to achieve peak synergy when fighting alongside Lily and Ivy against overwhelming bio-mech threats.",
-      "last_seen_episode": 0
-    },
     {
       "id": "roses_secrets",
       "name": "Rose's Calculated Alliance",
@@ -23,21 +22,10 @@
       ],
       "status": "dormant",
       "summary": "While Rose and Dahlia maintain a close bond, their internal dynamic is one of strategic alliance rather than passive friendship. Each harbors professional or personal secrets that could shift the balance of power between them. When these truths emerge, they don't devolve into petty arguments; instead, they redefine how they coordinate tactics in battle, creating a sharper, more focused partnership against enemy forces.",
-      "last_seen_episode": 0
-    },
-    {
-      "id": "blades-romance",
-      "name": "Blade's Romance",
-      "characters": [
-        "Blade",
-        "Lily",
-        "Ivy",
-        "Rose",
-        "Dahlia"
-      ],
-      "summary": "A battle-hardened mercenary, Blade, finds himself the center of a deadly romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly push their skills to the limit in service of him. They fight not just for his affection, but through intense, synergistic competition, ensuring they are always ready to protect him from the city's relentless threats.",
-      "status": "active",
-      "last_seen_episode": 0
+      "last_seen_episode": 0,
+      "kind": "character",
+      "arc_remaining": 0,
+      "cooldown_remaining": 0
     },
     {
       "id": "dahlia-debt",
@@ -48,34 +36,42 @@
       ],
       "summary": "Dahlia is bound by a dangerous debt to underworld financier Jax, forcing her into high-risk retrieval missions outside the usual bio-mech skirmishes. This obligation threatens to shatter the trust she maintains with Rose and Blade regarding her past mercenary life.",
       "status": "active",
-      "last_seen_episode": 0
+      "last_seen_episode": 1,
+      "kind": "character",
+      "arc_remaining": 3,
+      "cooldown_remaining": 0
     },
     {
-      "id": "apex-734-destruction",
-      "name": "The Apex Scrapper's Rampage",
+      "id": "ivy-ambition",
+      "name": "Ivy's Ascendant Ambition",
       "characters": [
-        "Apex-734"
+        "Ivy",
+        "Kael"
       ],
-      "summary": "A massive, heavily armored bio-mech designed for urban demolition begins systematically tearing through the lower sectors of the city, targeting major transport hubs and threatening to destabilize entire districts. Its sheer destructive power forces Blade's crew to react immediately.",
+      "summary": "Driven by a need to transcend her role as Blade's support, Ivy actively seeks recognition as an independent combat genius. This ambition is aggressively courted by Kael, a slick OmniCorp agent offering her a high-profile R&D position that promises status beyond the mercenary ranks.",
       "status": "active",
-      "last_seen_episode": 0
+      "last_seen_episode": 1,
+      "kind": "character",
+      "cooldown_remaining": 0,
+      "arc_remaining": 3
     },
     {
-      "id": "marauder-pod-swarm",
-      "name": "Chitinous Marauder Pod Swarm",
+      "id": "lilys_rivalry",
+      "name": "Lily's Competitive Edge",
+      "kind": "character",
       "characters": [
-        "Chitinous Marauder Pods (x6)",
-        "Blade",
-        "Lily"
+        "Lily",
+        "Ivy"
       ],
-      "summary": "Six heavily chitinous, insectoid combat units begin swarming the lower sector ruins directly behind Apex-734's main assault path, forcing Blade and Lily to constantly adjust their defensive perimeter against this highly mobile flanking threat.",
+      "summary": "Lily and Ivy constantly challenge each other in high-stakes combat scenarios, not merely for Blade's gaze, but to prove whose armoring expertise is superior. Their rivalry manifests as an intense engineering competition during battles\u2014who can craft the most resilient or offensively optimized hardsuit mid-fight\u2014driving them to achieve peak synergy when fighting alongside Lily and Ivy against overwhelming bio-mech threats.",
       "status": "active",
-      "last_seen_episode": 0
+      "last_seen_episode": 1,
+      "arc_remaining": 5,
+      "cooldown_remaining": 0
     }
   ],
   "unresolved_threads": [],
   "continuity_rules": [],
-  "last_new_plotline_episode": null,
   "overall_plotline": {
     "id": "blades_romance",
     "name": "Blade's Romance",
@@ -87,7 +83,8 @@
       "Dahlia"
     ],
     "summary": "A battle-hardened mercenary, Blade, finds himself the center of a deadly romance as four beautiful armorer-mercs - Lily, Ivy, Rose, and Dahlia - constantly push their skills to the limit in service of him. They fight not just for his affection, but through intense, synergistic competition, ensuring they are always ready to protect him from the city's relentless threats.",
-    "last_seen_episode": 0,
+    "last_seen_episode": 1,
     "status": "active"
-  }
+  },
+  "last_new_plotline_episode": 1
 }

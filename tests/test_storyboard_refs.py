@@ -98,6 +98,17 @@ def test_llm_recurring_objects_rejects_structural_scenery(tmp_path):
     assert objs == ["Blade's Motorcycle"]
 
 
+def test_llm_recurring_objects_rejects_location_fixtures(tmp_path):
+    show = _show(tmp_path)
+    script = {"scenes": [{"shots": [{"action": "x", "camera": ""}]}]}
+    # Fountains/statues/plazas belong to the LOCATION's ref, not a recurring
+    # prop — the deterministic filter drops them even when the LLM lists them.
+    llm = _KeyItemsLLM(["Chrome Fountain", "Polished Chrome Fountain",
+                        "The Hellbringer Cannon"])
+    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
+    assert objs == ["The Hellbringer Cannon"]
+
+
 def test_recurring_objects_prompt_is_bounded():
     from studio.prompts import recurring_objects_prompt
     # A full 130-shot episode log must fit a local 12B model's context window —
@@ -262,3 +273,37 @@ def test_shot_ref_weights_no_speaker_first_char_dominates():
     w = _shot_ref_weights({}, ["Blade", "Lily"], n_char_refs=2,
                           n_obj_refs=0, has_prev_kf=False)
     assert w == [0.95, 0.8]   # first char = primary, second tapers
+
+
+def test_delete_costume_removes_variant(tmp_path):
+    """Deleting a costume drops its ref image + registry entries; base is protected."""
+    import json as _json
+    from studio.storyboard import delete_costume
+
+    show = _show(tmp_path)
+    rd = show.character_refs_dir("dahlia")
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "red.png").write_bytes(b"x")
+    (rd / "blue.png").write_bytes(b"x")
+    (rd / "refs.json").write_text(_json.dumps({
+        "variants": {"base": "base.png", "Red Suit": "red.png", "Blue Suit": "blue.png"},
+        "prompts": {"Red Suit": "a red suit", "Blue Suit": "a blue suit"},
+        "approved": ["Red Suit"],
+    }), encoding="utf-8")
+
+    delete_costume(show, "dahlia", "Red Suit")
+
+    data = _json.loads((rd / "refs.json").read_text(encoding="utf-8"))
+    assert "Red Suit" not in data["variants"]
+    assert "Red Suit" not in data["prompts"]
+    assert "Red Suit" not in data["approved"]
+    assert not (rd / "red.png").exists()
+    assert (rd / "blue.png").exists()          # sibling untouched
+
+    # base outfit is protected
+    with pytest.raises(ValueError):
+        delete_costume(show, "dahlia", "base")
+
+    # deleting a missing variant is a no-op
+    delete_costume(show, "dahlia", "nope")
+    assert "Blue Suit" in data["variants"]

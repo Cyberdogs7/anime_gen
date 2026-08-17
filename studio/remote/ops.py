@@ -223,6 +223,13 @@ class ServiceOps:
         if not tree or not os.path.isdir(tree):
             log.warning("krea2 comfy dir not configured (env.yaml comfyui.krea2.dir); using fallback")
             return False
+        # A port that is already occupied but not answering /system_stats is a
+        # WEDGED instance (executor hung, e.g. after an OOM). Skip the launch
+        # attempt — it would just fail to bind for 90s — and let the caller fall
+        # back to the remote krea2 right away.
+        if _port_open(port):
+            log.warning("krea2 comfy port %s is occupied but not answering; using fallback", port)
+            return False
         # Prefer a venv layout (D:/anime-h3), fall back to portable python_embeded.
         py = Path(tree) / "venv" / "Scripts" / "python.exe"
         if not py.exists():

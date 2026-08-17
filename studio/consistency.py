@@ -13,7 +13,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .bootstrap import ACTIVITY
 from .config import get_config
@@ -153,12 +153,17 @@ def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) 
 
 
 def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
-                          max_rounds: int = 4) -> list[dict[str, Any]]:
+                          max_rounds: int = 4,
+                          on_progress: "Callable[[], None] | None" = None) -> list[dict[str, Any]]:
     """Review shot keyframes and AUTO-iterate: regenerate failures, re-review only
     those, until everything passes or the round cap is hit. No manual step.
 
     Returns a per-shot report: [{"shot", "char", "result": pass|regenerated|...,
     "issue", "fix", "round"}].
+
+    ``on_progress`` (optional) is called after every shot review so a caller's
+    job progress stamp stays fresh during the (potentially long) vision review —
+    the episode reconciler uses it to tell 'working' from 'hung'.
     """
     from .clients.lmstudio import LMStudioClient
     from .comfy_workflows import generate_keyframe_with_ref, load_workflow
@@ -193,6 +198,8 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
             names, refs = _shot_refs(show, shot)
             ACTIVITY[show.show_id] = {"detail": f"Consistency review {sid} ({', '.join(names)})…",
                                       "ts": __import__("time").time()}
+            if on_progress:
+                on_progress()
             verdict = review_shot(llm, model, names, [Path(p) for p in refs], kf)
             if not verdict.get("pass"):
                 issue_parts = []

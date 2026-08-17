@@ -9,7 +9,8 @@ gates:
   show: gated              # concept/bible/character/scenes
   character: gated         # ref-bank contact sheet
   voice: gated             # voice audition
-  story: auto              # plan + script (with Stage 2a reviewer notes attached)
+  plan: gated              # episode OUTLINE (approve the plot before scenes/script)
+  story: auto              # scene details + script (with Stage 2a reviewer notes attached)
   shot: auto               # shots auto-approved above QC threshold
   episode: gated           # the "air" gate
   costume: gated           # costume-variant refs (per character) before any video uses them

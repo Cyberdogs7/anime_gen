@@ -17,6 +17,7 @@ checkpoints:
   h3_ref2va: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
   h3_clip: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
   h3_turbo_lora: "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors"
+  h3_ref2v_turbo_lora: "minimax_h3_turbo_4step_ckpt500_pruned_comfyui.safetensors"
   h3_video_vae: "minimax_h3_video_vae_fp16.safetensors"
   h3_audio_vae: "minimax_h3_audio_vae_fp32.safetensors"
 

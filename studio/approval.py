@@ -15,7 +15,8 @@ from typing import Any
 from .bootstrap import ACTIVITY, BootstrapChain
 from .bus.events import (
     BIBLE_APPROVED, BIBLE_PENDING, BIBLE_REJECTED, CHAR_PROPOSAL_APPROVED,
-    CHAR_PROPOSAL_PENDING, CHAR_PROPOSAL_REJECTED, CONCEPT_APPROVED, CONCEPT_PENDING,
+    CHAR_PROPOSAL_PENDING, CHAR_PROPOSAL_REJECTED, CHAR_REFS_APPROVED,
+    CHAR_REFS_PENDING, CHAR_REFS_REJECTED, CONCEPT_APPROVED, CONCEPT_PENDING,
     CONCEPT_REJECTED, COSTUME_APPROVED, COSTUME_REJECTED, OBJECT_REF_APPROVED,
     OBJECT_REF_REJECTED, SCENE_REGISTRY_APPROVED, SCENE_REGISTRY_PENDING,
     SCENE_REGISTRY_REJECTED, SCRIPT_APPROVED, SCRIPT_REJECTED, VOICE_APPROVED,
@@ -114,7 +115,7 @@ def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
         return [f"costume '{label}' for {char} approved"]
     if step == "object":
         from .storyboard import mark_object_approved
-        ep = int(episode or 0)
+        ep = _episode_num(episode)
         mark_object_approved(show, ep, slug.strip())
         _emit(show, OBJECT_REF_APPROVED, {**payload, "episode": str(ep), "object": slug})
         return [f"object ref '{slug}' approved"]
@@ -183,7 +184,7 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
     if step == "object":
         # Reject ONE recurring-object ref: unapprove it, drop the image, then
         # regenerate from the notes. Keeps the rest of the episode untouched.
-        ep = int(episode or 0)
+        ep = _episode_num(episode)
         s = slug.strip()
         from .storyboard import (regenerate_object_ref, unapprove_object)
         if not regenerate_object_ref(show, ep, s, notes, cfg=None):
@@ -404,6 +405,12 @@ def _episode_label(episode: int | str) -> str:
     return f"EP{int(ep):02d}"
 
 
+def _episode_num(episode: int | str) -> int:
+    """Parse an episode to its integer, tolerating the "EP01" dir/display form."""
+    ep = str(episode).upper().replace("EP", "").strip()
+    return int(ep or 0)
+
+
 def story_approval_path(show_id: str, episode: int | str) -> Path:
     show = Show(show_id)
     return show.dir / "runs" / _episode_label(episode) / "story.approval.json"
@@ -456,17 +463,9 @@ def reject_story(show_id: str, episode: int | str, notes: str = "no notes") -> l
     sbd = runs / "storyboard"
     if sbd.exists():
         shutil.rmtree(sbd)
-    # Regenerate the plan from the rejection notes NOW so the feedback actually
-    # shapes the outline (and the new plan is run through the structure reviewer).
-    # If regeneration fails, the plan stays rejected and the reconciler retries.
-    from .planner import generate_episode_plan
-    from .clients.lmstudio import LMStudioClient
-    from .config import get_config
-    try:
-        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=300)
-        generate_episode_plan(show, ep, llm=llm, notes=notes)
-        return [f"{_episode_label(ep)} rejected — plan regenerated from your notes; "
-                f"scene details + script rebuild queued"]
-    except Exception as exc:
-        return [f"{_episode_label(ep)} rejected — plan marked rejected; "
-                f"regeneration will retry automatically ({exc})"]
+    # The reconciler regenerates the plan from the rejection notes in its own
+    # thread (never block the HTTP request on a long LLM regen — a client
+    # timeout would abort it and strand the episode). needs_episode_reconcile
+    # now returns True for a rejected plan, so the self-healer picks it up.
+    return [f"{_episode_label(ep)} rejected — plan + scene details reset; "
+            f"regenerating from your notes in the background…"]

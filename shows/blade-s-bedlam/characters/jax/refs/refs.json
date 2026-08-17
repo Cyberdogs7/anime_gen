@@ -1,1 +1,1 @@
-{"status": "stub", "note": "Krea 2 ref generation unavailable", "variants": {}}
+{"status": "real", "refs": ["jax_ref_01.png"], "variants": {"base": "jax_ref_01.png"}}

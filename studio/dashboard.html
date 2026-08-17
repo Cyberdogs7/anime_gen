@@ -94,6 +94,11 @@
   .rev { border-left:3px solid var(--line); margin:8px 0; padding:6px 10px; background:#161a21; border-radius:4px; }
   .rev.fail { border-color:var(--bad); } .rev.pass { border-color:var(--ok); }
   .rev b { font-size:12px; }
+  .rev-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .rev-chip { font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--line);
+              background:#0d0f13; color:var(--muted); white-space:nowrap; cursor:default; }
+  .rev-chip.pass { border-color:var(--ok); color:var(--ok); }
+  .rev-chip.fail { border-color:var(--bad); color:var(--bad); }
   .hide { display:none; }
   .flash { position:fixed; right:16px; bottom:16px; background:#262b35; border:1px solid var(--line);
            border-radius:8px; padding:10px 14px; max-width:420px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,.5); }
@@ -101,6 +106,7 @@
              text-align:center; padding:12px 16px; font-weight:600; font-size:14px;
              height:44px; line-height:20px; display:flex; align-items:center; justify-content:center;
              visibility:visible; opacity:1; transition:opacity .2s, height .2s, padding .2s; }
+  .busybar.blocked { background:var(--bad); color:#1a0505; }
   .busybar.off { visibility:hidden; opacity:0; height:0; padding:0 16px; }
   body.busy-active header { top:44px; }
   .liveout { position:fixed; bottom:0; left:0; right:0; z-index:39; max-height:160px; overflow:auto;
@@ -171,6 +177,22 @@
     </div>
   </div>
 </div>
+<div id="editModal" class="hide">
+  <div class="modal-card" style="width:min(1200px,96vw);max-height:92vh;display:flex;flex-direction:column">
+    <div class="modal-head">
+      <b id="editModalTitle">Edit</b>
+      <span class="muted" id="editModalPath" style="font-size:11px;flex:1;padding-left:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      <button class="ghost btn" onclick="closeEditModal()">✕</button>
+    </div>
+    <textarea id="editModalText" spellcheck="false"
+      style="flex:1;min-height:420px;font-family:ui-monospace,Consolas,Menlo,monospace;font-size:12px;line-height:1.5;background:#0d0f13;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:10px;resize:vertical"></textarea>
+    <div class="kv muted" id="editModalHint" style="margin-top:6px"></div>
+    <div class="actions" style="border-top:1px solid var(--line);padding-top:10px">
+      <button class="ghost btn" onclick="closeEditModal()">Cancel (Esc)</button>
+      <button class="btn approve" onclick="saveEditModal()">Save &amp; Reload</button>
+    </div>
+  </div>
+</div>
 <div id="lightbox" class="lightbox hide">
   <img id="lightboxImg" alt="expanded view">
   <div class="lb-cap" id="lightboxCap"></div>
@@ -230,6 +252,57 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal()
 document.getElementById("modal").addEventListener("click", e => {
   if (e.target && e.target.id === "modal") closeModal();
 });
+
+// ---------------- inline data editor ----------------
+let EDIT_REL = "";           // the relative path currently being edited
+let EDIT_ONSAVE = "";        // global fn name to call after a successful save
+
+async function openEditor(rel, title, onsave) {
+  const d = await api(`/api/show/${SHOW}/file?path=${encodeURIComponent(rel)}`);
+  if (d.error || d.content === undefined) { alert(d.error || "file not found"); return; }
+  EDIT_REL = rel;
+  EDIT_ONSAVE = onsave || "";
+  document.getElementById("editModalTitle").textContent = title || rel;
+  document.getElementById("editModalPath").textContent = rel;
+  document.getElementById("editModalText").value = d.content;
+  const fmt = (d.format || "").toLowerCase();
+  document.getElementById("editModalHint").textContent =
+    `Editing ${rel} — ${fmt === "json" ? "JSON" : (fmt === "yaml" || fmt === "yml" ? "YAML" : "plain text")}. Save validates syntax before writing. After saving, the affected card reloads.`;
+  document.getElementById("editModal").classList.remove("hide");
+  document.getElementById("editModalText").focus();
+}
+
+function closeEditModal() {
+  document.getElementById("editModal").classList.add("hide");
+  EDIT_REL = "";
+  EDIT_ONSAVE = "";
+}
+
+async function saveEditModal() {
+  const content = document.getElementById("editModalText").value;
+  const d = await api(`/api/show/${SHOW}/file`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: EDIT_REL, content }),
+  });
+  if (d.error) { alert("Save failed: " + d.error); return; }
+  const onsave = EDIT_ONSAVE;
+  closeEditModal();
+  editOnSave(onsave);
+}
+
+// onsave is a global function NAME string (e.g. "loadStory" or "loadSetup"); we
+// dispatch it by name so inline onclick HTML stays simple and serializable.
+function editBtn(rel, title, onsave) {
+  const cb = onsave ? `&on=${encodeURIComponent(onsave)}` : "";
+  return `<button class="btn ghost" style="font-size:11px;padding:2px 8px" title="Edit ${esc(rel)} inline" onclick="openEditor('${esc(rel)}','${esc(title || rel)}','${esc(onsave || "")}')">✎ Edit</button>`;
+}
+
+function editOnSave(name) {
+  if (name === "loadStory") loadStory();
+  else if (name === "loadSetup") loadSetup();
+  else loadAll();
+}
 async function generateProposals() {
   const g = document.getElementById("guidance").value;
   const box = document.getElementById("props");
@@ -422,6 +495,7 @@ function renderCostumeModal() {
           ${v.approved ? "" : `<button class="btn approve" onclick="doApproveCostume('${esc(charName)}','${esc(v.label)}')">✓ Approve</button>`}
           <button class="btn ghost" onclick="doRejectCostume('${esc(charName)}','${esc(v.label)}','edit')">✎ Edit &amp; regenerate</button>
           <button class="btn ghost" onclick="doRejectCostume('${esc(charName)}','${esc(v.label)}','regen')">↻ Regenerate fresh</button>
+          <button class="btn ghost" style="color:var(--bad);border-color:var(--bad)" onclick="doDeleteCostume('${esc(charName)}','${esc(v.label)}')">🗑 Delete</button>
         </div>
       </div>`;
     }).join("") +
@@ -468,6 +542,20 @@ async function doRejectCostume(charName, label, mode) {
   if (COSTUME_MODAL_CHAR === charName) renderCostumeModal();
 }
 
+async function doDeleteCostume(charName, label) {
+  if (!confirm(`Delete costume "${label}" for ${charName}? This removes its reference image and registry entry.`)) return;
+  const result = await api(`/api/show/${SHOW}/costume/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ char: charName, costume: label }),
+  });
+  if (!result.ok) { alert(result.error || "costume could not be deleted"); return; }
+  delete (COSTUME_PENDING[charName] || {})[label];
+  // Reload the payload so the removed variant disappears everywhere.
+  await loadAll();
+  if (COSTUME_MODAL_CHAR === charName) renderCostumeModal();
+}
+
 async function doRejectCharRef(charName) {
   const notes = askNotes(); if (notes === null) return;
   await act(`/api/show/${SHOW}/reject`, { step: "char_ref", char: charName, notes },
@@ -502,6 +590,44 @@ function labelize(k) {
   return k.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 }
 
+function plotlinesCard(plotlines) {
+  if (!plotlines || !plotlines.length) {
+    return card("Plotlines", "", '<p class="muted">No plotlines yet — they roll as episodes are generated.</p>');
+  }
+  let rows = "";
+  for (const p of plotlines) {
+    const isOverall = /blades_romance|blade.?s romance/i.test(p.id + " " + (p.name || ""));
+    const kind = (p.kind || "character").toLowerCase();
+    const kindBadge = kind === "battle"
+      ? '<span class="chip" style="color:var(--bad);border-color:var(--bad)">battle</span>'
+      : '<span class="chip">character</span>';
+    const chars = (p.characters || []).length
+      ? `<span class="muted"> — ${esc((p.characters || []).join(", "))}</span>` : "";
+    // Episode allocation: show the active arc, or cooling, or available.
+    let status;
+    if (isOverall) {
+      status = '<span class="chip" style="color:var(--ok);border-color:var(--ok)">overall — always present</span>';
+    } else if ((p.arc_remaining || 0) > 0) {
+      status = `<span class="chip" style="color:var(--ok);border-color:var(--ok)">selected for ${p.arc_remaining} more episode${p.arc_remaining === 1 ? "" : "s"}</span>`;
+    } else if ((p.cooldown_remaining || 0) > 0) {
+      status = `<span class="chip" style="color:var(--muted);border-color:var(--line)">cooling (${p.cooldown_remaining} episode${p.cooldown_remaining === 1 ? "" : "s"})</span>`;
+    } else {
+      status = '<span class="chip">available</span>';
+    }
+    const seen = (p.last_seen_episode || 0) > 0
+      ? `<span class="muted"> · last seen EP${p.last_seen_episode}</span>` : "";
+    rows += `<div class="prow" style="align-items:flex-start">
+      <span class="plabel" style="min-width:0;white-space:normal"><b>${esc(p.name || p.id)}</b>${chars}</span>
+      <div class="pval" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${kindBadge}${status}${seen}</div>
+    </div>`;
+    if (p.summary) rows += `<div class="prow" style="align-items:flex-start"><span class="plabel"></span><div class="pval muted" style="font-size:11px">${esc(p.summary)}</div></div>`;
+  }
+  return card("Plotlines — episode allocation", "",
+              `<div class="pdict">${rows}</div>
+               <div class="kv muted" style="margin-top:8px">Each episode roll features running arcs and rolls 1-4 plotlines; a selected plotline carries an episode count (shown above), then cools down before re-entering the pool.</div>`,
+              editBtn("continuity/state.json", "Plotlines / continuity") + `<button class="btn ghost" style="font-size:11px;padding:2px 8px" title="Reload" onclick="loadSetup()">↻</button>`);
+}
+
 async function loadSetup() {
   const d = await api(`/api/show/${SHOW}`);
   window._showPayload = d;
@@ -511,14 +637,15 @@ async function loadSetup() {
   html += card("Concept", badge(d.bootstrap.concept.status),
                (regenNote(d.bootstrap.concept) || "") +
                (d.concept ? pretty(d.concept) : '<p class="muted">no concept yet</p>'),
-               actRow("concept", "", "concept", d.bootstrap.concept.status));
+               editBtn("concept.json", "Concept") + actRow("concept", "", "concept", d.bootstrap.concept.status));
   const bibleBody = !d.bible ? '<p class="muted">no bible yet</p>'
     : isStubBible(d.bible)
       ? '<p class="muted">Bible not generated yet — it generates after the concept is approved (takes a couple of minutes).</p>'
       : pretty(d.bible);
   html += card("Bible", badge(d.bootstrap.bible.status),
                (regenNote(d.bootstrap.bible) || "") + bibleBody,
-               actRow("bible", "", "bible", d.bootstrap.bible.status));
+               editBtn("bible.yaml", "Bible") + actRow("bible", "", "bible", d.bootstrap.bible.status));
+  html += plotlinesCard(d.plotlines || []);
   let charHtml = '<div class="char-grid">';
   for (const c of d.characters) {
     const cc = c.content || {};
@@ -550,7 +677,7 @@ async function loadSetup() {
         (c.ref_images.length ? ` <button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Reject base image</button>` : "") +
         (c.voice_file ? ` <button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : "")
       : "";
-    charHtml += `<div class="char"><h3>${esc(c.name)}</h3>
+    charHtml += `<div class="char"><h3>${esc(c.name)} ${editBtn(`characters/${esc(cc.id)}.yaml`, `${esc(c.name)} sheet`)}</h3>
       <div class="kv">Role: <b>${esc(cc.role || "—")}</b></div>
       <div class="kv">Proposal: ${badge(c.proposal)} &nbsp; Refs: ${badge(c.refs || (c.ref_images.length ? "ready" : "stub"))} &nbsp; Voice: ${badge(c.voice)}</div>
       ${baseImg ? `<div class="kv muted">Base ref:</div>${imgs}` : imgs}
@@ -574,7 +701,7 @@ async function loadSetup() {
     const rejectBtn = (v.ref_images || []).length
       ? `<button class="btn ghost" onclick="doRejectScene('${esc(k)}')">Reject image</button>`
       : "";
-    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")}${imgs}` +
+    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")} ${editBtn(`scenes/${esc(k)}.yaml`, `scene ${esc(k)}`)}${imgs}` +
       (rejectBtn ? `<div class="actions" style="border-top:0;padding:4px 0 0">${rejectBtn}</div>` : "") +
       `</div>`;
   }
@@ -603,17 +730,33 @@ async function pollActivity() {
     a = await api(`/api/show/${SHOW}/activity`);
   } catch (e) { /* show not loaded yet */ return; }
   const active = !!(a && a.active);
+  const blocked = !!(a && a.blocked);
   if (active) {
     // Update the busy bar + live transcript on EVERY poll (not just on the
     // active->true transition) so the user sees the current stage tick by tick
     // — the writing room, as it writes.
     _pollActive = true;
     document.body.classList.add("busy-active");
-    if (busy) { busy.textContent = "● " + (a.detail || "Working…"); busy.classList.remove("off"); }
+    if (busy) {
+      busy.classList.remove("blocked");
+      busy.textContent = "● " + (a.detail || "Working…");
+      busy.classList.remove("off");
+    }
     if (out) {
       out.textContent = a.output ? a.output.slice(-800) : "";
       out.classList.remove("hide");
     }
+  } else if (blocked) {
+    // Pipeline is waiting on a human gate — nothing is generating. Show a RED
+    // "waiting for approval" bar so the blocked state is unmistakable.
+    _pollActive = true;
+    document.body.classList.add("busy-active");
+    if (busy) {
+      busy.classList.add("blocked");
+      busy.textContent = "⏸ " + (a.blocked_detail || "Waiting for your approval");
+      busy.classList.remove("off");
+    }
+    if (out) out.classList.add("hide");
   } else if (_pollActive) {
     _pollActive = false;
     document.body.classList.remove("busy-active");
@@ -637,7 +780,13 @@ function episodeStatus(d) {
   if (sb.state === "running") return `Generating: ${sb.detail || "storyboard…"}`;
   if (done < shots) return `Storyboard incomplete (${done}/${shots} previews) — not final`;
   if (fails > 0) return `${fails} shot${fails > 1 ? "s" : ""} still flagged — consistency auto-iterated to its cap`;
-  if (st.status === "pending") return "Awaiting your approval";
+  if (st.status === "pending") {
+    const pr = (d.plan || {}).plan_review || {};
+    if (pr.passed === false) {
+      return `Outline failed review (${pr.rounds || 1} rounds, ${(pr.notes || []).length} notes) — needs revision`;
+    }
+    return "Awaiting your approval";
+  }
   return "Draft — not yet approved";
 }
 
@@ -756,11 +905,32 @@ function writingRoomPanel(d, act) {
   const scenes = (d.scenes || []).length;
   const shots = sum.shots || 0;
   const lines = sum.dialogue_lines || 0;
-  const writing = !!(act.active) || st.status === "rejected" || !d.script_file;
+  const plan = d.plan || {};
+  const sd = d.scene_details || {};
+  // Genuinely working right now (a live job thread is alive) OR a rejection
+  // kicked off a regen.
+  const working = !!(act.active) || st.status === "rejected";
+  // If nothing is running and we're waiting on a gate, say exactly that instead
+  // of claiming "regenerating…" — a pending outline/scenes is blocked on YOU,
+  // not stuck.
+  let statusLine;
+  if (working) {
+    statusLine = act.detail || "Working…";
+  } else if (st.status === "approved") {
+    statusLine = "Done — approved.";
+  } else if (plan && plan.status === "pending") {
+    statusLine = "Waiting for your approval — review the outline and Approve or Reject it.";
+  } else if (sd && sd.status === "pending") {
+    statusLine = "Waiting for your approval — review the scene details and Approve or Reject them.";
+  } else if (!d.script_file) {
+    statusLine = "Idle — nothing queued. Generate or resume an episode to start.";
+  } else {
+    statusLine = "Idle.";
+  }
   return `<div class="card" id="writing-room">
-    <h2>Writing room ${writing ? badge("working") : badge("idle")}</h2>
+    <h2>Writing room ${working ? badge("working") : badge("idle")}</h2>
     <div class="body">
-      <div class="kv"><b>${esc(act.detail || (writing ? "Queued — regenerating…" : "Idle"))}</b></div>
+      <div class="kv"><b>${esc(statusLine)}</b></div>
       <div class="kv muted">Scenes: <b>${scenes}/${(d.plan && (d.plan.scenes || []).length) || "—"}</b> · Shots: <b>${shots}</b> · Dialogue lines: <b>${lines}</b></div>
     </div></div>`;
 }
@@ -846,26 +1016,56 @@ function episodeStoryboard(ep, d) {
   }, {});
   let h = "";
   h += refGateBanner(d);
+  // Prominent "action needed" banner when the episode is blocked on a human
+  // gate (plan or scene details pending, nothing generating). This is the
+  // opposite of "Generating…" — be explicit that it's waiting on YOU.
+  const sb = d.storyboard || {}, rd = d.render || {};
+  const busy = sb.state === "running" || rd.state === "running";
   const plan = d.plan || {};
-  if (plan && plan.status) {
-    const planScenes = (plan.scenes || []).map(sc =>
+  const sd = d.scene_details || {};
+  if (!busy && st.status !== "approved" && plan && plan.status === "pending") {
+    const pr = plan.plan_review || {};
+    if (pr.passed === false) {
+      const nNotes = (pr.notes || []).length;
+      h += `<div class="card" style="border:1px solid var(--bad)">
+        <h2>Outline failed review ${badge("needs revision")}</h2>
+        <div class="body">
+          <div class="kv" style="color:var(--bad)"><b>The structure reviewers rejected this outline after ${esc(String(pr.rounds || 1))} rounds (${nNotes} notes).</b> It is <b>not</b> simply awaiting approval. You can <b>✎ Edit</b> the outline to fix the flagged beats and re-run, <b>Approve outline</b> as an override, or <b>Reject outline</b> to regenerate from notes. See the review notes below.</div>
+        </div></div>`;
+    } else {
+      h += `<div class="card" style="border:1px solid var(--warn)">
+        <h2>Waiting on your approval ${badge("pending")}</h2>
+        <div class="body">
+          <div class="kv" style="color:var(--warn)"><b>The episode outline is ready but not approved.</b> Review it below and click <b>Approve outline</b> to generate scene details + script, or <b>Reject outline</b> to regenerate it from notes. Nothing is generating until you decide.</div>
+        </div></div>`;
+    }
+  } else if (!busy && st.status !== "approved" && sd && sd.status === "pending") {
+    h += `<div class="card" style="border:1px solid var(--warn)">
+      <h2>Waiting on your approval ${badge("pending")}</h2>
+      <div class="body">
+        <div class="kv" style="color:var(--warn)"><b>Scene details are ready but not approved.</b> Click <b>Approve scenes</b> to write shots + build the storyboard, or <b>Reject scenes</b> to regenerate them. Nothing is generating until you decide.</div>
+      </div></div>`;
+  }
+  const plan2 = d.plan || {};
+  if (plan2 && plan2.status) {
+    const planScenes = (plan2.scenes || []).map(sc =>
       `<div class="scene"><b>${esc(sc.id || "")}</b> — ${esc(sc.location || "")} ` +
       `<span class="muted">${esc(sc.time_of_day || "")}</span>` +
       `<div class="kv">${esc(sc.summary || "")}</div>` +
       ((sc.beats || []).length ? `<div class="kv muted">• ${esc((sc.beats || []).join(" • "))}</div>` : "") +
       ((sc.characters || []).length ? `<div class="kv muted">Cast: ${esc((sc.characters || []).join(", "))}</div>` : "") +
       `</div>`).join("");
-    h += card("Episode outline", badge(plan.status),
-      `<div class="ep-summary"><b>Plot:</b> ${esc(plan.plot || plan.summary || "")}</div>` +
-      `<div class="kv muted">Characters: ${esc((plan.characters || []).join(", ") || "—")}</div>` +
-      (plan.rejected_notes ? `<div class="kv">Rejected: ${esc(plan.rejected_notes)}</div>` : "") +
+    h += card("Episode outline", badge(plan2.status),
+      `<div class="ep-summary"><b>Plot:</b> ${esc(plan2.plot || plan2.summary || "")}</div>` +
+      `<div class="kv muted">Characters: ${esc((plan2.characters || []).join(", ") || "—")}</div>` +
+      (plan2.rejected_notes ? `<div class="kv">Rejected: ${esc(plan2.rejected_notes)}</div>` : "") +
       (planScenes ? `<div class="scenes">${planScenes}</div>` : ""),
-      plan.status === "pending"
-        ? `<div class="actions"><button class="btn approve" onclick="doPlanApprove('${esc(d.episode)}')">Approve outline</button>` +
+      plan2.status === "pending"
+        ? `<div class="actions">${editBtn(`runs/EP${esc(d.episode)}/plan.json`, `EP${esc(d.episode)} plan`, loadStory)}` +
+          `<button class="btn approve" onclick="doPlanApprove('${esc(d.episode)}', ${plan2.plan_review && plan2.plan_review.passed === false ? 'true' : 'false'})">Approve outline${plan2.plan_review && plan2.plan_review.passed === false ? ' (override)' : ''}</button>` +
           `<button class="btn reject" onclick="doPlanReject('${esc(d.episode)}')">Reject outline</button></div>`
-        : (plan.status === "approved" ? `<div class="kv muted">Outline approved — writing scene details</div>` : ""));
+        : (plan2.status === "approved" ? `<div class="kv muted">Outline approved — writing scene details</div> ${editBtn(`runs/EP${esc(d.episode)}/plan.json`, `EP${esc(d.episode)} plan`, loadStory)}` : ""));
   }
-  const sd = d.scene_details || {};
   if (sd && sd.status) {
     const dsc = (sd.scenes || []).map(sc =>
       `<div class="scene"><b>${esc(sc.id)}</b> — ${esc(sc.location || "")} <span class="muted">${esc(sc.time_of_day || "")}</span>` +
@@ -875,16 +1075,18 @@ function episodeStoryboard(ep, d) {
       `</div>`).join("");
     h += card("Scene details", badge(sd.status),
       (sd.rejected_notes ? `<div class="kv">Rejected: ${esc(sd.rejected_notes)}</div>` : "") + dsc,
-      sd.status === "pending"
-        ? `<div class="actions"><button class="btn approve" onclick="doSceneDetails('approve','${esc(d.episode)}')">Approve scenes</button>` +
+      (sd.status === "pending"
+        ? `<div class="actions">${editBtn(`runs/EP${esc(d.episode)}/scene_details.json`, `EP${esc(d.episode)} scene details`, loadStory)}` +
+          `<button class="btn approve" onclick="doSceneDetails('approve','${esc(d.episode)}')">Approve scenes</button>` +
           `<button class="btn reject" onclick="doSceneDetails('reject','${esc(d.episode)}')">Reject scenes</button></div>`
         : (sd.status === "approved"
-          ? `<div class="kv muted">Scene details approved</div>` +
+          ? `<div class="kv muted">Scene details approved ${editBtn(`runs/EP${esc(d.episode)}/scene_details.json`, `EP${esc(d.episode)} scene details`, loadStory)}</div>` +
             `<div class="actions"><button class="btn reject" onclick="doRegenerateShots('${esc(d.episode)}')">Regenerate shots</button></div>`
-          : ""));
+          : "")));
   }
   h += card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
-    `<div class="kv">Status: <b id="ep-status-line">${esc(episodeStatus(d))}</b></div>` +
+    `<div class="kv">Status: <b id="ep-status-line">${esc(episodeStatus(d))}</b>` +
+    (d.script_file ? ` ${editBtn(`runs/EP${esc(d.episode)}/${esc(d.script_file)}`, `EP${esc(d.episode)} script`, loadStory)}` : "") + `</div>` +
     (sum.episode ? `<div class="ep-summary"><b>Episode summary:</b> ${esc(sum.episode)}</div>` : "") +
     `<div class="kv">Scenes: <b>${sum.scenes || 0}</b> · Shots: <b>${sum.shots || 0}</b> · ` +
     `Dialogue lines: <b>${sum.dialogue_lines || 0}</b> · Hero shots: <b>${sum.hero_shots || 0}</b></div>` +
@@ -951,6 +1153,7 @@ function episodeStoryboard(ep, d) {
         ${v.approved ? "" : `<div class="outfit-actions">` +
           `<button class="btn approve" onclick="doApproveCostume('${esc(c.name)}','${esc(v.label)}')">✓ Approve</button>` +
           `<button class="btn ghost" onclick="doRejectCostume('${esc(c.name)}','${esc(v.label)}','regen')">↻ Regenerate</button>` +
+          `<button class="btn ghost" style="color:var(--bad);border-color:var(--bad)" onclick="doDeleteCostume('${esc(c.name)}','${esc(v.label)}')">🗑 Delete</button>` +
           `</div>`}</div>`).join("");
       return `<div class="obj"><div class="kv"><b>${esc(c.name)}</b> <span class="muted">${esc(c.role || "")}</span></div>${baseRef}${variants}</div>`;
     }).join("");
@@ -961,10 +1164,24 @@ function episodeStoryboard(ep, d) {
     let rh = "";
     for (const k of rev) {
       const r = d.reviews[k] || {};
-      const cls = r.pass ? "pass" : (r.pass === false ? "fail" : "");
-      rh += `<div class="rev ${cls}"><b>${esc(k)}</b> ${r.pass === undefined ? "" : (r.pass ? "PASS" : "FAIL")} score=${r.score ?? ""}<br><span class="muted">${esc(r.summary || "")}</span></div>`;
+      const rounds = r.rounds || [];
+      const cls = r.passed_latest ? "pass" : (r.passed_latest === false ? "fail" : "");
+      let chips = "";
+      for (const rd of rounds) {
+        const rp = rd.pass;
+        const chipCls = rp === true ? "pass" : (rp === false ? "fail" : "");
+        const score = rd.score !== undefined && rd.score !== null ? ` score=${esc(String(rd.score))}` : "";
+        chips += `<span class="rev-chip ${chipCls}" title="round ${esc(String(rd.round ?? "?"))}${score}${rd.summary ? " — " + esc(rd.summary) : ""}">R${esc(String(rd.round ?? "?"))} ${rp === true ? "PASS" : (rp === false ? "FAIL" : "?")}${score}</span>`;
+      }
+      const latestNotes = (r.latest && r.latest.notes) || [];
+      const notesHtml = latestNotes.slice(0, 4).map(n =>
+        `<div class="muted">· ${esc(n.note || n.item || JSON.stringify(n))}</div>`).join("");
+      const verdict = r.passed_any
+        ? `<span class="ok">✓ passed at least one round</span>`
+        : (r.passed_latest === false ? `<span class="bad">✗ never passed</span>` : "");
+      rh += `<div class="rev ${cls}"><b>${esc(k)}</b> ${verdict}<div class="rev-chips">${chips}</div>${notesHtml}</div>`;
     }
-    h += card("Writers' room", "", rh);
+    h += card("Writers' room — all review rounds", "", rh);
   }
   if (d.script) {
     h += card("Script (raw)", "", `<details><summary class="muted">show raw JSON</summary><pre>${esc(JSON.stringify(d.script, null, 2))}</pre></details>`);
@@ -1052,10 +1269,12 @@ function genRender(ep) {
       "Starting H3 video render (background)…");
 }
 
-async function doPlanApprove(ep) {
+async function doPlanApprove(ep, override) {
   const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
-  await act(`/api/show/${SHOW}/plan/approve`, { episode: n },
-            "Plan approved — writing scene shots & building storyboard (background)…");
+  const msg = override
+    ? "Plan approved (override of failed review) — writing scene details (background)…"
+    : "Plan approved — writing scene shots & building storyboard (background)…";
+  await act(`/api/show/${SHOW}/plan/approve`, { episode: n, override: !!override }, msg);
 }
 async function doPlanReject(ep) {
   const notes = askNotes(); if (notes === null) return;

@@ -30,6 +30,53 @@ def _read_json(path: Path | None) -> Any:
         return None
 
 
+def _resolve_show_file(show: Show, rel: str) -> Path | None:
+    """Resolve a relative path under the show dir, rejecting traversal.
+
+    Returns the resolved path if it is inside the show directory (or a direct
+    subdirectory of it), else None. This gates the raw-file edit endpoint so the
+    browser can only touch this show's saved-out data.
+    """
+    if not rel or rel.startswith("/") or ".." in rel.replace("\\", "/").split("/"):
+        return None
+    p = (show.dir / rel).resolve()
+    base = show.dir.resolve()
+    if p != base and base not in p.parents:
+        return None
+    return p
+
+
+def _read_show_file(show: Show, rel: str) -> dict[str, Any] | None:
+    p = _resolve_show_file(show, rel)
+    if p is None or not p.exists():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return {"path": rel, "content": text, "format": p.suffix.lstrip(".")}
+
+
+def _write_show_file(show: Show, rel: str, content: str) -> dict[str, Any]:
+    p = _resolve_show_file(show, rel)
+    if p is None:
+        raise ValueError(f"invalid or outside-show path: {rel!r}")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # Validate JSON/YAML so a typo can't silently corrupt saved-out data.
+    fmt = p.suffix.lstrip(".").lower()
+    if fmt in ("json", "yaml", "yml"):
+        try:
+            if fmt == "json":
+                json.loads(content)
+            else:
+                import yaml as _yaml
+                _yaml.safe_load(content)
+        except Exception as exc:
+            raise ValueError(f"{rel} is not valid {fmt.upper()}: {exc}")
+    p.write_text(content, encoding="utf-8")
+    return {"ok": True, "path": rel, "bytes": len(content)}
+
+
 def _read_yaml(path: Path | None) -> Any:
     if path is None or not path.exists():
         return None
@@ -114,8 +161,33 @@ def show_payload(show_id: str) -> dict[str, Any]:
         "bible": _read_yaml(show.bible_path),
         "characters": chars,
         "scenes": scenes,
+        "plotlines": _plotline_payload(show),
         "next_episode": next_ep,
     }
+
+
+def _plotline_payload(show: Show) -> list[dict[str, Any]]:
+    """Merge the bible's plotline seeds with the live arc/cooldown bookkeeping
+    from continuity so the UI can show each plotline's episode allocation."""
+    from .development import _plotline_state
+    bible = show.read_bible()
+    overall = bible.get("overall_plotline") or {}
+    lines = _plotline_state(show, bible)
+    out: list[dict[str, Any]] = []
+    for p in lines:
+        out.append({
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "kind": p.get("kind", "character"),
+            "status": p.get("status", "active"),
+            "characters": p.get("characters", []) or [],
+            "summary": p.get("summary", ""),
+            "last_seen_episode": p.get("last_seen_episode", 0),
+            "arc_remaining": int(p.get("arc_remaining", 0) or 0),
+            "cooldown_remaining": int(p.get("cooldown_remaining", 0) or 0),
+        })
+    out.sort(key=lambda p: (p["id"] == overall.get("id"), p["name"] or ""))
+    return out
 
 
 def episodes_payload(show_id: str) -> list[dict[str, Any]]:
@@ -139,8 +211,26 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
     reviews: dict[str, Any] = {}
     rdir = d / "reviews"
     if rdir.exists():
+        # Group review files by reviewer name (drop the ".rN" round suffix) so the
+        # UI can show EVERY round's pass/fail history per reviewer, not just the
+        # last file. e.g. structure.r1.json..structure.r4.json -> "structure" with
+        # 4 round entries.
+        import re as _re
         for f in rdir.glob("*.json"):
-            reviews[f.stem] = _read_json(f)
+            m = _re.match(r"^(.*)\.r(\d+)$", f.stem)
+            reviewer = m.group(1) if m else f.stem
+            round_no = int(m.group(2)) if m else 0
+            data = _read_json(f)
+            entry = reviews.setdefault(reviewer, {"rounds": []})
+            entry["rounds"].append({"round": round_no, **{
+                k: data.get(k) for k in ("score", "pass", "summary", "notes", "maturity_score")
+                if k in data}})
+        # Sort each reviewer's rounds ascending and expose latest + best.
+        for reviewer, entry in reviews.items():
+            entry["rounds"].sort(key=lambda r: r.get("round", 0))
+            entry["latest"] = entry["rounds"][-1] if entry["rounds"] else {}
+            entry["passed_any"] = any(r.get("pass") is True for r in entry["rounds"])
+            entry["passed_latest"] = entry["latest"].get("pass") is True
 
     scenes_out: list[dict[str, Any]] = []
     total_shots = 0
@@ -202,6 +292,10 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
                 scenes_out.append(_scene_payload(ps, shots))
                 writing[sid] = {"pass": "done", "shots": len(shots)}
                 continue
+            # Only report a scene as "writing" if actual shot work exists (a
+            # partial pass checkpoint). A pending plan with no writing started
+            # must NOT show a progress chip — the episode is blocked on approval,
+            # not mid-write.
             best = -1
             try:
                 for f in sc_dir.glob(f"{sid}.p*.json"):
@@ -210,9 +304,10 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
                         best = max(best, int(m.group(1)))
             except Exception:
                 pass
-            writing[sid] = {"pass": _SCENE_PASSES[best]["name"]
-                            if 0 <= best < len(_SCENE_PASSES) else "",
-                            "shots": 0}
+            if best >= 0:
+                writing[sid] = {"pass": _SCENE_PASSES[best]["name"]
+                                if 0 <= best < len(_SCENE_PASSES) else "",
+                                "shots": 0}
     total_shots = sum(len(sc["shots"]) for sc in scenes_out)
     hero_shots = sum(1 for sc in scenes_out for s in sc["shots"]
                      if s.get("importance") == "hero")
@@ -392,38 +487,84 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": "media not found"})
             return
         if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "activity":
-            from .bootstrap import ACTIVITY, reconcile_if_stalled
-            from .episode_repair import reconcile_episodes_if_stalled
+            from .bootstrap import (ACTIVITY, reconcile_if_stalled,
+                                    is_bootstrap_reconciling)
+            from .episode_repair import (reconcile_episodes_if_stalled,
+                                         is_episode_reconciling)
             from .storyboard import storyboard_status
             from .render import render_status
+            from .planner import read_episode_plan, read_scene_details
             reconcile_if_stalled(parts[2])
             reconcile_episodes_if_stalled(parts[2])
             a = ACTIVITY.get(parts[2])
             sb = storyboard_status(parts[2])
             rd = render_status(parts[2])
-            detail = ""
-            active = False
-            for job in (sb, rd):
-                if job.get("state") == "running":
-                    active = True
-                    detail = job.get("detail") or "Working…"
-                    # The job dict only advances during the keyframe loop; the
-                    # ref passes (casting/costume/object) set a fresh, more
-                    # specific ACTIVITY detail — surface it so the user sees
-                    # what is actually rendering.
-                    if a and (time.time() - (a.get("ts") or 0)) < 120 and a.get("detail"):
-                        detail = a["detail"]
-                    break
-            # A stale ACTIVITY entry (set by a thread that finished but never
-            # cleared it, or by a crash) must not pin the UI to "active".
-            if not active and a:
-                fresh = (time.time() - (a.get("ts") or 0)) < 60
-                if fresh:
-                    active = True
-                    detail = a.get("detail", "Working…")
-                else:
-                    ACTIVITY.pop(parts[2], None)
+            # A show is only "active" while a REAL job thread is alive:
+            #  - a storyboard job running,
+            #  - a render job running,
+            #  - a Gate-0 reconcile thread alive, or
+            #  - an episode-reconcile thread alive.
+            # ACTIVITY alone is NOT proof of work: any thread can write it, and a
+            # finished/crashed job leaves a stale entry that would otherwise pin
+            # the UI to "Generating…" forever. Only surface its detail while a
+            # genuine job is in flight.
+            job_alive = (
+                sb.get("state") == "running"
+                or rd.get("state") == "running"
+                or is_bootstrap_reconciling(parts[2])
+                or is_episode_reconciling(parts[2])
+            )
+            if job_alive:
+                detail = (a or {}).get("detail") or sb.get("detail") or rd.get("detail") or "Working…"
+                active = True
+                blocked = False
+                blocked_detail = ""
+            else:
+                detail = ""
+                active = False
+                if a:
+                    ACTIVITY.pop(parts[2], None)   # clear orphaned detail
+                # Blocked on a human gate? Check the latest episode's plan /
+                # scene-details status. If pending and nothing is generating, the
+                # pipeline is WAITING ON YOU — surface that as a distinct state so
+                # the UI can show a red "waiting for approval" bar instead of
+                # silence.
+                try:
+                    show_dir = Show(parts[2]).dir / "runs"
+                    eps = sorted((int(d.name[2:]) for d in show_dir.iterdir()
+                                  if d.is_dir() and d.name.startswith("EP")
+                                  and d.name[2:].isdigit()),
+                                 reverse=True) if show_dir.exists() else []
+                    blocked = False
+                    blocked_detail = ""
+                    for ep in eps:
+                        plan = read_episode_plan(Show(parts[2]), ep)
+                        if (plan or {}).get("status") == "pending":
+                            review = (plan or {}).get("plan_review") or {}
+                            if review.get("passed") is False:
+                                # The outline FAILED the structure review. It is
+                                # not simply awaiting a yes/no — the reviewers
+                                # rejected it and it needs revision (approve is a
+                                # manual override, not a clean pass).
+                                blocked = True
+                                blocked_detail = (f"EP{ep:02d}: outline FAILED review "
+                                                  f"({review.get('rounds', 1)} rounds, "
+                                                  f"{len(review.get('notes') or [])} notes) — "
+                                                  "revise it or approve as an override")
+                            else:
+                                blocked = True
+                                blocked_detail = f"EP{ep:02d}: outline waiting for your approval"
+                            break
+                        details = read_scene_details(Show(parts[2]), ep)
+                        if (details or {}).get("status") == "pending":
+                            blocked = True
+                            blocked_detail = f"EP{ep:02d}: scene details waiting for your approval"
+                            break
+                except Exception:
+                    blocked = False
+                    blocked_detail = ""
             self._send(200, {"active": active, "detail": detail, "output": (a or {}).get("output", ""),
+                             "blocked": blocked, "blocked_detail": blocked_detail,
                              "storyboard": sb, "render": rd})
             return
         if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "episodes":
@@ -431,6 +572,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "ep":
             self._send(200, episode_payload(parts[2], parts[4]))
+            return
+        if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "file":
+            from urllib.parse import parse_qs, urlparse as _up
+            q = parse_qs(_up(self.path).query)
+            rel = (q.get("path") or [""])[0]
+            data = _read_show_file(Show(parts[2]), rel)
+            if data is None:
+                self._send(404, {"error": "file not found or outside show dir"})
+                return
+            self._send(200, data)
             return
         self._send(404, {"error": "not found"})
 
@@ -518,7 +669,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ep = int(body.get("episode", 1) or 1)
                 show_id = parts[2]
                 show = Show(show_id)
-                approve_plan(show, ep)
+                # override=True lets a human approve a reviewer-rejected outline.
+                approve_plan(show, ep, override=bool(body.get("override")))
                 self._send(200, {"ok": True, "messages": [
                     "plan approved — writing the detailed scene section (background)…"]})
                 ACTIVITY.pop(show_id, None)
@@ -662,6 +814,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     resume_episode(show_id, int(ep.replace("EP", "")))
                     self._send(200, {"ok": True, "messages": [f"{ep} resumed"]})
                     return
+            if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "file":
+                rel = (body.get("path") or "").strip()
+                content = body.get("content")
+                if not rel or not isinstance(content, str):
+                    self._send(400, {"ok": False, "error": "path and content required"})
+                    return
+                self._send(200, _write_show_file(Show(parts[2]), rel, content))
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "costume" \
+                    and parts[4] == "delete":
+                from .storyboard import delete_costume
+                show = Show(parts[2])
+                cname = (body.get("char") or "").strip()
+                label = (body.get("costume") or "").strip()
+                if not cname or not label:
+                    self._send(400, {"ok": False, "error": "char and costume required"})
+                    return
+                c = next((show.read_character(cid) for cid in show.list_characters()
+                          if (show.read_character(cid).get("name") or "") == cname), None)
+                if not c:
+                    self._send(404, {"ok": False, "error": f"no character named {cname}"})
+                    return
+                delete_costume(show, c.get("id", ""), label)
+                self._send(200, {"ok": True, "messages": [f"costume '{label}' deleted"]})
+                return
             self._send(404, {"error": "not found"})
         except ValueError as exc:
             self._send(400, {"ok": False, "error": str(exc)})

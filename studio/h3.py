@@ -139,6 +139,13 @@ def build_h3_shot_workflow(
                "inputs": {"video": ["14", 0], "filename_prefix": "h3_shot",
                           "format": "mp4", "codec": "h264"}},
     }
+    ref_lora = ck.get("h3_ref2v_turbo_lora") or ""
+    if ref_lora:
+        # Turbo 4-step lora on the ref2va UNet (matches h3_anime_tune workflow).
+        wf["2a"] = {"class_type": "LoraLoaderModelOnly",
+                    "inputs": {"lora_name": ref_lora, "strength_model": lora_strength,
+                               "model": ["2", 0]}}
+        wf["6"]["inputs"]["model_ref2va"] = ["2a", 0]
     if ref_images:
         _add_ref_images(wf, "6", ref_images)
     if use_spectrum or use_first_block_cache:
@@ -224,6 +231,13 @@ def build_h3_ref2va_workflow(
     wf["5"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": cond_inputs}
 
     model_src: list[Any] = ["1", 0]
+    ref_lora = ck.get("h3_ref2v_turbo_lora") or ""
+    if ref_lora:
+        # Turbo 4-step lora on the ref2va UNet (matches h3_anime_tune workflow).
+        wf["1a"] = {"class_type": "LoraLoaderModelOnly",
+                    "inputs": {"lora_name": ref_lora, "strength_model": lora_strength,
+                               "model": ["1", 0]}}
+        model_src = ["1a", 0]
     if use_spectrum or use_first_block_cache:
         if use_spectrum:
             wf["17"] = {"class_type": "SpectrumApplyMiniMaxH3",
@@ -354,6 +368,13 @@ def build_h3_retake_workflow(
                "inputs": {"video": ["14", 0], "filename_prefix": "h3_extend",
                           "format": "mp4", "codec": "h264"}},
     }
+    ref_lora = ck.get("h3_ref2v_turbo_lora") or ""
+    if ref_lora:
+        # Turbo 4-step lora on the ref2va UNet (matches h3_anime_tune workflow).
+        wf["2a"] = {"class_type": "LoraLoaderModelOnly",
+                    "inputs": {"lora_name": ref_lora, "strength_model": lora_strength,
+                               "model": ["2", 0]}}
+        wf["6"]["inputs"]["model_ref2va"] = ["2a", 0]
     if use_spectrum or use_first_block_cache:
         model_src: list[Any] = ["6", 0]
         if use_spectrum:
@@ -377,9 +398,18 @@ def build_h3_retake_workflow(
 
 
 def run_h3_shot(client: ComfyClient, workflow: dict[str, Any], out_path: Path | str,
-                timeout_s: float = 1800.0) -> Path:
+                timeout_s: float = 1800.0,
+                hard_timeout_s: float | None = None) -> Path:
+    """Render one H3 shot and save it to out_path.
+
+    ``hard_timeout_s`` caps the TOTAL wait regardless of queue state, so a wedged
+    ComfyUI renderer (job stuck in queue_running) fails bounded instead of
+    blocking the pipeline forever. Defaults to ``timeout_s`` — a render that is
+    still in the queue after ``timeout_s`` is treated as hung and interrupted.
+    """
     prompt_id = client.submit(workflow)
-    entry = client.wait(prompt_id, timeout_s=timeout_s)
+    entry = client.wait(prompt_id, timeout_s=timeout_s,
+                        hard_timeout_s=timeout_s if hard_timeout_s is None else hard_timeout_s)
     if entry.get("status", {}).get("status_str") == "error":
         msgs = entry.get("status", {}).get("messages", [])
         err = [m[1] for m in msgs if m[0] == "execution_error"]

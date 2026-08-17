@@ -1,31 +1,11 @@
-name: Jax
-appearance_canonical: A tall, impeccably tailored man in his late 30s, perpetually
-  clad in a high-collared charcoal suit that seems to absorb the neon city grime.
-  His hair is slicked back with excessive pomade, jet black, and streaks of silver
-  near the temples. He possesses razor-sharp cheekbones, an unnervingly calm expression,
-  and eyes the color of polished obsidian. A single, thin platinum chain adorns his
-  left lapel, subtly catching the light.
-appearance_notes: Always maintains perfect posture; never sweats unless intentionally
-  provoking a scene. His clothing is always custom-tailored, even in the grimiest
-  slum districts. He often smells faintly of expensive cologne mixed with ozone from
-  the city's electrical sprawl.
-personality:
-- Calculating
-- Patronizingly Charming
-- Ruthlessly Pragmatic
-- Obsessively Detail-Oriented
-traits_for_llm: Jax speaks with a smooth, low baritone that drips condescension like
-  fine syrup. He rarely raises his voice; instead, he uses precise vocabulary and
-  rhetorical flourishes to make simple statements sound like pronouncements from a
-  deity. When speaking to Dahlia, he often frames her struggles as 'a minor operational
-  inefficiency.' Towards Blade or the other girls, he offers backhanded compliments
-  laced with veiled threats about their competence.
-voice:
-  mode: manual
-  speaker: null
-  voice_description: Mid-to-low register baritone. The texture is smooth, almost velvety,
-    but carries a noticeable, controlled rasp on consonants (especially 'T' and 'K').
-    Delivery is slow, deliberate, and overly polished—like reading an expensive manifesto
-    while leaning against a rain-slicked skyscraper.
 id: jax
+name: Jax
 role: episode supporting
+appearance_canonical: Jax possesses vibrant, spiky azure hair that often defies gravity,
+  contrasting sharply with piercing emerald green eyes. While maintaining his distinct
+  vibrancy, the texture of his hair has been refined to appear less exaggerated and
+  more grounded in a modern anime aesthetic. He is typically clad in a sleek, dark
+  navy jacket over a crimson undershirt, paired with fitted black tactical pants and
+  bright orange boots. His build remains athletic and lean, suggesting agility and
+  underlying power, but the lines of his physique are rendered with greater anatomical
+  detail to achieve a more 'realism' feel.

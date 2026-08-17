@@ -246,6 +246,14 @@ _JUNK_OBJECT_TOKENS = (
     "strut", "struts", "pillar", "pillars", "column", "columns", "pylon",
     "pylons", "railing", "railings", "barricade", "barricades", "barrier",
     "barriers", "trestle", "collapsed", "collapse",
+    # fixed location fixtures / architecture are part of the LOCATION's ref, not
+    # a recurring prop: fountains, statues, monuments, plazas, arches, towers.
+    "fountain", "fountains", "statue", "statues", "monument", "monuments",
+    "plaza", "plazas", "square", "squares", "arch", "arches", "tower",
+    "towers", "spire", "spires", "obelisk", "obelisk", "colonnade", "colonnades",
+    "gazebo", "gazebos", "bandstand", "clock", "clock tower", "water feature",
+    "basin", "fountainhead", "memorial", "memorials", "plinth", "plinth",
+    "pedestal", "pedestals",
 )
 
 
@@ -689,6 +697,14 @@ def _render_costume_via_qwen_edit(show: Show, base_ref: str | None, name: str,
     the Qwen-Image-Edit sampler seed (0 = randomize). Returns True when an image
     lands at out_path.
 
+    The instance is picked per-render by :meth:`ServiceOps._krea2_client` — the
+    primary when it answers /system_stats, otherwise a transient local launch or
+    the Beast3 fallback. A wedged local instance (job stuck in queue_running,
+    executor hung) therefore degrades to the fallback instead of stalling the
+    whole costume pass; the hard wall-clock timeout in the wait bounds each
+    attempt so a wedged job fails fast and the next variant / reconcile pass
+    tries again on a healthy instance.
+
     The whole render is gated on the shared instance's queue draining: Qwen-
     Image-Edit (19 GB) cannot share the 16 GB GPU with an H3 render, and a job
     submitted mid-render silently produces a black frame. Waiting for the queue
@@ -696,30 +712,32 @@ def _render_costume_via_qwen_edit(show: Show, base_ref: str | None, name: str,
     """
     from .remote.ops import ServiceOps
     from .qwen_edit import adapt_qwen_edit_workflow, load_qwen_edit_workflow
-    from .clients.comfy import ComfyClient
     import time
 
     cfg = cfg or get_config()
-    krea = cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
-    url = krea.get("url") or "http://127.0.0.1:8188"
-    client = ComfyClient(url, timeout=300)
-    ref_fn = None
-    if base_ref:
-        try:
-            ref_fn = client.upload_image(base_ref)
-        except Exception:
-            ref_fn = None
-    if not ref_fn:
-        # No base image: fall back to fresh krea2 generation.
-        return _render_costume_via_krea2(show, name, prompt, label, out_path, cfg)
-    # Qwen-Image-Edit runs on the krea2 instance (NO --use-sage-attention: that
-    # flag breaks Qwen's attention and yields a black frame). H3 runs on a
-    # SEPARATE instance that REQUIRES sage-attention. Both share one 16 GB GPU,
-    # so the GPU manager's exclusive COMFYUI lock serializes them — Qwen waits
-    # for any H3 render to finish, and vice versa.
-    from .gpu_manager import ServiceType, get_gpu_manager
-    with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
-        return _qwen_edit_render(show, client, cfg, prompt, ref_fn, label, out_path, seed)
+    ops = ServiceOps(cfg)
+    client, stop = ops._krea2_client()
+    try:
+        ref_fn = None
+        if base_ref:
+            try:
+                ref_fn = client.upload_image(base_ref)
+            except Exception:
+                ref_fn = None
+        if not ref_fn:
+            # No base image: fall back to fresh krea2 generation.
+            return _render_costume_via_krea2(show, name, prompt, label, out_path, cfg)
+        # Qwen-Image-Edit runs on the krea2 instance (NO --use-sage-attention:
+        # that flag breaks Qwen's attention and yields a black frame). H3 runs on
+        # a SEPARATE instance that REQUIRES sage-attention. Both share one 16 GB
+        # GPU, so the GPU manager's exclusive COMFYUI lock serializes them —
+        # Qwen waits for any H3 render to finish, and vice versa.
+        from .gpu_manager import ServiceType, get_gpu_manager
+        with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
+            return _qwen_edit_render(show, client, cfg, prompt, ref_fn, label, out_path, seed)
+    finally:
+        if stop:
+            stop()
 
 
 def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: str,
@@ -731,7 +749,12 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
         wf = load_qwen_edit_workflow(cfg.root)
         wf = adapt_qwen_edit_workflow(wf, prompt, ref_fn, seed=seed, steps=8, cfg=4.0)
         pid = client.submit(wf)
-        entry = client.wait(pid, timeout_s=900, poll_interval=5)
+        # Hard wall-clock cap: a wedged Qwen-Image-Edit job (19 GB model on a
+        # shared 16 GB GPU) that hangs in queue_running must not block the whole
+        # storyboard forever. On expiry the wait interrupts the instance and
+        # raises; the variant is marked failed here and retried on the next
+        # reconcile pass.
+        entry = client.wait(pid, timeout_s=900, poll_interval=5, hard_timeout_s=1200)
         status = (entry.get("status") or {}).get("status_str", "")
         if status != "success":
             ACTIVITY.setdefault(sid, {})["detail"] = (
@@ -904,12 +927,13 @@ def generate_object_refs(show: Show, episode: int, cfg=None, progress=None,
         out = show.dir / "runs" / f"EP{episode:02d}" / "objects" / f"{slug}.png"
         if out.exists():
             continue
-        prompt = (f"Anime reference image of the recurring object: {name}. "
-                  "Isolated on a plain studio background, consistent series art style, "
-                  "high quality, no text, no watermark.")
+        # Reuse a previously LLM-revised prompt so a regenerated object keeps the
+        # accumulated corrections rather than resetting to the base template.
+        prompt = _object_prompts(show, episode).get(slug) or _base_object_prompt(name)
         try:
             ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="1:1",
                                            out_path=str(out))
+            _save_object_prompt(show, episode, slug, prompt)
         except Exception as exc:
             ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Object ref {name} failed: {exc}"
         if progress:
@@ -918,13 +942,17 @@ def generate_object_refs(show: Show, episode: int, cfg=None, progress=None,
 
 
 def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
-                          cfg=None) -> bool:
-    """Regenerate ONE recurring-object ref from a reject (drops + re-renders).
+                          cfg=None, llm=None) -> bool:
+    """Feedback-driven regeneration of ONE recurring-object ref.
 
-    The existing image is replaced with a fresh krea2 render. Returns True when
-    an image landed at runs/EP##/objects/<slug>.png.
+    Works like the costume/char-ref feedback loop: the current generation prompt
+    (the last LLM-revised one, or the base template on first iteration) is
+    rewritten by the showrunner from the rejection notes, the revised prompt is
+    persisted so further rejects keep refining it, then the object is re-rendered.
+    Returns True when an image landed at runs/EP##/objects/<slug>.png.
     """
     from .remote import ServiceOps
+    from .clients.lmstudio import LMStudioClient
     cfg = cfg or get_config()
     od = _objects_dir(show, episode)
     od.mkdir(parents=True, exist_ok=True)
@@ -935,14 +963,31 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
         except Exception:
             pass
     name = slug.replace("-", " ").title()
-    prompt = (f"Anime reference image of the recurring object: {name}. "
-              "Isolated on a plain studio background, consistent series art style, "
-              "high quality, no text, no watermark.")
+    current = _object_prompts(show, episode).get(slug) or _base_object_prompt(name)
+    prompt = current
     if notes.strip():
-        prompt += f" Adjust: {notes.strip()}"
+        from . import prompts
+        model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
+        try:
+            llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
+            text = llm.chat([
+                {"role": "system", "content": prompts.showrunner_system(
+                    cfg["show_profile"], (show.read_bible() or {}).get("content_policy", "mature"),
+                    cfg["show_profile"].get("baseline", "ranma-1-2"))},
+                {"role": "user", "content": prompts.revise_object_prompt(current, notes)},
+            ], model=model, temperature=0.4, max_tokens=900)
+            revised = text[text.find("{"): text.rfind("}") + 1] or ""
+            import json as _json
+            parsed = _json.loads(revised)
+            candidate = (parsed.get("prompt") or "").strip()
+            if candidate:
+                prompt = candidate
+        except Exception:
+            pass  # keep the current prompt; still regenerate from it directly
     try:
         ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="1:1",
                                        out_path=str(out))
+        _save_object_prompt(show, episode, slug, prompt)
     except Exception as exc:
         ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Object ref {name} failed: {exc}"
         return False
@@ -1005,6 +1050,40 @@ def _approved_object_slugs(show: Show, episode: int) -> set[str]:
         return set()
 
 
+def _object_prompts(show: Show, episode: int) -> dict[str, str]:
+    """Persisted generation prompt per recurring object slug, across iterations.
+
+    Mirrors how costume variants store their prompt in refs.json: the feedback
+    loop keeps the last (LLM-revised) prompt so successive rejects FURTHER refine
+    it instead of starting over from the base template every time.
+    """
+    p = _objects_dir(show, episode) / "prompts.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _save_object_prompt(show: Show, episode: int, slug: str, prompt: str) -> None:
+    od = _objects_dir(show, episode)
+    od.mkdir(parents=True, exist_ok=True)
+    prompts = _object_prompts(show, episode)
+    prompts[slug] = prompt
+    (od / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False),
+                                     encoding="utf-8")
+
+
+def _base_object_prompt(name: str) -> str:
+    """The default first-iteration prompt for a recurring object."""
+    return (f"Anime reference image of the recurring object: {name}. "
+            "THE OBJECT ALONE, isolated on a plain studio background, consistent "
+            "series art style, high quality, no text, no watermark, NO PEOPLE, "
+            "NO HUMANS, NO CHARACTERS, NO HANDS, NO FOOT, NO FACES, NO FIGURES "
+            "carrying or touching it.")
+
+
 def mark_costume_approved(show: Show, cid: str, label: str) -> None:
     """Record one costume variant as approved (refs.json). Idempotent."""
     rj = show.character_refs_dir(cid) / "refs.json"
@@ -1015,6 +1094,37 @@ def mark_costume_approved(show: Show, cid: str, label: str) -> None:
     approved.add(label)
     data["approved"] = sorted(approved)
     rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def delete_costume(show: Show, cid: str, label: str) -> None:
+    """Delete one costume variant: drop its ref image + registry entries.
+
+    Removes the variant from refs.json (variants/prompts/approved), deletes the
+    rendered ref PNG, and re-renders nothing. The base outfit is protected — you
+    cannot delete a character's canonical base look. Idempotent: deleting a
+    variant that doesn't exist is a no-op.
+    """
+    rd = show.character_refs_dir(cid)
+    rj = rd / "refs.json"
+    if not rj.exists():
+        return
+    data = json.loads(rj.read_text(encoding="utf-8"))
+    variants = data.get("variants") or {}
+    if label == "base" or label not in variants:
+        if label == "base":
+            raise ValueError("cannot delete a character's base outfit")
+        return
+    img = variants.pop(label, None)
+    (data.get("prompts") or {}).pop(label, None)
+    data["approved"] = [a for a in (data.get("approved") or []) if a != label]
+    rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    if img:
+        f = rd / img
+        if f.exists():
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
 
 def mark_object_approved(show: Show, episode: int, slug: str) -> None:
@@ -1241,7 +1351,12 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
             job["ts"] = time.time()
             ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
             from .consistency import run_consistency_check
-            job["report"] = run_consistency_check(show, episode, cfg=cfg)
+            # Keep the job's progress stamp fresh during the (potentially long)
+            # vision review so the reconciler's stale-job watchdog can't mistake
+            # a legitimate review for a hung worker.
+            job["report"] = run_consistency_check(
+                show, episode, cfg=cfg,
+                on_progress=lambda: job.__setitem__("ts", time.time()))
             job["state"] = "done"
             job["detail"] = "Storyboard + consistency complete"
         except Exception as exc:

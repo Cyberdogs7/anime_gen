@@ -117,7 +117,8 @@ class ComfyClient:
         except httpx.HTTPError:
             return False
 
-    def wait(self, prompt_id: str, timeout_s: float = 1800.0, poll_interval: float = 3.0) -> dict:
+    def wait(self, prompt_id: str, timeout_s: float = 1800.0, poll_interval: float = 3.0,
+             hard_timeout_s: float | None = None) -> dict:
         """Poll until the prompt finishes or errors. Returns the history entry.
 
         Queue-aware: while the prompt sits in the ComfyUI queue (pending/running)
@@ -125,11 +126,25 @@ class ComfyClient:
         would time out a job legitimately queued behind many others on a slow GPU.
         Once the prompt leaves the queue without completing (e.g. it was cleared
         or failed hard), the wait gives up after ``timeout_s`` of no progress.
+
+        ``hard_timeout_s`` is an ABSOLUTE wall-clock cap on the whole wait, applied
+        regardless of queue state. A wedged ComfyUI (a job stuck in queue_running
+        forever — after an OOM, a node crash, or a hung sampler) would otherwise
+        block the caller indefinitely: the prompt never leaves the queue, so the
+        queue-aware grace period never expires. On expiry the running prompt is
+        interrupted (best-effort) and a TimeoutError raised, so the pipeline's
+        self-healing sees a bounded failure and can recover instead of hanging.
         """
         import httpx
-        deadline = time.monotonic() + timeout_s
+        start = time.monotonic()
+        deadline = start + timeout_s
         last_status = ""
         while True:
+            if hard_timeout_s is not None and time.monotonic() - start >= hard_timeout_s:
+                self.interrupt()
+                raise TimeoutError(
+                    f"ComfyUI prompt {prompt_id} hung in the queue for "
+                    f"{hard_timeout_s:.0f}s; interrupted")
             entry = self.history(prompt_id)
             if entry:
                 status = entry.get("status", {})

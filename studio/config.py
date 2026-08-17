@@ -32,6 +32,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "hero_best_of": 2,
         "auto_start_episode": True,  # hands-free: reconcile starts the next episode once the latest is complete
         "pause_storyboard": False,   # true: stop the reconciler from generating/restarting storyboards (debugging)
+        "stale_job_s": 1800,         # storyboard/render job with no progress this long is declared hung and restarted
+        # Chunked episode-outline generation: the outline is written in two passes
+        # so a full 10-12 scene episode fits the model's output budget. Phase 1
+        # produces the skeleton (one-line scene summaries); Phase 2 expands each
+        # scene's Setup/Change/Consequence beats in batches.
+        "plan_scenes_target": 12,     # how many scenes a full outline should have
+        "plan_beats_batch": 2,        # scenes expanded per beat call (1-4)
     },
     "bus": {
         "provider": "memory",  # memory | redis
@@ -54,6 +61,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "h3_ref2va": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
             "h3_clip": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
             "h3_turbo_lora": "minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
+            "h3_ref2v_turbo_lora": "minimax_h3_turbo_4step_ckpt500_pruned_comfyui.safetensors",
             "h3_video_vae": "minimax_h3_video_vae_fp16.safetensors",
             "h3_audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
         },
@@ -75,6 +83,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "continuity_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "fan_service_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "structure_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "voice_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "exposition_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "pacing_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "stakes_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "visual_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "agency_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
+            "serial_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "growth_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
             "describer": "",
         },
@@ -97,6 +112,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "show": "gated",
             "character": "gated",
             "voice": "gated",
+            "plan": "gated",   # episode outline — human approves the plot first
             "story": "auto",
             "shot": "auto",
             "episode": "gated",
@@ -107,18 +123,42 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "reviewers": {
         "max_revisions": 2,
-        "roles": ["slop", "continuity", "fan_service"],
+        "roles": ["slop", "continuity", "fan_service", "voice", "exposition",
+                  "pacing", "stakes", "visual", "agency", "serial"],
         "plan_max_revisions": 4,       # plan-level (outline) review loop cap
         "plan_roles": ["structure"],    # outline reviewers: structure (plot/scene coherence)
         "thresholds": {
             "slop_block": 0.45,
             "continuity_block": True,
             "fanservice_quota_miss": True,
+            "voice_block": "any",
+            "exposition_block": "any",
+            "pacing_block": "any",
+            "stakes_block": "any",
+            "visual_block": "any",
+            "agency_block": "any",
+            "serial_block": "high",
         },
     },
     "growth": {
         "plotline_cadence_episodes": 3,   # introduce a new plotline roughly every N episodes
         "max_new_characters_per_plotline": 2,
+        "battle_cadence_episodes": 3,      # allow a battle episode at most once every N episodes
+        "battle_plotline_kinds": ["battle"],  # plotline.kind values treated as battle/combat threads
+        # Enemy/visual entities — a plotline whose cast is ONLY these is a battle thread.
+        "enemy_entity_names": [
+            "apex-734", "the apex scrapper", "marauder pod",
+        ],
+        "main_cast_names": ["blade", "lily", "ivy", "rose", "dahlia", "jax"],
+        # Arc roll: how many episodes a newly-rolled plotline carries, and how long
+        # a battle plotline's arc may run (battles are kept short).
+        "arc_length_min": 1,
+        "arc_length_max": 6,
+        "battle_arc_length_min": 1,
+        "battle_arc_length_max": 3,
+        "plotlines_per_episode_min": 1,
+        "plotlines_per_episode_max": 4,
+        "cooldown_episodes": 4,            # episodes a finished arc is unavailable
     },
     "show_profile": {
         "genre": ["romantic-comedy", "martial-arts"],

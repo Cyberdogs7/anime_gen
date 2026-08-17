@@ -10,8 +10,7 @@ appearance_canonical: A towering figure, Blade possesses a lean, battle-scarred 
   blood spatters of recent engagements. A faint, jagged scar traces from his left
   temporal region down to his jawline.
 appearance_notes: Must maintain a brooding, world-weary aura even when relaxed. Never
-  allow him to look pristine or clean; there must always be evidence of grime, rain
-  splatter, or minor abrasions on his gear/skin. The amber eyes are the single most
+  allow him to look pristine or clean; there must always be evidence of grime or minor abrasions on his gear/skin. The amber eyes are the single most
   defining feature and must remain intense.
 personality:
 - Stoic/Guarded
@@ -32,4 +31,4 @@ voice:
   voice_description: Deep male register (baritone bordering on bass). Texture is slick,
     like worn obsidian or aged mahogany. Delivery is measured and deliberate; rarely
     elevated in pitch unless anger flares. Think a weary veteran who has seen too
-    many neon-drenched nightmares.
+    many nightmares.

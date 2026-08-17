@@ -185,7 +185,64 @@ class GPUManager:
 
     def _unload_llm(self) -> None:
         _run([self.cfg.lms_cli(), "unload", "--all"])
-        time.sleep(1)
+        self._wait_vram_released()
+
+    @staticmethod
+    def _gpu_free_mib() -> int | None:
+        """Current free GPU memory in MiB via nvidia-smi (None if unavailable)."""
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace").stdout.strip()
+            if not out:
+                return None
+            return int(out.splitlines()[0].strip())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _gpu_total_mib() -> int | None:
+        """Total GPU memory in MiB via nvidia-smi (None if unavailable)."""
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace").stdout.strip()
+            if not out:
+                return None
+            return int(out.splitlines()[0].strip())
+        except Exception:
+            return None
+
+    def _wait_vram_released(self, timeout: float = 90.0,
+                            min_free_mib: int = 4096) -> None:
+        """Block until the GPU actually has enough free VRAM for ComfyUI.
+
+        `lms unload --all` is asynchronous: the LLM's VRAM can take many
+        seconds to release. Proceeding while the LLM still holds the GPU
+        starves ComfyUI's disk offload, which surfaces as the comfy_aimdo
+        `hostbuf_file_reader_read failed` during H3 generation. Only returns
+        once free VRAM comfortably exceeds the resident-LLM footprint.
+        """
+        total = self._gpu_total_mib()
+        if self._gpu_free_mib() is None:
+            # No nvidia-smi (non-NVIDIA node) — fall back to a fixed settle delay.
+            time.sleep(5)
+            return
+        target = max(min_free_mib, int(total * 0.6)) if total else min_free_mib
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            free = self._gpu_free_mib()
+            if free is not None and free >= target:
+                log.info("[gpu] VRAM free after LLM unload: %d MiB (target %d)", free, target)
+                return
+            time.sleep(1)
+        log.warning("[gpu] VRAM still constrained after LLM unload "
+                    "(free=%s MiB, target=%d); proceeding anyway",
+                    self._gpu_free_mib(), target)
 
     # ---- ComfyUI (portable tree per role) ----
 

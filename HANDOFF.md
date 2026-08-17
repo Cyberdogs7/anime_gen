@@ -105,6 +105,7 @@ Data under `shows/<id>/`: `bible.yaml`, `concept.json`, `bootstrap.json`, `story
 - **Negative-prompt contamination**: once a revision says "instead of X", the model echoes "instead of X". Clean the SOURCE (plotlines/template) rather than negating.
 - **PowerShell quirk**: `Start-Process` with `-RedirectStandardOutput` often returns `Unknown: ChildProcess.kill`; verify the process actually started (port check).
 - **Stale script files**: `_latest_script` now sorts by mtime (not filename) so old higher-round files can't shadow a regeneration.
+- **ALL reject-with-notes feedback MUST follow the proper loop**, not raw string-appending. The correct pattern (see the costume/char-ref/object loops): take the artifact's **current stored generation prompt**, LLM-revise it from the rejection notes (`revise_*_prompt` in `prompts.py` + the showrunner), **persist the revised prompt** keyed to the artifact so successive rejects FURTHER refine it instead of resetting to the base template, then re-render. Never just do `prompt += " Adjust: {notes}"` and re-render — that ignored feedback (the local model treated it as a fragmented tail) and discarded prior corrections every iteration. Object prompts persist to `runs/EP##/objects/prompts.json`; costume prompts live in `refs.json["prompts"]`; char appearance in `appearance_canonical`. Before wiring a new reject/regenerate path, mirror `regenerate_object_ref` / `regenerate_character_ref` / the costume reject branch in `studio/approval.py`, and add a test asserting the revised prompt is stored and reused.
 
 ---
 

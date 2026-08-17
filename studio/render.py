@@ -12,6 +12,7 @@ Runs in a background thread with progress (mirrors the storyboard job model).
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -33,6 +34,80 @@ def _latest_script(show: Show, episode: int) -> dict[str, Any] | None:
     if not scripts:
         return None
     return json.loads(scripts[-1].read_text(encoding="utf-8"))
+
+
+def _prompts_path(show: Show, episode: int) -> Path:
+    return show.dir / "runs" / f"EP{episode:02d}" / "prompts.json"
+
+
+def _load_prepared_prompts(show: Show, episode: int) -> dict[str, Any]:
+    """Read the persisted per-shot prompts for an episode (Pass 1 output)."""
+    p = _prompts_path(show, episode)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def prepare_episode_prompts(show: Show, episode: int, cfg=None,
+                            progress=None) -> int:
+    """Pass 1 (LLM-resident): compile + persist the final H3 prompt for every shot.
+
+    Runs while the LLM owns the GPU (its only render-path consumer), so H3 never
+    has to fight the LLM for VRAM. When ``h3_rewrite_prompt`` is enabled, the
+    deterministic short prompt is expanded once per shot into a rich production
+    brief; the result is written to runs/EP##/prompts.json so the render pass
+    (Pass 2) does zero LLM work. Returns the number of shots prepared.
+    """
+    from .gpu_manager import ServiceType, get_gpu_manager
+    cfg = cfg or get_config()
+    script = _latest_script(show, episode)
+    if not script:
+        return 0
+    rewrite = bool(cfg.get("pipeline", "h3_rewrite_prompt", False))
+
+    shots = [(sc, sh) for sc in script.get("scenes", [])
+             for sh in sc.get("shots", [])]
+    prompts: dict[str, Any] = {}
+
+    def _one(sc: dict[str, Any], sh: dict[str, Any]) -> None:
+        from .storyboard import _shot_refs
+        sid = sh.get("id", "shot")
+        names, _ = _shot_refs(show, sh)
+        base = compile_shot_prompt(show, script, sc, sh, names)
+        prompts[sid] = {"base": base, "rewritten": base, "rewrite": rewrite}
+        if rewrite:
+            from .clients.lmstudio import LMStudioClient
+            from .prompts import h3_rewrite_prompt
+            llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
+            try:
+                prompts[sid]["rewritten"] = h3_rewrite_prompt(llm, base, sh)
+            except Exception as exc:
+                log.warning("H3 prompt rewriter failed for %s; "
+                            "using deterministic prompt: %s", sid, exc)
+
+    if rewrite:
+        with get_gpu_manager(cfg).acquire(ServiceType.LLM):
+            for i, (sc, sh) in enumerate(shots):
+                _one(sc, sh)
+                if progress:
+                    progress(i + 1, len(shots), sh.get("id", "shot"))
+            p = _prompts_path(show, episode)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(prompts), encoding="utf-8")
+            return len(shots)
+
+    # No LLM pass: just compile deterministically (no GPU needed).
+    for i, (sc, sh) in enumerate(shots):
+        _one(sc, sh)
+        if progress:
+            progress(i + 1, len(shots), sh.get("id", "shot"))
+    p = _prompts_path(show, episode)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(prompts), encoding="utf-8")
+    return len(shots)
 
 
 def _render_client(cfg=None) -> ComfyClient:
@@ -101,6 +176,55 @@ def _character_appearance(show: Show, name: str) -> str:
     return ""
 
 
+def _has_speech(line: str) -> bool:
+    """True when a dialogue entry actually speaks words.
+
+    A parenthetical stage direction like ``(Grunting)`` or ``(Internal)`` carries
+    no spoken text and must never become an H3 ``<d>`` token — H3 would try to
+    synthesize it as gibberish speech. A leading note like ``(whispering)`` is fine
+    as long as real words follow.
+    """
+    body = re.sub(r"\([^)]*\)", "", line or "")
+    return bool(re.search(r"\w", body))
+
+
+def _spoken_entries(shot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dialogue entries that are REAL spoken lines (not stage directions)."""
+    return [d for d in (shot.get("dialogue") or [])
+            if _has_speech(d.get("line") or "")]
+
+
+def _line_frag(d: dict[str, Any], line: str, subj: str, sid: str,
+               audio: str) -> str:
+    """Render one spoken line as an H3 speech fragment.
+
+    Per MiniMax's Video Prompt Writing Guide §4.4 and the Ref2VA guide §5.4,
+    the speaker's identifying phrase, action, delivery and speaker ID go OUTSIDE
+    the ``<d>`` token; only the language tag and exact words go inside. An
+    on-camera speaker gets lip-sync; an off-screen/voiceover line explicitly
+    states the character's lips remain completely closed so H3 never fabricates
+    mouth motion or background chatter.
+    """
+    delivery = (d.get("delivery") or "").strip()
+    on_cam = bool(d.get("on_camera", True))
+    speaker = f"{subj} {sid}" if subj else "A voice"
+
+    if on_cam:
+        head = f"{speaker} says"
+        if delivery:
+            head += f" {delivery}"
+        if audio:
+            head += f", using the voice timbre referenced from {audio}"
+        return f"{head}, <d>[English] {line}</d>"
+
+    head = f"{speaker} says in an off-screen voiceover"
+    if delivery:
+        head += f" {delivery}"
+    if audio:
+        head += f", using the voice timbre referenced from {audio}"
+    return f"{head}, <d>[English] {line}</d> while their lips remain completely closed."
+
+
 def compile_shot_prompt(show: Show | None, script: dict[str, Any],
                         scene: dict[str, Any], shot: dict[str, Any],
                         names: list[str],
@@ -129,8 +253,12 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
       signal.`` (no (Sx) here).
     - ``detailed_description``: style opening, then ``[Shot 1] ...`` with
       speakers as ``<Subject N> (Sx)`` and dialogue ONLY inside
-      ``<d>[English] exact words.</d>``.
-    - ``overall_soundscape`` / ``non_diegetic_music`` last; N/A when absent.
+      ``<d>[English] exact words.</d>``. Delivery/off-screen/voiceover notes go
+      OUTSIDE the token; off-screen lines state the lips remain closed. When the
+      shot has no spoken lines, an explicit silence clause is emitted so H3 never
+      invents (gibberish) speech. (See PROMPTING.md §5.4.)
+    - ``overall_soundscape`` / ``non_diegetic_music`` last; ``N/A`` for the
+      soundscape means complete silence and is only emitted for silent shots.
 
     ``audio_refs`` carries {"char": name, "token": "<Audio N>"} per voice ref.
     """
@@ -192,22 +320,25 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
         parts.append(action)
     if cam:
         parts.append(cam)
-    for d in (shot.get("dialogue") or []):
+    spoken = _spoken_entries(shot)
+    for d in spoken:
         line = (d.get("line") or "").strip()
-        if not line:
-            continue
         char = d.get("char", "")
         subj = subject_by_name.get(char, "")
         sid = _speaker_id(char, shot)
         audio = next((a["token"] for a in (audio_refs or [])
                       if a.get("char") == char), "")
-        if subj and audio:
-            parts.append(f"{subj} {sid} says, using the voice timbre "
-                         f"referenced from {audio}, <d>[English] {line}</d>")
-        elif subj:
-            parts.append(f"{subj} {sid} says, <d>[English] {line}</d>")
-        else:
-            parts.append(f"A voice says, <d>[English] {line}</d>")
+        parts.append(_line_frag(d, line, subj, sid, audio))
+    # Dialogue/silence discipline: H3 renders video AND audio jointly, and it
+    # treats bare prose as narration — an un-prompted, unspecified audio track
+    # degenerates into gibberish speech. Every shot must state its speech state
+    # EXACTLY: either every spoken line as a <d> token above, or an explicit
+    # silence clause when nobody speaks. The `silence` flag (from the dialogue
+    # pass / _normalize) makes the decision explicit in data; the clause below
+    # makes it explicit in the prompt H3 actually sees.
+    if not spoken:
+        parts.append("No one speaks; all characters remain silent. "
+                     "The shot carries no dialogue.")
     shot_txt = " ".join(p for p in parts if p)
 
     style = (script.get("style_guide") or
@@ -215,7 +346,15 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
     detailed = f"{style}\n[Shot 1] {placed_txt}. {shot_txt}".strip()
 
     # --- overall_soundscape / non_diegetic_music ---
+    # overall_soundscape holds ONLY ambience and physical action sounds; speech
+    # lives in detailed_description. `N/A` means complete silence, so it may only
+    # be emitted for a shot that is truly silent — never for a shot with dialogue.
     soundscape = (shot.get("soundscape") or "").strip()
+    if not soundscape:
+        soundscape = ("No background ambience; the only voices are the spoken "
+                      "lines in detailed_description." if spoken
+                      else "Complete silence around the action; "
+                           "no speech and no ambience.")
     music = (shot.get("music") or "").strip()
 
     sections = [
@@ -230,8 +369,8 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
 
 
 def _speaker_id(char: str, shot: dict[str, Any]) -> str:
-    """(Sx) per the shot's dialogue order — first line -> S1, etc."""
-    seen = [d.get("char") for d in (shot.get("dialogue") or []) if d.get("line")]
+    """(Sx) per the shot's speech order — first spoken line -> S1, etc."""
+    seen = [d.get("char") for d in _spoken_entries(shot)]
     idx = seen.index(char) + 1 if char in seen else 1
     return f"(S{idx})"
 
@@ -267,13 +406,15 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
         except Exception:
             pass
 
-    # Native dialogue: each speaking character's raw voice sample becomes an
-    # <Audio N> reference (the PROVEN example workflow uploads the raw wav as-is
-    # — no conversion). Audio refs must accompany image refs. Max 3 clips.
+    # Native dialogue: each REAL spoken line's character gets a voice sample as
+    # an <Audio N> reference (the PROVEN example workflow uploads the raw wav
+    # as-is — no conversion). Only actual speech triggers an audio ref: a silent
+    # shot or a stage-direction "line" attaches NO ref, so H3 never tries to
+    # voice it. Audio refs must accompany image refs. Max 3 clips.
     audio_filenames: list[str] = []
     audio_refs: list[dict[str, str]] = []
     if image_filenames:
-        speakers = [d.get("char") for d in (shot.get("dialogue") or []) if d.get("line")]
+        speakers = [d.get("char") for d in _spoken_entries(shot)]
         for name in dict.fromkeys(speakers):
             if not name or len(audio_filenames) >= 3:
                 break
@@ -289,14 +430,14 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
 
     prompt = compile_shot_prompt(show, script, scene, shot, names,
                                  audio_refs=audio_refs or None)
-    if cfg.get("pipeline", "h3_rewrite_prompt", False):
-        from .clients.lmstudio import LMStudioClient
-        from .prompts import h3_rewrite_prompt
-        llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
-        try:
-            prompt = h3_rewrite_prompt(llm, prompt, shot)
-        except Exception:
-            log.warning("H3 prompt rewriter failed; using deterministic prompt")
+    # Pass 1 (prepare_episode_prompts) already persisted the final prompt — the
+    # rewritten brief when h3_rewrite_prompt is on, else the deterministic one.
+    # Use it verbatim so this render pass makes ZERO LLM calls (the LLM is long
+    # unloaded by now and must not be needed while H3 owns the GPU).
+    prepared = _load_prepared_prompts(show, episode)
+    entry = prepared.get(shot.get("id", "shot"))
+    if entry and isinstance(entry, dict) and entry.get("rewritten"):
+        prompt = entry["rewritten"]
 
     # Sampling from config: 8 steps, res_multistep/simple at 864x480.
     # Measured: Spectrum + FirstBlockCache make 8-step renders 2.2x SLOWER
@@ -316,12 +457,7 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
         use_first_block_cache=bool(h3_cfg.get("first_block_cache", False)),
     )
     out = show.dir / "runs" / f"EP{episode:02d}" / "video" / f"{sid}.mp4"
-    try:
-        return run_h3_shot(client, wf, out, timeout_s=timeout_s)
-    finally:
-        # Release the H3 checkpoint + cached models from VRAM after every shot,
-        # so the renderer never leaves the GPU occupied between shots / episodes.
-        client.free_memory()
+    return run_h3_shot(client, wf, out, timeout_s=timeout_s)
 
 
 def _free_gpu(client: ComfyClient) -> None:
@@ -385,30 +521,55 @@ def build_render(show: Show, episode: int, cfg=None) -> None:
     render must not use a costume variant or recurring-object ref the human
     hasn't approved. Pending refs -> the job parks in "waiting" instead of
     burning GPU on an unapproved identity.
+
+    The job tracks its worker ``_thread`` and a ``ts`` last-progress stamp so
+    the episode reconciler can detect a zombie (thread died) or a hung render
+    (no progress for a long time) and restart it instead of waiting forever.
     """
     from .storyboard import pending_ref_approvals
     pending = pending_ref_approvals(show, episode)
     if pending:
         RENDER_JOBS[show.show_id] = {
-            "state": "waiting", "done": 0, "total": 0,
+            "state": "waiting", "done": 0, "total": 0, "ts": time.time(),
             "detail": "Waiting for ref approval: " + ", ".join(pending),
         }
         return
 
-    def _run():
-        job = {"state": "running", "done": 0, "total": 0, "detail": "Preparing render…"}
-        RENDER_JOBS[show.show_id] = job
+    job: dict[str, Any] = {"state": "running", "done": 0, "total": 0,
+                           "detail": "Preparing render…", "ts": time.time()}
+    RENDER_JOBS[show.show_id] = job
 
+    # Pass 1 (LLM phase): compile + (optionally LLM-rewrite) EVERY shot prompt
+    # and persist to prompts.json, while the LLM owns the GPU. When this returns,
+    # the LLM is fully unloaded so H3 (Pass 2) gets the whole GPU and never
+    # competes with it for VRAM. No LLM calls happen during the render itself.
+    def _prepare_prog(done, total, label):
+        job["detail"] = f"Writing prompts {done}/{total}: {label}"
+        job["ts"] = time.time()
+        ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+
+    script = _latest_script(show, episode)
+    total = len([s for sc in (script or {}).get("scenes", [])
+                 for s in sc.get("shots", [])])
+    job["total"] = total
+    try:
+        prepared = prepare_episode_prompts(show, episode, cfg=cfg,
+                                           progress=_prepare_prog)
+    except Exception as exc:
+        job["state"] = "failed"
+        job["detail"] = f"Prompt preparation failed: {exc}"
+        ACTIVITY.pop(show.show_id, None)
+        return
+    job["prepared"] = prepared
+
+    def _run():
         def prog(done, total, label):
             job["done"], job["total"] = done, total
             job["detail"] = f"Rendering {done}/{total}: {label}"
+            job["ts"] = time.time()
             ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
 
         try:
-            script = _latest_script(show, episode)
-            total = len([s for sc in (script or {}).get("scenes", [])
-                         for s in sc.get("shots", [])])
-            job["total"] = total
             job["state"] = "running"
             done = render_episode(show, episode, cfg=cfg, progress=prog)
             job["state"] = "done"
@@ -417,11 +578,19 @@ def build_render(show: Show, episode: int, cfg=None) -> None:
             job["state"] = "failed"
             job["detail"] = f"Render failed: {exc}"
         finally:
+            job["ts"] = time.time()
             ACTIVITY.pop(show.show_id, None)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+    job["_thread"] = t
 
 
 def render_status(show_id: str) -> dict[str, Any]:
-    return dict(RENDER_JOBS.get(show_id, {"state": "idle", "done": 0, "total": 0, "detail": ""}))
+    job = RENDER_JOBS.get(show_id)
+    if not job:
+        return {"state": "idle", "done": 0, "total": 0, "detail": ""}
+    out = dict(job)
+    thread = out.pop("_thread", None)
+    out["alive"] = bool(thread and thread.is_alive())
+    return out

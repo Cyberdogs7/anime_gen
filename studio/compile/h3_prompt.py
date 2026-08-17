@@ -2,9 +2,13 @@
 
 Turns a shot list + subject definitions into the exact MiniMax-notation prompt
 the H3 Director compiles (DESIGN.md §10.4). No LLM in the loop - what the log
-shows is what the model receives.
+shows is what the model receives. Dialogue/silence discipline mirrors the
+ref2va path (PROMPTING.md §5.7): every shot states its speech state — real
+spoken lines as `<d>` tokens, or an explicit silence clause.
 """
 from __future__ import annotations
+
+import re
 
 from typing import Any
 
@@ -17,24 +21,36 @@ def _fmt_ts(seconds: float) -> str:
     return f"{mm:02d}:{ss:02d}.{mmm:03d}"
 
 
+def _has_speech(line: str) -> bool:
+    """True when a dialogue entry actually speaks words (not a stage direction).
+
+    A parenthetical like ``(Grunting)`` carries no spoken text and must never
+    become a `<d>` token — H3 would synthesize it as gibberish speech.
+    """
+    body = re.sub(r"\([^)]*\)", "", line or "")
+    return bool(re.search(r"\w", body))
+
+
 def _dialogue_fragment(dialogue: Any) -> str:
     """Render one dialogue entry as an H3 native speech token.
 
     String form (legacy/narration) wraps in <d> so it is still spoken; list
     entries may carry a subject attribution so the model knows WHO speaks.
+    Entries that are only stage directions (e.g. ``(Grunting)``) are dropped —
+    they are not speech.
     """
     if isinstance(dialogue, list):
         out: list[str] = []
         for entry in dialogue:
             line = (entry.get("line") or "").strip()
-            if not line:
+            if not _has_speech(line):
                 continue
             subj = (entry.get("subject") or "").strip()
             frag = f"<d>[English] {line}</d>"
             out.append(f"{subj} speaks, {frag}" if subj else frag)
         return ", ".join(out)
     line = str(dialogue or "").strip()
-    return f"<d>[English] {line}</d>" if line else ""
+    return f"<d>[English] {line}</d>" if _has_speech(line) else ""
 
 
 def compile_h3_prompt(
@@ -93,6 +109,10 @@ def compile_h3_prompt(
         dialogue = _dialogue_fragment(shot.get("dialogue", ""))
         if dialogue:
             parts.append(f", {dialogue}")
+        else:
+            # Speech state must be explicit: no <d> tokens and no silence clause
+            # makes H3 guess the audio track and hallucinate gibberish speech.
+            parts.append(", no one speaks; all characters remain silent")
         lines.append("".join(parts))
         cursor += dur
 

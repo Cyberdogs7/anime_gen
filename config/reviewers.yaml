@@ -4,7 +4,13 @@ roles:
   - slop              # AI-tell detection (repetition, filler, on-the-nose dialogue, cliches)
   - continuity        # cross-check vs continuity/state.json, sheets, scene registry, timeline
   - fan_service       # maturity delivery vs bible.mature_spec (the creative floor)
-# optional: - structure   # (pacing/three-act review) - add later, list is extensible
+  - voice             # character voice & dialogue distinction (kill same-voice syndrome)
+  - exposition        # show-don't-tell: hunt info-dumps, "as you know Bob", explicit motivation
+  - pacing            # act breaks, cold-open hook, scene transitions, act-3 rush, cliffhanger
+  - stakes            # earned emotional payoffs: motivation, consequence, stakes height
+  - visual            # visual storytelling + production feasibility (not a radio play)
+  - agency            # active vs passive protagonist, micro-arc, flaw/motivation, cost of decisions
+  - serial            # multi-episode: arc stagnation, unearned leaps, relational dynamics
 
 # Plan-level (episode OUTLINE) review. The outline is reviewed BEFORE it drives
 # scene details + script, so plot/synopsis/scenes contradictions and cold-open
@@ -17,3 +23,12 @@ thresholds:
   slop_block: 0.45         # per-scene slop score above this forces a revision note
   continuity_block: true   # any HIGH-severity continuity note forces a revision
   fanservice_quota_miss: true  # under-quota service scenes force a revision
+  # Gate sensitivity for the added reviewers. 'block_any_note' fails the script if
+  # the reviewer returns any note; 'block_high' fails only on HIGH-severity items.
+  voice_block: any          # any | high | never
+  exposition_block: any
+  pacing_block: any
+  stakes_block: any
+  visual_block: any
+  agency_block: any
+  serial_block: high
