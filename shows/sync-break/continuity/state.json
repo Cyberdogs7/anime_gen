@@ -1,0 +1,169 @@
+{
+  "episode": 0,
+  "world": {
+    "facts": []
+  },
+  "characters": {
+    "Ren Tojo": {
+      "notes": []
+    },
+    "Mira Kaine": {
+      "notes": []
+    },
+    "Sable Voss": {
+      "notes": []
+    },
+    "Juno Hale": {
+      "notes": []
+    },
+    "Tessa Rook": {
+      "notes": []
+    },
+    "Harrow Wing": {
+      "notes": []
+    },
+    "League Official": {
+      "notes": []
+    }
+  },
+  "plotlines": [
+    {
+      "id": "custody-schedule-war",
+      "name": "Custody Schedule War",
+      "characters": [
+        "Ren Tojo",
+        "Mira Kaine",
+        "Sable Voss",
+        "Juno Hale",
+        "Tessa Rook"
+      ],
+      "status": "active",
+      "summary": "Four pilots fight over who gets Ren for calibration, towel-offs, and sleepovers, with a whiteboard schedule that never survives the episode.",
+      "objects": [
+        "shared bunk schedule board",
+        "bathhouse towels",
+        "calibration harness"
+      ],
+      "last_seen_episode": 0,
+      "kind": "character"
+    },
+    {
+      "id": "road-back-to-ace",
+      "name": "Road Back to Ace",
+      "characters": [
+        "Ren Tojo",
+        "Mira Kaine",
+        "Sable Voss",
+        "Tessa Rook"
+      ],
+      "status": "active",
+      "summary": "Vixen Flight must grind from bottom-tier exhibitions back to ace rank, but they can only field full power when Ren picks who he syncs with.",
+      "objects": [
+        "four Vixen Frames",
+        "league ranking board",
+        "Mira's cracked ace trophy"
+      ],
+      "last_seen_episode": 1,
+      "kind": "character"
+    },
+    {
+      "id": "poach-season",
+      "name": "Poach Season",
+      "characters": [
+        "Ren Tojo",
+        "Mira Kaine",
+        "Sable Voss",
+        "Juno Hale"
+      ],
+      "status": "active",
+      "summary": "Rival wings file buyouts, issue duel wagers for Ren's nights, and send honey-trap pilots to lure him into breaking contract.",
+      "objects": [
+        "rival offer slates",
+        "duel wager contracts",
+        "Juno's intercepted scout radio"
+      ],
+      "last_seen_episode": 0,
+      "kind": "character"
+    },
+    {
+      "id": "sync-freak-mystery",
+      "name": "Sync Freak Mystery",
+      "characters": [
+        "Ren Tojo",
+        "Mira Kaine",
+        "Tessa Rook",
+        "Juno Hale"
+      ],
+      "status": "active",
+      "summary": "Ren syncs with anyone but burns out fast, and his black-market implant scar suggests someone built him to be shared.",
+      "objects": [
+        "Ren's nape implant scar",
+        "Tessa's diagnostic rig",
+        "dead prototype Frame core"
+      ],
+      "last_seen_episode": 0,
+      "kind": "character"
+    }
+  ],
+  "unresolved_threads": [],
+  "continuity_rules": [],
+  "overall_plotline": {
+    "id": "shared-property-contract",
+    "name": "Shared Property Contract",
+    "characters": [
+      "Ren Tojo",
+      "Mira Kaine",
+      "Sable Voss",
+      "Juno Hale",
+      "Tessa Rook"
+    ],
+    "summary": "Ren's salvage-law contract makes him the legal property and sole co-pilot of Vixen Flight, forcing four rivalrous women to share his body, schedule, and sync in every duel, bath, and bunk dispute while rivals try to steal him.",
+    "objects": [
+      "Ren's contract chip",
+      "live calibration cable",
+      "borrowed oversized plug suit",
+      "Vixen shared bunk schedule board"
+    ],
+    "last_seen_episode": 1,
+    "status": "active"
+  },
+  "last_battle_episode": 1,
+  "nicknames": {
+    "Mira Kaine": {
+      "Ren Tojo": [
+        "property",
+        "lucky charm"
+      ]
+    },
+    "Sable Voss": {
+      "Ren Tojo": [
+        "rookie"
+      ]
+    },
+    "Juno Hale": {
+      "Ren Tojo": [
+        "stray"
+      ]
+    },
+    "Tessa Rook": {
+      "Ren Tojo": [
+        "hot hands"
+      ]
+    },
+    "Ren Tojo": {
+      "Mira Kaine": [
+        "boss",
+        "ace"
+      ],
+      "Sable Voss": [
+        "hothead"
+      ],
+      "Juno Hale": [
+        "scout"
+      ],
+      "Tessa Rook": [
+        "doc"
+      ]
+    }
+  }
+}

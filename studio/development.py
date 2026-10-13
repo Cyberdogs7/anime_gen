@@ -1,12 +1,10 @@
-"""Development stage - decides what happens in the next episode of a continuous,
-plotline-driven show (Ranma 1/2-style, no seasons). DESIGN.md §9 Stage 1.
+"""Development stage - expands ONE season episode entry into the episode synopsis.
 
-Every episode features the show's OVERALL plotline (the single continuous driving
-force - always present) plus a rotating subset of the other active plotlines (which
-may advance, cameo, or overlap), and occasionally introduces a new plotline (e.g. a
-newly-added character with a love interest). Continuity tracks plotline state across
-episodes; this module returns the episode synopsis for the writers' room to turn into
-a script.
+SEASON-FIRST (strict canon): the season plan (studio/season.py) fixes what
+happens in every episode of the 12-episode season; this module only expands
+that entry into synopsis prose. The old per-episode roll path
+(``roll_episode_plotlines``) is DEPRECATED and kept only as a fallback for
+shows with no season file. DESIGN.md §9 Stage 1.
 """
 from __future__ import annotations
 
@@ -30,24 +28,28 @@ def _overall_state(show: Show, bible: dict[str, Any]) -> dict[str, Any] | None:
     return op
 
 
-def _plotline_kind(show: Show, p: dict[str, Any]) -> str:
+def _plotline_kind(show: Show, p: dict[str, Any],
+                   bible: dict[str, Any] | None = None) -> str:
     """Classify a plotline as 'battle' or 'character'.
 
-    Explicit ``kind`` on the plotline wins. Otherwise a thread whose cast includes
-    an enemy/visual entity (bio-mechs, swarms) is a battle thread — those entities
-    are the threat actors, even when a main-cast member also appears alongside
-    them. A thread with NO enemy entity is a character thread.
+    Explicit ``kind`` on the plotline wins. Otherwise the classification is
+    DERIVED FROM THE SHOW (never global config) and is deliberately conservative:
+    a thread counts as a battle thread only when its cast includes a DECLARED
+    threat entity — a name listed in ``bible['battle_entities']``. A supporting
+    non-combatant (an official, a sponsor) therefore stays a character thread.
+    Shows that want automatic battle detection declare their threat entities;
+    without that list, threads fall back to their explicit ``kind``.
     """
     kind = (p.get("kind") or "").strip().lower()
     if kind:
         return "battle" if kind in {"battle", "combat", "threat"} else "character"
-    cfg = get_config()
-    enemies = [n.lower() for n in cfg.get("growth", "enemy_entity_names", [])]
+    bible = bible if bible is not None else (show.read_bible() if show else {})
+    explicit = [str(n).strip().lower()
+                for n in (bible.get("battle_entities") or []) if str(n).strip()]
+    if not explicit:
+        return "character"
     chars = [str(c).lower() for c in (p.get("characters") or [])]
-    involved_enemy = any(any(e in c for e in enemies) for c in chars)
-    if involved_enemy:
-        return "battle"
-    return "character"
+    return "battle" if any(e in c for e in explicit for c in chars) else "character"
 
 
 def _plotline_state(show: Show, bible: dict[str, Any]) -> list[dict[str, Any]]:
@@ -58,7 +60,7 @@ def _plotline_state(show: Show, bible: dict[str, Any]) -> list[dict[str, Any]]:
         p = dict(p)
         p.setdefault("status", "active")
         p.setdefault("last_seen_episode", 0)
-        p.setdefault("kind", _plotline_kind(show, p))
+        p.setdefault("kind", _plotline_kind(show, p, bible))
         by_id[p.get("id") or p.get("name", "")] = p
     for p in continuity.get("plotlines", []) or []:
         p = dict(p)
@@ -68,11 +70,11 @@ def _plotline_state(show: Show, bible: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             p.setdefault("status", "active")
             p.setdefault("last_seen_episode", 0)
-            p.setdefault("kind", _plotline_kind(show, p))
+            p.setdefault("kind", _plotline_kind(show, p, bible))
             by_id[pid] = p
     out = list(by_id.values())
     for p in out:
-        p.setdefault("kind", _plotline_kind(show, p))
+        p.setdefault("kind", _plotline_kind(show, p, bible))
     return out
 
 
@@ -142,7 +144,10 @@ def _roll_int(rng, lo: int, hi: int) -> int:
 def roll_episode_plotlines(show: Show, episode: int, plotlines: list[dict[str, Any]],
                            cfg=None, rng=None, battle_cadence: int = 3,
                            overall: dict[str, Any] | None = None) -> dict[str, Any]:
-    """ROLL for this episode's plotlines (replaces LLM plotline selection).
+    """ROLL for this episode's plotlines (DEPRECATED legacy fallback).
+
+    Season-first is authoritative: new episodes get their plotlines from the
+    season plan, not from this roll. Kept only for shows with no season file.
 
     Rules:
     - Running arcs (a plotline with ``arc_remaining > 0``) are ALWAYS featured —
@@ -244,18 +249,113 @@ def roll_episode_plotlines(show: Show, episode: int, plotlines: list[dict[str, A
 
 def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "",
                     rng=None) -> dict[str, Any]:
-    """Pick plotlines (overall always featured), optionally vet a new plotline, and
-    return the episode synopsis + what to feature.
+    """Expand ONE season episode entry into the episode synopsis + what to feature.
+
+    SEASON-FIRST (strict canon): when a season file covers this episode, the
+    season entry FIXES the episode — its logline/beats/type/featured plotlines
+    are expanded into a synopsis, never re-rolled or re-picked. Rolls are gone;
+    the season plan is the single source of truth for what happens when.
+
+    LEGACY FALLBACK (deprecated): when no season file covers the episode (old
+    shows, tests), falls back to the per-episode roll path so existing canon
+    keeps working. New episodes should always go through a season plan —
+    ``planner.generate_episode_plan`` auto-generates it via
+    ``season.ensure_season`` before calling here.
 
     READ-ONLY: this stage must NOT mutate continuity or the bible. Plotline
     bookkeeping (last_seen stamps, new-plotline canon persistence, new character
     sheets) happens later at PLAN APPROVAL via
-    growth.commit_plotline_on_approval. Otherwise every rejected/regenerated
-    episode would keep re-growing the same plotlines (the EP01 Apex-734 pile-up).
+    growth.commit_plotline_on_approval.
 
     Returns {"synopsis": str, "featured": [ids], "new_plotline": dict|None,
-             "episode_type": str, "arc_lengths": {id: int}, "new_arc_length": int|None}.
+             "episode_type": str, "arc_lengths": {id: int}, "new_arc_length": int|None,
+             "season": int|None}.
     """
+    cfg = cfg or get_config()
+    # Season-first: a covering season entry wins over everything.
+    try:
+        from .season import read_season_entry
+        _sno, _entry = read_season_entry(show, episode, cfg)
+        if _entry:
+            return _develop_from_season(show, episode, _sno, _entry,
+                                        llm=llm, cfg=cfg, notes=notes)
+    except Exception:
+        pass
+    return _develop_legacy(show, episode, llm=llm, cfg=cfg, notes=notes, rng=rng)
+
+
+def _develop_from_season(show: Show, episode: int, season_no: int,
+                         entry: dict[str, Any], llm=None, cfg=None,
+                         notes: str = "") -> dict[str, Any]:
+    """Expand a season episode entry (strict canon) into the episode synopsis."""
+    from .clients import LMStudioClient
+    cfg = cfg or get_config()
+    llm = llm or LMStudioClient(cfg.get("llm", "base_url"))
+    bible = show.read_bible()
+    continuity = show.read_continuity()
+    roles = cfg.get("llm", "roles", {})
+    model = roles.get("showrunner") or cfg.get("llm", "model")
+    profile = show.style_profile(cfg)
+    system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
+                                       profile.get("baseline", ""))
+    episode_type = str(entry.get("episode_type", "character")).lower()
+    episode_type = "battle" if episode_type == "battle" else "character"
+    featured = [f for f in (entry.get("featured_plotlines", []) or [])
+                if isinstance(f, str) and f]
+    try:
+        from .planner import read_director_notes
+        dir_notes = read_director_notes(show)
+    except Exception:
+        dir_notes = []
+    user = prompts.season_episode_synopsis_prompt(entry, bible, continuity)
+    if dir_notes:
+        user += ("\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE):\n- "
+                 + "\n- ".join(dir_notes))
+    if (notes or "").strip():
+        user += f"\nDIRECTOR'S NOTE ON THIS EPISODE (ABSOLUTE): {notes}\n"
+    fallback_syn = (entry.get("logline", "") or "").strip()
+    if not fallback_syn:
+        beats = entry.get("key_beats", []) or []
+        fallback_syn = f"Episode {episode}: " + " ".join(beats[:3])
+    fallback = {"synopsis": fallback_syn, "featured": featured,
+                "new_plotline": entry.get("new_plotline"),
+                "episode_type": episode_type,
+                "arc_lengths": {}, "new_arc_length": None,
+                "season": season_no}
+    try:
+        data = llm.chat_json([{"role": "system", "content": system},
+                              {"role": "user", "content": user}],
+                             model=model, temperature=0.6, max_tokens=4096,
+                             role="showrunner")
+    except Exception:
+        return fallback
+    if not isinstance(data, dict) or not data.get("synopsis"):
+        return fallback
+    # The season entry fixes featured/type/new_plotline — the LLM only writes
+    # the synopsis prose (and per-plotline roles). Never adopt model-invented
+    # plotlines or a flipped episode type.
+    new_plotline = entry.get("new_plotline")
+    if isinstance(new_plotline, dict) and new_plotline.get("id"):
+        try:
+            from .growth import review_new_plotline
+            result = review_new_plotline(show, new_plotline, episode,
+                                         llm=llm, cfg=cfg)
+            new_plotline = result["plotline"] if result.get("approved") else None
+        except Exception as exc:
+            log = __import__("logging").getLogger(__name__)
+            log.warning("growth review failed for episode %s: %s", episode, exc)
+            new_plotline = None
+    else:
+        new_plotline = None
+    return {"synopsis": data["synopsis"], "featured": featured,
+            "new_plotline": new_plotline,
+            "episode_type": episode_type,
+            "arc_lengths": {}, "new_arc_length": None,
+            "season": season_no}
+
+
+def _develop_legacy(show: Show, episode: int, llm=None, cfg=None, notes: str = "",
+                    rng=None) -> dict[str, Any]:
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"))
     bible = show.read_bible()
@@ -266,9 +366,9 @@ def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "
     new_cands = _new_character_candidates(show, plotlines)
     roles = cfg.get("llm", "roles", {})
     model = roles.get("showrunner") or cfg.get("llm", "model")
-    profile = cfg.get("show_profile") or {}
+    profile = show.style_profile(cfg)
     system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
-                                       profile.get("baseline", "ranma-1-2"))
+                                       profile.get("baseline", ""))
     cadence = int(cfg.get("growth", "plotline_cadence_episodes", 3) or 3)
     battle_cadence = int(cfg.get("growth", "battle_cadence_episodes", 3) or 3)
     battle_kinds = set(cfg.get("growth", "battle_plotline_kinds", ["battle"]))
@@ -312,7 +412,8 @@ def develop_episode(show: Show, episode: int, llm=None, cfg=None, notes: str = "
     try:
         data = llm.chat_json([{"role": "system", "content": system},
                               {"role": "user", "content": user}],
-                             model=model, temperature=0.6, max_tokens=4096)
+                             model=model, temperature=0.6, max_tokens=4096,
+                             role="showrunner")
     except Exception:
         return fallback
     if not isinstance(data, dict) or not data.get("synopsis"):

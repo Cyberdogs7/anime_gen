@@ -43,6 +43,39 @@ class Show:
         return self.dir / "continuity" / "state.json"
 
     @property
+    def seasons_dir(self) -> Path:
+        return self.dir / "seasons"
+
+    def season_path(self, season: int = 1) -> Path:
+        return self.seasons_dir / f"S{season:02d}.json"
+
+    def read_season(self, season: int = 1) -> dict[str, Any]:
+        p = self.season_path(season)
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def write_season(self, data: dict[str, Any], season: int = 1) -> Path:
+        p = self.season_path(season)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def list_seasons(self) -> list[int]:
+        if not self.seasons_dir.exists():
+            return []
+        out: list[int] = []
+        for p in self.seasons_dir.glob("S*.json"):
+            try:
+                out.append(int(p.stem[1:]))
+            except ValueError:
+                continue
+        return sorted(out)
+
+    @property
     def bootstrap_path(self) -> Path:
         return self.dir / "bootstrap.json"
 
@@ -62,6 +95,31 @@ class Show:
             yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
         return self.bible_path
+
+    # ---- style profile (per-show) ----
+    def style_profile(self, cfg=None) -> dict[str, Any]:
+        """Effective style profile for THIS show.
+
+        Style references are per-show facts: the global ``show_profile`` supplies
+        bootstrap defaults, and this show's ``bible.yaml`` overrides ``baseline``
+        and ``fanservice_baseline``. Callers read ``.get("baseline")`` /
+        ``.get("fanservice_baseline")`` from the result instead of hard-coding a
+        show title.
+        """
+        cfg = cfg or get_config()
+        cache = getattr(self, "_style_cache", None)
+        if cache is not None and cache[0] is cfg:
+            return dict(cache[1])
+        prof = dict(cfg.get("show_profile") or {})
+        bible = self.read_bible() or {}
+        series = bible.get("series") if isinstance(bible.get("series"), dict) else {}
+        for key in ("baseline", "fanservice_baseline"):
+            val = (bible.get(key) or series.get(key)
+                   or (series.get("quality_baseline") if key == "baseline" else None))
+            if val:
+                prof[key] = val
+        self._style_cache = (cfg, prof)
+        return dict(prof)
 
     # ---- concept ----
     @property

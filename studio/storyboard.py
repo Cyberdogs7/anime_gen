@@ -17,6 +17,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+from . import fsutil, prompts
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .show import Show
@@ -28,7 +29,7 @@ _LOCK = threading.Lock()
 
 def _latest_script(show: Show, episode: int) -> tuple[dict[str, Any] | None, Path | None]:
     d = show.dir / "runs" / f"EP{episode:02d}"
-    scripts = sorted(d.glob("script.r*.json"), key=lambda p: p.stat().st_mtime)
+    scripts = fsutil.existing_by_mtime(d.glob("script.r*.json"))
     if not scripts:
         return None, None
     return json.loads(scripts[-1].read_text(encoding="utf-8")), scripts[-1]
@@ -86,7 +87,7 @@ def _char_ref_map(show: Show) -> dict[str, dict[str, str]]:
             if entry:
                 out[name] = entry
                 # Alias the normalized unit key so group-count script names
-                # ("Chitinous Marauder Pods (x6)") resolve to the unit's ref.
+                # ("<unit> Pods (x6)") resolve to the unit's ref.
                 from .casting import _unit_key
                 out.setdefault(_unit_key(name), entry)
             continue
@@ -156,8 +157,83 @@ def _shot_ref_weights(shot: dict[str, Any], names: list[str],
     return weights
 
 
+def _show_style(show: Show) -> str:
+    """The show's visual style guide (from the bible) for image/video prompts.
+
+    Every ref/keyframe prompt must carry this so the whole series renders in the
+    SAME look — without it the model falls back to its own default anime style.
+    """
+    try:
+        return ((show.read_bible() or {}).get("style_guide") or "").strip().rstrip(".")
+    except Exception:
+        return ""
+
+
+def _ensure_style(prompt: str, style: str) -> str:
+    """Append the show style guide to a prompt unless it already carries it.
+
+    Prompts persisted in refs.json / objects/prompts.json before the style guide
+    was threaded through would otherwise keep rendering off-style forever — this
+    guarantees the style at render time regardless of what was stored.
+    """
+    style = (style or "").strip().rstrip(".")
+    if not style or style.lower() in (prompt or "").lower():
+        return prompt
+    return (prompt or "").rstrip(" .") + f" {style}."
+
+
+def _style_anchor_path(show: Show) -> Path:
+    """The show's house-style anchor image, used as an IPAdapter style reference."""
+    return show.dir / "style_anchor.png"
+
+
+def ensure_style_anchor(show: Show, cfg=None) -> Path | None:
+    """Generate (once) the show's house-style anchor image, or return the existing one.
+
+    A single key visual that embodies the bible style guide. Every ref render
+    then runs an IPAdapter pass against it, so characters, costumes, props and
+    scenes converge on one look instead of each picking its own style.
+    """
+    p = _style_anchor_path(show)
+    if p.exists():
+        return p
+    try:
+        from .config import get_config
+        from .remote.ops import ServiceOps
+        cfg = cfg or get_config()
+        style = _show_style(show)
+        prompt = ("Anime key visual, the series' house art style"
+                  + (f": {style}" if style else "") + ". "
+                  "A cinematic wide shot of the show's signature setting with a few "
+                  "small original background figures, dramatic lighting, showcasing the "
+                  "show's linework, cel shading and color palette, high detail.")
+        res = ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
+                                             out_path=str(p))
+        if res.get("ok") and p.exists():
+            log.info("style anchor generated: %s", p)
+            return p
+        log.warning("style anchor generation failed: %s", res.get("detail"))
+    except Exception:
+        log.warning("style anchor generation failed", exc_info=True)
+    return None
+
+
+def _style_anchor_arg(show: Show) -> str:
+    """style_ref path string for a render, or '' when the anchor is off/absent.
+
+    Gated by ``comfy.style_anchor`` because the SDXL ip-adapter has no effect on
+    the krea2 model — enabling it only wastes an IPAdapter pass per render.
+    """
+    from .config import get_config
+    if not get_config().get("comfy", "style_anchor", False):
+        return ""
+    p = _style_anchor_path(show)
+    return str(p) if p.exists() else ""
+
+
 def _keyframe_prompt(shot: dict[str, Any], scene: dict[str, Any], names: list[str],
-                     appearances: dict[str, str] | None = None) -> str:
+                     appearances: dict[str, str] | None = None,
+                     style_guide: str = "") -> str:
     setting = (scene.get("summary") or scene.get("location") or "").strip()
     action = (shot.get("action") or "").strip()
     camera = (shot.get("camera") or "").strip()
@@ -175,11 +251,13 @@ def _keyframe_prompt(shot: dict[str, Any], scene: dict[str, Any], names: list[st
         if parts:
             desc = "\nCharacter appearance (draw the characters EXACTLY as described):\n" + \
                    "\n".join(parts)
+    style = (style_guide or "").strip().rstrip(".")
     return ("Anime cinematic keyframe: "
             f"{action} {camera}. Setting: {setting}. On screen: {chars}.{desc} "
             "Cinematic composition, dynamic framing, consistent series art style, "
             "high quality. ABSOLUTELY NO text, no letters, no words, no dialogue "
-            "bubbles, no captions, no subtitles, no watermark, no logos.").rstrip(" .") + "."
+            "bubbles, no captions, no subtitles, no watermark, no logos."
+            + (f" {style}." if style else "")).rstrip(" .") + "."
 
 
 def _char_appearances(show: Show) -> dict[str, str]:
@@ -192,192 +270,47 @@ def _char_appearances(show: Show) -> dict[str, str]:
     return out
 
 
-# Camera-direction / film-technique phrases that the object heuristic must never
-# treat as recurring objects. A capitalized phrase whose ANY token is one of
-# these is a framing/lens direction, not a prop.
-_CAMERA_TOKENS = {
-    "close", "closeup", "close-up", "cu", "ec", "ecu", "extreme", "medium",
-    "wide", "shot", "angle", "low", "high", "dutch", "overhead", "aerial",
-    "top", "eye", "view", "level", "shoulder", "ots", "reverse", "tracking",
-    "dolly", "pan", "tilt", "zoom", "rack", "focus", "insert", "inserts",
-    "two", "three", "group", "establishing", "establish", "pov", "over",
-    "profile", "tight", "full", "cowboy", "chest", "waist", "knee", "head",
-    "behind", "above", "below", "from", "side", "frontal", "rear", "crane",
-    "handheld", "stationary", "push", "pull", "walk", "run", "circle",
-    "depth", "field", "shallow", "bokeh", "blur", "focal", "perspective",
-    "vignette", "lens", "aperture", "exposure", "lighting", "luminance",
-    "silhouette", "backlit", "backlight", "glare",
-}
-
-
-def _is_camera_phrase(phrase: str) -> bool:
-    """True when a capitalized phrase looks like a camera direction."""
-    toks = set(re.split(r"\s+", phrase.lower()))
-    if toks & _CAMERA_TOKENS:
-        return True
-    # Common two-part framings like "Over The Shoulder", "Low Angle CU".
-    low = phrase.lower()
-    for frag in ("over the shoulder", "over-the-shoulder", "low angle", "high angle",
-                 "eye level", "top down", "aerial view", "medium wide", "tight two",
-                 "extreme close", "depth of field", "shallow focus", "shallow depth",
-                 "rack focus", "focus pull", "lens flare"):
-        if frag in low:
-            return True
-    return False
-
-
-_OBJECT_STOPWORDS = {"the", "a", "an", "of", "and", "in", "on", "with"}
-
-# Generic scenery / debris words. A picked item containing ANY of these is not a
-# key recurring item (a weapon, vehicle, plot device or set piece) — it's
-# environment filler, no matter what the LLM says. The local 12B showrunner
-# reliably ignores a long exclusion list, so this deterministic net does the job.
-_JUNK_OBJECT_TOKENS = (
-    "debris", "rubble", "dust", "chunks", "chunk", "gravel", "dirt", "mud",
-    "sand", "ash", "rock", "rocks", "stone", "stones", "brick", "bricks",
-    "concrete", "rebar", "girder", "girders", "shard", "shards", "fragment",
-    "fragments", "wreck", "wreckage", "ruins", "ruin", "pile", "heap", "ground",
-    "floor", "wall", "walls", "ceiling", "road", "street", "pavement", "glass",
-    "scaffold", "scaffolding", "shrapnel", "trash", "garbage", "rubbish",
-    "remains", "remnants", "pulverized", "pulverised",
-    # structural / transport infrastructure is scenery, not a prop: supports,
-    # beams, pillars, viaducts, bridges, barriers — and "collapsed X" is wreckage.
-    "viaduct", "overpass", "bridge", "support", "supports", "beam", "beams",
-    "strut", "struts", "pillar", "pillars", "column", "columns", "pylon",
-    "pylons", "railing", "railings", "barricade", "barricades", "barrier",
-    "barriers", "trestle", "collapsed", "collapse",
-    # fixed location fixtures / architecture are part of the LOCATION's ref, not
-    # a recurring prop: fountains, statues, monuments, plazas, arches, towers.
-    "fountain", "fountains", "statue", "statues", "monument", "monuments",
-    "plaza", "plazas", "square", "squares", "arch", "arches", "tower",
-    "towers", "spire", "spires", "obelisk", "obelisk", "colonnade", "colonnades",
-    "gazebo", "gazebos", "bandstand", "clock", "clock tower", "water feature",
-    "basin", "fountainhead", "memorial", "memorials", "plinth", "plinth",
-    "pedestal", "pedestals",
-)
-
-
-def _is_junk_object(name: str) -> bool:
-    low = name.lower()
-    return any(tok in low for tok in _JUNK_OBJECT_TOKENS)
-
-
-def _object_tokens(name: str) -> set[str]:
-    return {w for w in re.split(r"\W+", name.lower())
-            if w and w not in _OBJECT_STOPWORDS}
-
-
-def _dedup_object_names(names: list[str]) -> list[str]:
-    """Drop near-duplicate item names so one object never spawns two refs.
-
-    Two names are near-duplicates when one contains the other, OR they share
-    2+ significant tokens that cover most of the shorter name ("Ferrocrete
-    Ground Debris" vs "Ferrocrete Pulverized Chunks Ground"). The shorter,
-    cleaner name wins.
-    """
-    names = [n.strip() for n in names if n and n.strip()]
-    keep: list[str] = []
-    for n in names:
-        low = n.lower()
-        toks = _object_tokens(n)
-        dup = False
-        for other in names:
-            if other == n:
-                continue
-            o_low = other.lower()
-            if low in o_low or o_low in low:
-                # One name contains the other — keep the shorter.
-                if len(low) >= len(o_low):
-                    dup = True
-                break
-            otoks = _object_tokens(other)
-            shared = toks & otoks
-            if len(shared) >= 2 and len(shared) >= min(len(toks), len(otoks)) - 1:
-                if len(other) < len(n):
-                    dup = True
-                    break
-        if not dup:
-            keep.append(n)
-    return keep
-
-
 def _llm_recurring_objects(show: Show, episode: int, script: dict[str, Any],
                            cfg=None, llm=None) -> list[str]:
-    """KEY recurring items picked by the showrunner from the WHOLE script.
+    """Recurring objects for this episode, pulled from the episode outline.
 
-    The model reads the episode story + every shot's action/camera and returns
-    only items that matter for continuity — signature weapons, vehicles, plot
-    devices, distinctive set pieces. Generic scenery (debris, ground, dust) is
-    explicitly excluded. There is NO regex fallback: on failure we return [] —
-    a bogus object ref is worse than none.
+    Objects are defined in the outline's ``objects`` list during episode
+    planning — not extracted from script text or bible plotlines.
     """
-    from . import prompts
-    from .clients.lmstudio import LMStudioClient
-    cfg = cfg or get_config()
-    llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
-    model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
-    cast = [c.get("name") for c in (show.read_character(cid)
-                                    for cid in show.list_characters())
-            if c.get("name")]
-    locations = set()
-    for sc in script.get("scenes", []):
-        if sc.get("location"):
-            locations.add(str(sc["location"]))
-        for shot in sc.get("shots", []):
-            sref = (shot.get("references") or {}).get("scene")
-            if sref:
-                locations.add(str(sref))
-    episode_summary = (script.get("summary") or "")
-    if not episode_summary.strip():
-        from .planner import read_episode_plan
-        plan = read_episode_plan(show, episode)
-        episode_summary = (plan.get("plot") or plan.get("summary") or "")
-    ACTIVITY.setdefault(show.show_id, {})["detail"] = "Picking key recurring items…"
-    system = prompts.showrunner_system(
-        cfg["show_profile"], (show.read_bible() or {}).get("content_policy", "mature"),
-        cfg["show_profile"].get("baseline", "ranma-1-2"))
-    try:
-        out = llm.chat_json(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": prompts.recurring_objects_prompt(
-                 script, cast, sorted(locations), episode_summary)}],
-            model=model, temperature=0.2, max_tokens=2048)
-    except Exception as exc:
-        log.warning("object extraction LLM failed for %s EP%02d: %s",
-                    show.show_id, episode, exc)
-        return []
-    names = [str(n).strip() for n in (out.get("objects") or []) if str(n).strip()]
-    # Safety net: never let a camera phrase, a cast/location name, or generic
-    # scenery (debris, rubble, dust…) through.
-    known = set(cast) | {k for k in locations if k}
-    names = [n for n in names
-             if n not in known and not _is_camera_phrase(n)
-             and not _is_junk_object(n)
-             and not any(k.lower() in n.lower() or n.lower() in k.lower()
-                         for k in known if k)]
-    return _dedup_object_names(names)[:6]
+    from .planner import read_episode_plan
+    plan = read_episode_plan(show, episode)
+    names: list[str] = []
+    for obj in (plan.get("objects") or []):
+        if obj and obj not in names:
+            names.append(obj)
+    return names[:6]
 
 
 def _shot_object_refs(show: Show, episode: int, shot: dict[str, Any]) -> list[str]:
     """Reference-image paths for recurring objects present in this shot.
 
-    Matches the same capitalized multi-word heuristic against the shot's
-    action/camera text and returns the ref for any object whose ref image
-    exists under runs/EP##/objects/<slug>.png.
+    Objects are defined in the episode outline (plan.json ``objects`` list) and
+    generated during the ref pass. This function only resolves plan-defined
+    objects that have a ref image — it does NOT search shot text for new ones.
     """
     od = show.dir / "runs" / f"EP{episode:02d}" / "objects"
     if not od.exists():
         return []
-    text = f"{shot.get('action', '')} {shot.get('camera', '')}"
-    # Objects are matched by filename slug only, so camera phrases and character
-    # fragments can only resolve to an actual ref file if one exists; the slug
-    # itself is the authority. Camera phrases are still skipped (no ref file is
-    # generated for them anyway).
+    # Collect object names from the plan.
+    from .planner import read_episode_plan
+    plan = read_episode_plan(show, episode)
+    plan_objs = plan.get("objects") or []
+    if not plan_objs:
+        return []
+    # Map plan object names to their slugs.
+    obj_slugs = set()
+    for name in plan_objs:
+        slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+        if slug:
+            obj_slugs.add(slug)
+    # Only return refs that exist on disk AND are in the plan.
     out: list[str] = []
-    for m in re.finditer(r"\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+\b", text):
-        if _is_camera_phrase(m.group(0)):
-            continue
-        slug = re.sub(r"[^a-z0-9-]+", "-", m.group(0).lower()).strip("-")
+    for slug in obj_slugs:
         p = od / f"{slug}.png"
         if p.exists() and str(p) not in out:
             out.append(str(p))
@@ -388,8 +321,7 @@ def _char_ref_images(show: Show, names: list[str]) -> list[str]:
     """Approved reference-image paths for the given character names.
 
     Names are matched via their unit key, so a script that says
-    "Chitinous Marauder Pods (x6)" resolves to the ref of the single-unit sheet
-    "Chitinous Marauder Pod".
+    "<unit> Pods (x6)" resolves to the ref of the single-unit sheet "<unit> Pod".
     """
     from .casting import _unit_key
     wanted = {_unit_key(n) for n in names}
@@ -441,7 +373,7 @@ def costume_usage(show: Show, cid: str) -> dict[str, list[str]]:
     for d in sorted(runs.iterdir()):
         if not d.is_dir() or not d.name.startswith("EP"):
             continue
-        scripts = sorted(d.glob("script.r*.json"), key=lambda p: p.stat().st_mtime)
+        scripts = fsutil.existing_by_mtime(d.glob("script.r*.json"))
         if not scripts:
             continue
         try:
@@ -624,10 +556,7 @@ def generate_costume_variant(show: Show, cid: str, name: str, label: str,
             else:
                 prompt = f"Replace the character's clothes to: {label}"
         else:
-            prompt = (f"Full-body anime character reference in the costume '{label}': "
-                      f"{canon}".rstrip(" .")
-                      + ". Plain studio background, clean lineart, consistent character "
-                        "design, high quality, front view, neutral standing pose.")
+            prompt = prompts.costume_ref_prompt(name, label, canon, _show_style(show))
     if mode == "edit":
         if seed is None:
             seed = _fresh_costume_seed(rd, label)
@@ -676,7 +605,8 @@ def _render_costume_via_krea2(show: Show, name: str, prompt: str, label: str,
         # via the GPU manager's exclusive COMFYUI lock so they never share VRAM.
         with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
             generate_keyframe(client, load_workflow(cfg.workflows_dir / "image_keyframe.json"),
-                              prompt, seed, out_path, aspect_ratio="3:4")
+                              prompt, seed, out_path, aspect_ratio="3:4",
+                              style_ref=_style_anchor_arg(show) or None)
         return True
     except Exception as exc:
         ACTIVITY.setdefault(show.show_id, {})["detail"] = (
@@ -782,7 +712,8 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
 
 
 def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
-                            scene_ids: list[str] | None = None) -> int:
+                            scene_ids: list[str] | None = None,
+                            should_stop=None) -> int:
     """Generate a 1-second H3 preview video for every shot.
 
     The preview runs the SAME ref2va workflow and character refs as the final
@@ -823,6 +754,8 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
         with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
             for sc in scenes:
                 for shot in sc.get("shots", []):
+                    if should_stop and should_stop():
+                        return done  # cooperative pause: stop before the next shot
                     sid = shot.get("id", f"sh{done}")
                     out = show.dir / "runs" / f"EP{episode:02d}" / "storyboard" / f"{sid}.mp4"
                     if out.exists():
@@ -929,10 +862,16 @@ def generate_object_refs(show: Show, episode: int, cfg=None, progress=None,
             continue
         # Reuse a previously LLM-revised prompt so a regenerated object keeps the
         # accumulated corrections rather than resetting to the base template.
-        prompt = _object_prompts(show, episode).get(slug) or _base_object_prompt(name)
+        stored = _object_prompts(show, episode).get(slug)
+        if stored and not _is_stale_object_prompt(stored):
+            prompt = _ensure_style(stored, _show_style(show))
+        else:
+            desc = _describe_object(show, episode, name, cfg)
+            prompt = _base_object_prompt(name, _show_style(show), desc)
         try:
             ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="1:1",
-                                           out_path=str(out))
+                                           out_path=str(out),
+                                           style_ref=_style_anchor_arg(show))
             _save_object_prompt(show, episode, slug, prompt)
         except Exception as exc:
             ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Object ref {name} failed: {exc}"
@@ -963,7 +902,13 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
         except Exception:
             pass
     name = slug.replace("-", " ").title()
-    current = _object_prompts(show, episode).get(slug) or _base_object_prompt(name)
+    style = _show_style(show)
+    stored = _object_prompts(show, episode).get(slug)
+    if stored and not _is_stale_object_prompt(stored):
+        current = _ensure_style(stored, style)
+    else:
+        desc = _describe_object(show, episode, name, cfg)
+        current = _base_object_prompt(name, style, desc)
     prompt = current
     if notes.strip():
         from . import prompts
@@ -972,22 +917,26 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
             llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
             text = llm.chat([
                 {"role": "system", "content": prompts.showrunner_system(
-                    cfg["show_profile"], (show.read_bible() or {}).get("content_policy", "mature"),
-                    cfg["show_profile"].get("baseline", "ranma-1-2"))},
+                    show.style_profile(cfg), (show.read_bible() or {}).get("content_policy", "mature"),
+                    show.style_profile(cfg).get("baseline", ""))},
                 {"role": "user", "content": prompts.revise_object_prompt(current, notes)},
-            ], model=model, temperature=0.4, max_tokens=900)
+            ], model=model, role="showrunner", temperature=0.4, max_tokens=900)
             revised = text[text.find("{"): text.rfind("}") + 1] or ""
             import json as _json
             parsed = _json.loads(revised)
             candidate = (parsed.get("prompt") or "").strip()
             if candidate:
-                prompt = candidate
+                prompt = _ensure_style(candidate, style)
         except Exception:
             pass  # keep the current prompt; still regenerate from it directly
     try:
         ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="1:1",
-                                       out_path=str(out))
+                                       out_path=str(out),
+                                       style_ref=_style_anchor_arg(show))
         _save_object_prompt(show, episode, slug, prompt)
+        # Clear any prior VL check result so the regenerated image is re-reviewed.
+        from .vcheck import clear_object_vcheck
+        clear_object_vcheck(show, episode, slug)
     except Exception as exc:
         ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Object ref {name} failed: {exc}"
         return False
@@ -1075,13 +1024,70 @@ def _save_object_prompt(show: Show, episode: int, slug: str, prompt: str) -> Non
                                      encoding="utf-8")
 
 
-def _base_object_prompt(name: str) -> str:
-    """The default first-iteration prompt for a recurring object."""
-    return (f"Anime reference image of the recurring object: {name}. "
-            "THE OBJECT ALONE, isolated on a plain studio background, consistent "
-            "series art style, high quality, no text, no watermark, NO PEOPLE, "
-            "NO HUMANS, NO CHARACTERS, NO HANDS, NO FOOT, NO FACES, NO FIGURES "
-            "carrying or touching it.")
+def _is_stale_object_prompt(prompt: str) -> bool:
+    """True for the old negation-based object prompt (it renders people/hands).
+
+    The Krea 2 turbo workflow zeroes its negative conditioning, so a "NO PEOPLE /
+    NO HANDS" clause is a POSITIVE trigger. Prompts written that way must be
+    rebuilt, not reused.
+    """
+    low = (prompt or "").lower()
+    return "no people" in low or "no hands" in low or "no figures" in low
+
+
+def _object_context(show: Show, episode: int, name: str) -> str:
+    """Story context for a recurring object: scenes that mention it + the plot.
+
+    The plot/synopsis is always included so the describer can tell WHAT the
+    object is (its kind and scale) instead of guessing from a terse name.
+    """
+    from .planner import read_episode_plan
+    plan = read_episode_plan(show, episode) or {}
+    low = (name or "").lower()
+    bits: list[str] = []
+    for sc in (plan.get("scenes") or []):
+        text = " ".join([str(sc.get("summary", ""))]
+                        + [str(b) for b in (sc.get("beats") or [])])
+        if low and low in text.lower():
+            s = str(sc.get("summary", "")).strip()
+            if s:
+                bits.append(s)
+    scene_ctx = " | ".join(bits[:3])
+    story = " ".join(str(plan.get(k) or "")
+                     for k in ("plot", "synopsis")).strip()[:700]
+    parts = [p for p in (scene_ctx, story) if p]
+    return " || ".join(parts)
+
+
+def _describe_object(show: Show, episode: int, name: str, cfg=None) -> str:
+    """LLM visual description of a recurring object (best effort; '' on error)."""
+    try:
+        from .bootstrap import BootstrapChain
+        ctx = _object_context(show, episode, name)
+        return BootstrapChain(show, cfg=cfg).describe_object(name, ctx)
+    except Exception:
+        log.warning("object description failed for %s", name, exc_info=True)
+        return ""
+
+
+def _base_object_prompt(name: str, style_guide: str = "",
+                        description: str = "") -> str:
+    """Positive-only Krea 2 prompt for ONE recurring object.
+
+    The krea2 turbo workflow has NO negation handling (its negative conditioning
+    is zeroed out), so any "no people / no hands / no text" clause acts as a
+    POSITIVE trigger and the model draws exactly that. Single-subject isolation
+    is therefore expressed only as positive facts, the same discipline as
+    ``prompts.character_ref_prompt``.
+    """
+    desc = (description or "").strip().rstrip(".")
+    lead = f"A single prop, {name}"
+    if desc:
+        lead = f"{lead}: {desc}"
+    return (
+        f"{lead}. The prop is the sole subject, centered and fully in frame, "
+        "alone on a seamless plain studio backdrop. "
+        + prompts.ref_style_clause(style_guide))
 
 
 def mark_costume_approved(show: Show, cid: str, label: str) -> None:
@@ -1258,8 +1264,36 @@ def _pending_object_slugs(show: Show, episode: int) -> list[str]:
     return [p.stem for p in sorted(od.glob("*.png")) if p.stem not in approved]
 
 
+def storyboard_blockers(show: Show, episode: int) -> list[str]:
+    """Reasons a storyboard/render build must not run yet (empty = clear to build).
+
+    A build renders expensive H3 clips, so it may only run once the episode
+    OUTLINE and the SCENE DETAILS are both approved AND a script exists. Without
+    this guard a manual or leftover trigger happily renders against an unapproved
+    (or stale, plan-less) outline.
+    """
+    from .planner import read_episode_plan, read_scene_details
+    blockers: list[str] = []
+    if (read_episode_plan(show, episode).get("status") or "") != "approved":
+        blockers.append("episode outline not approved")
+    if (read_scene_details(show, episode).get("status") or "") != "approved":
+        blockers.append("scene details not approved")
+    script, _ = _latest_script(show, episode)
+    if not script:
+        blockers.append("no script")
+    return blockers
+
+
 def build_storyboard(show: Show, episode: int, cfg=None) -> None:
     """Generate shot keyframes + object refs in a background thread with progress."""
+    blockers = storyboard_blockers(show, episode)
+    if blockers:
+        STORYBOARD_JOBS[show.show_id] = {
+            "state": "blocked", "done": 0, "total": 0, "ts": time.time(),
+            "detail": "Cannot build storyboard: " + "; ".join(blockers)}
+        log.info("storyboard blocked for %s EP%02d: %s",
+                 show.show_id, episode, "; ".join(blockers))
+        return
     # Re-entrancy guard: the self-healing reconciler and the dashboard's manual
     # flows (approve scenes / regenerate shots) both call build_storyboard. Two
     # threads sharing the single STORYBOARD_JOBS dict clobber each other's
@@ -1325,6 +1359,26 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
                     job["detail"] = f"Object refs: {objn} recurring props"
                     job["ts"] = time.time()
                     ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                # Object VL check: verify no humans / text in generated object
+                # images. Runs on CPU (VLM via LM Studio) inside the krea2
+                # batch context so the GPU is available if the VLM needs it.
+                # Fails auto-regenerate the object with prompt refinement.
+                if objn:
+                    from .vcheck import run_object_vcheck_batch
+                    def _obj_vprog(d, t, label):
+                        job["detail"] = f"Object VL check {d}/{t}: {label}"
+                        job["ts"] = time.time()
+                        ACTIVITY[show.show_id] = {"detail": job["detail"],
+                                                   "ts": time.time()}
+                    try:
+                        vl_actions = run_object_vcheck_batch(
+                            show, episode, cfg=cfg, on_progress=_obj_vprog)
+                        if vl_actions:
+                            job["detail"] = f"Object VL check: {len(vl_actions)} issues"
+                            job["ts"] = time.time()
+                    except Exception as exc:
+                        log.warning("[storyboard] object vcheck failed: %s", exc,
+                                    exc_info=True)
             total_shots = len([s for sc in (script or {}).get("scenes", [])
                                for s in sc.get("shots", [])])
             job["total"] = total_shots
@@ -1344,9 +1398,13 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
                 job["ts"] = time.time()
                 ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
                 return
+            if storyboard_status(show.show_id).get("state") == "stopped":
+                return  # cooperative pause between the ref phase and the previews
             # Phase 2: 1-second H3 preview per shot (same workflow/refs as the
             # final render, so the preview shows exactly how the video starts).
-            generate_shot_keyframes(show, episode, cfg=cfg, progress=prog)
+            generate_shot_keyframes(
+                show, episode, cfg=cfg, progress=prog,
+                should_stop=lambda: storyboard_status(show.show_id).get("state") == "stopped")
             job["detail"] = "Consistency review (vision)…"
             job["ts"] = time.time()
             ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}

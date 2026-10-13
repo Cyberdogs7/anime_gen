@@ -1,70 +1,9 @@
-"""Tests for Stage 2 + 2a: script generation and the writers'-room revision loop."""
+"""Tests for shared script utilities: runtime review and normalization."""
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from studio.config import Config
-from studio.scriptgen import WritersRoom
-from studio.show import Show
-
-
-def _make_show(tmp_path) -> Show:
-    for sub in ("characters", "voices", "scenes"):
-        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
-    show = Show("demo", root=tmp_path)
-    show.write_character({"id": "ryou", "name": "Ryou", "appearance_canonical": "x"})
-    show.write_bible({"title": "Demo", "content_policy": "mature",
-                      "runtime_target_s": 10,
-                      "arcs": [{"id": "a1", "name": "Arc", "beats_total": 6,
-                                "beats": [{"id": "b1", "summary": "beat"}]}],
-                      "mature_spec": {"quotient": "ecchi", "quotas": {},
-                                      "escalation": {}, "tone_boundaries": [],
-                                      "characters": {}, "scene_types": []}})
-    return show
-
-
-class FakeWritersLLM:
-    def __init__(self):
-        self.review_calls = 0
-
-    def chat_json(self, messages, **kwargs):
-        user = messages[-1]["content"]
-        if "WRITERS' ROOM NOTES" in user:      # revision prompt (arbitrated edit letter)
-            return {"edit_letter": "resolved: tier 1 wins.",
-                    "script": {"episode": 1, "scenes": [{"id": "s01", "shots": [
-                        {"id": "s01_sh01", "duration_s": 10, "action": "revised",
-                         "dialogue": [{"char": "Ryou", "line": str(i), "on_camera": True}
-                                      for i in range(3)]}]}]}}
-        if "Write the FULL script" in user:    # script prompt
-            return {"episode": 1, "scenes": [{"id": "s01", "shots": [
-                {"id": "s01_sh01", "duration_s": 10, "action": "draft",
-                 "dialogue": [{"char": "Ryou", "line": str(i), "on_camera": True}
-                              for i in range(3)]}]}]}
-        self.review_calls += 1                 # reviewers
-        passed = self.review_calls > 3         # round 1 fails, round 2 passes
-        # block_any gates on NOTES, so a passing reviewer must return no notes.
-        return {"score": 0.1 if passed else 0.9,
-                "notes": [] if passed else [{"scene": "s01", "note": "fix this"}],
-                "pass": passed}
-
-
-def test_writers_room_revision_loop(tmp_path):
-    show = _make_show(tmp_path)
-    result = WritersRoom(show, cfg=Config(tmp_path), llm=FakeWritersLLM()).run(episode=1)
-    assert result["rounds"] == 2                # draft -> revise
-    assert result["passed"] is True             # cleared in round 2
-    r1 = show.dir / "runs" / "EP01" / "script.r1.json"
-    r2 = show.dir / "runs" / "EP01" / "script.r2.json"
-    assert r1.exists() and r2.exists()
-    for r in ("slop", "continuity", "fan_service"):
-        assert (show.dir / "runs" / "EP01" / "reviews" / f"{r}.r2.json").exists()
-    # durations snapped to the H3 grid (10 -> 10.125)
-    script = __import__("json").loads(r2.read_text(encoding="utf-8"))
-    assert script["scenes"][0]["shots"][0]["duration_s"] == 10.125
 
 
 def test_runtime_review_flags_short_scripts():

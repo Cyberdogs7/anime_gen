@@ -1,0 +1,9 @@
+id: juno-hale_voice
+engine: qwen3_tts
+mode: designed
+speaker: null
+voice_description: Adult woman in her early 20s, bright teasing alto with a slight
+  rasp, quick radio-operator cadence, stretches vowels when flirting and snaps short
+  and flat when calling targets
+speed: 1.0
+pitch: 0.0

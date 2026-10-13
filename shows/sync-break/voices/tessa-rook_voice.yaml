@@ -1,0 +1,9 @@
+id: tessa-rook_voice
+engine: qwen3_tts
+mode: designed
+speaker: null
+voice_description: Adult female mid-20s, soft low-mid register with breathy texture,
+  slow deliberate delivery that mumbles then lands clear, warm throaty murmur when
+  flustered or in sync, quiet deadpan comic timing
+speed: 1.0
+pitch: 0.0

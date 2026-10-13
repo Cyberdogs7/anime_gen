@@ -346,7 +346,8 @@ arcs:
 episodes_per_arc: 6
 content_policy: "mature"              # see §13; legal values: clean | mature
 # mature_spec — AI-generated at Gate 0 with the bible, user-approved. The fan_service reviewer (§9 Stage 2a)
-# enforces this as the show's creative floor (the inverse of the policy judge).
+# enforces this as the show's creative floor (the inverse of the policy judge),
+# judged against a High School DxD-tier bar (the primary fan-service reference).
 mature_spec:
   quotient: "explicit_ecchi"          # light_ecchi | ecchi | explicit_ecchi — the show's promised maturity level
   quotas:
@@ -527,7 +528,7 @@ After the Showrunner drafts the script, it goes through a **structured revision 
 |---|---|---|---|
 | **`slop`** (AI-slop detector) | AI-writing tells per scene & line: repetitive sentence patterns, filler/weasel words, on-the-nose dialogue, exposition dumps, predictable beat shapes, cliché emotional beats, purple prose, generic safe choices. Its rubric borrows from the `stop-slop` skill's anti-AI-tell principles | `runs/EP##/reviews/slop.r{N}.json` | per-scene/line slop score + notes + rewrite directives |
 | **`continuity`** | Cross-checks every scene/shot/dialogue against the show's `continuity/state.json`, character sheets (`personality`, `traits_for_llm`, `appearance_notes`, `outfit_state`), the scene registry, the episode timeline, and `continuity_rules` — contradictions, character-voice drift, timeline violations, forgotten unresolved threads, set/prop/wardrobe continuity | `runs/EP##/reviews/continuity.r{N}.json` | per-item continuity notes with severity |
-| **`fan_service`** (maturity delivery) | Enforces the **creative floor** the show promised: does the episode deliver the mature quotient from the approved `mature_spec` (§8.1) — per-episode quota of service/reward scenes, correct characters carrying them, motivated + well-paced escalation, no bait-and-switch (an episode that was promised mature but goes clean, or under-delivers relative to arc position), tone inside the approved boundaries. This is the *inverse* of the policy judge: `judge` blocks what must never appear; `fan_service` flags when the intended mature content **isn't there or lands flat**. Uses the reward-scene segment catalog precedent from LanguageLearner | `runs/EP##/reviews/fanservice.r{N}.json` | per-scene maturity score vs `mature_spec` quota + notes + rewrite directives |
+| **`fan_service`** (maturity delivery) | Enforces the **creative floor** the show promised: does the episode deliver the mature quotient from the approved `mature_spec` (§8.1) — per-episode quota of service/reward scenes, correct characters carrying them, motivated + well-paced escalation, no bait-and-switch (an episode that was promised mature but goes clean, or under-delivers relative to arc position), tone inside the approved boundaries. This is the *inverse* of the policy judge: `judge` blocks what must never appear; `fan_service` flags when the intended mature content **isn't there or lands flat**. Judged against a High School DxD-tier bar (the primary fan-service reference: story-motivated, character-specific, escalating service). Uses the reward-scene segment catalog precedent from LanguageLearner | `runs/EP##/reviews/fanservice.r{N}.json` | per-scene maturity score vs `mature_spec` quota + notes + rewrite directives |
 
 Notes use the standard screenplay-notes form: `[Scene s01] Kiyo says "X" — note.` Each note is attributed to its reviewer and stays in that reviewer's file; the merged set is only ever *projected* for the Showrunner to apply.
 

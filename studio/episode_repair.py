@@ -19,13 +19,14 @@ import threading
 import time
 from typing import Any
 
-from . import approval
+from . import approval, fsutil
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .planner import (
-    approve_plan, approve_scene_details, assemble_episode_script,
-    generate_episode_plan, generate_scene_details, read_episode_plan,
-    read_scene_details,
+    address_review_feedback, approve_plan, approve_scene_details,
+    assemble_episode_script, clear_script_rejection, generate_episode_plan,
+    generate_scene_details, read_episode_plan, read_scene_details,
+    read_script_rejection, reject_script_review, _MAX_SCRIPT_REGENS,
 )
 from .render import RENDER_JOBS
 from .show import Show
@@ -117,8 +118,46 @@ def _episode_label(episode: int) -> str:
     return f"EP{episode:02d}"
 
 
+def _rmtree_hard(path, attempts: int = 6) -> None:
+    """Remove a directory tree even when files are briefly locked (Windows).
+
+    shutil.rmtree aborts on the first locked file. Retry with backoff, clearing
+    read-only bits in between, then do a best-effort final pass.
+    """
+    import os
+    import stat
+
+    def _force(p: str) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+        except Exception:
+            pass
+
+    for i in range(attempts):
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path)
+            return
+        except Exception:
+            for root, dirs, files in os.walk(path, onerror=lambda e: None):
+                for name in list(files) + list(dirs):
+                    _force(os.path.join(root, name))
+            time.sleep(0.3 * (i + 1))
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def delete_episode(show_id: str, episode: int | str) -> list[str]:
-    """Delete one episode's generated artifacts without regenerating it."""
+    """Delete one episode's generated artifacts without regenerating it.
+
+    Idempotent: deleting an already-deleted (or manually removed) episode still
+    purges its continuity facts and database rows and reports what it did,
+    instead of erroring with "does not exist". Continuity is purged too — a
+    rejected episode's extracted facts must never poison its own regen.
+    Note the reconciler WILL regenerate the episode on its next pass (by
+    design: auto_start_episode); delete-then-regenerate is the clean-regen
+    flow, not a way to keep the episode gone (pause it for that).
+    """
     from .bootstrap import run_show_locked
 
     raw_episode = str(episode).strip().upper()
@@ -132,24 +171,101 @@ def delete_episode(show_id: str, episode: int | str) -> list[str]:
         raise ValueError("episode must be a positive integer")
     show = Show(show_id)
     path = show.dir / "runs" / _episode_label(ep)
-    if not path.is_dir():
-        raise ValueError(f"episode {ep} does not exist")
-    from .storyboard import STORYBOARD_JOBS
-    from .render import RENDER_JOBS
-    STORYBOARD_JOBS.pop(show_id, None)
-    RENDER_JOBS.pop(show_id, None)
+    messages: list[str] = []
+    # Halt any running storyboard/render worker BEFORE removing files. The worker
+    # loops until its job state is "stopped"; a plain pop makes it read "idle" and
+    # keep rendering (one reason a "deleted" episode kept producing clips).
+    from .storyboard import stop_storyboard
+    from .render import stop_render
+    stop_storyboard(show_id)
+    stop_render(show_id)
     with _paused_lock:
         _paused_episodes.discard((show_id, ep))
+    with _manual_holds_lock:
+        _manual_holds.discard((show_id, ep))
     _save_paused(show)
 
     def _delete() -> None:
-        shutil.rmtree(path)
+        # Windows: a single open handle anywhere in the tree (the dashboard reads
+        # script.r*.json while rendering the page) makes shutil.rmtree abort
+        # part-way, silently leaving files behind. A leftover script then makes
+        # the reconciler think the episode still exists (has_script=True) and it
+        # never rebuilds. Retry, then fall back to per-file removal, and finally
+        # verify the folder is really gone so a partial delete can't report success.
+        if path.is_dir():
+            _rmtree_hard(path)
+            if path.exists():
+                leftovers = [p.name for p in path.rglob("*")]
+                raise RuntimeError(
+                    f"could not fully delete {path.name}: {leftovers[:12]} "
+                    "(close the dashboard and retry)")
+            messages.append(f"EP{ep:02d} folder deleted")
+        else:
+            messages.append(f"EP{ep:02d} folder already gone")
         for key in list(_cooldowns):
             if key[:2] == (show_id, ep):
                 _cooldowns.pop(key, None)
 
+        # Clean up database rows for this episode
+        from .db import DB
+        cfg = get_config()
+        db = DB(cfg.db_path)
+        con = db.conn
+        try:
+            # Find run_id for this episode
+            run_row = con.execute(
+                "SELECT id FROM runs WHERE show_id=? AND episode=?", (show_id, ep)
+            ).fetchone()
+            if run_row:
+                run_id = run_row[0]
+                # Find shot IDs for this run
+                shot_ids = [
+                    r[0]
+                    for r in con.execute(
+                        "SELECT id FROM shots WHERE run_id=?", (run_id,)
+                    )
+                ]
+
+                def _in(ids: list) -> str:
+                    return ",".join("?" for _ in ids) if ids else "NULL"
+
+                # Delete related rows in dependency order
+                if shot_ids:
+                    ph = _in(shot_ids)
+                    con.execute(f"DELETE FROM retakes WHERE shot_id IN ({ph})", shot_ids)
+                    con.execute(f"DELETE FROM qc_results WHERE shot_id IN ({ph})", shot_ids)
+                    con.execute(f"DELETE FROM vcheck_results WHERE shot_id IN ({ph})", shot_ids)
+                con.execute("DELETE FROM stages WHERE run_id=?", (run_id,))
+                con.execute("DELETE FROM shots WHERE run_id=?", (run_id,))
+                con.execute("DELETE FROM assets WHERE run_id=?", (run_id,))
+                con.execute("DELETE FROM script_reviews WHERE run_id=?", (run_id,))
+                con.execute("DELETE FROM policy_events WHERE run_id=?", (run_id,))
+                con.execute("DELETE FROM runs WHERE id=?", (run_id,))
+                messages.append(f"EP{ep:02d} database rows deleted")
+            else:
+                messages.append(f"EP{ep:02d} had no database rows")
+            con.commit()
+        finally:
+            db.close()
+
+        # A rejected episode's extracted facts must not poison its regen: purge
+        # everything tagged with this episode (the regen re-extracts from the
+        # new script). Without this, deleting EP01 left the bad canon behind —
+        # e.g. a rejected second sync spike — and the "clean" regen inherited it.
+        try:
+            from .planner import purge_episode_continuity
+            state = show.read_continuity()
+            purge_episode_continuity(state, ep)
+            show.write_continuity(state)
+            messages.append(f"EP{ep:02d} continuity facts purged")
+        except Exception as exc:
+            messages.append(f"EP{ep:02d} continuity purge failed: {exc}")
+
+        # Clear ACTIVITY state
+        ACTIVITY.pop(show_id, None)
+
     run_show_locked(show_id, _delete)
-    return [f"EP{ep:02d} deleted"]
+    return messages
 
 
 def _episode_dirs(show: Show) -> list[int]:
@@ -326,7 +442,7 @@ def _episode_complete(show: Show, episode: int) -> bool:
 
 def _script_latest(show: Show, episode: int) -> dict[str, Any] | None:
     d = show.dir / "runs" / _episode_label(episode)
-    scripts = sorted(d.glob("script.r*.json"), key=lambda p: p.stat().st_mtime)
+    scripts = fsutil.existing_by_mtime(d.glob("script.r*.json"))
     if not scripts:
         return None
     try:
@@ -525,6 +641,50 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
             _mark_cooldown(show_id, episode, "script")
             return log_
         st = _stage_state(show, episode)
+
+    # 3b) Script review gate — targeted feedback pass or hold for human.
+    script_latest = _script_latest(show, episode)
+    if script_latest:
+        review = script_latest.get("_review") or {}
+        if review.get("passed") is False:
+            rej = read_script_rejection(show, episode)
+            attempts = rej.get("attempts", 0)
+            if attempts >= _MAX_SCRIPT_REGENS:
+                log.warning("EP%02d script failed review after %d fix attempts; "
+                            "holding for human", episode, attempts)
+                return log_
+            if _in_cooldown(show_id, episode, "script_regen"):
+                return log_
+            ACTIVITY[show_id] = {"detail": f"Episode {episode}: addressing review "
+                                 f"feedback (attempt {attempts + 1}/{_MAX_SCRIPT_REGENS})…",
+                                 "ts": time.time()}
+            try:
+                # 1. Surgically edit only the flagged shots (one LLM call per scene).
+                from .planner import _writer_review
+                edited = address_review_feedback(show, episode, script_latest,
+                                                 review)
+                # 2. Record the attempt and re-run review on the edited script.
+                reject_script_review(show, episode, review)
+                edited = _writer_review(show, episode, edited)
+                # 3. If it passes now, clear the rejection and continue.
+                if (edited.get("_review") or {}).get("passed") is not False:
+                    clear_script_rejection(show, episode)
+                    # The fix pass edited the script in place (it did NOT re-run
+                    # assemble), so refresh this episode's continuity facts here.
+                    try:
+                        from .planner import extract_continuity
+                        extract_continuity(show, episode, edited)
+                    except Exception:
+                        pass
+                    log_.append(f"EP{episode:02d}: script fixed (attempt {attempts + 1})")
+                else:
+                    log_.append(f"EP{episode:02d}: script fix attempt {attempts + 1} "
+                                "still failing, will retry")
+            except Exception as exc:
+                log.warning("script fix failed for %s EP%02d: %s",
+                            show_id, episode, exc)
+                _mark_cooldown(show_id, episode, "script_regen")
+            return log_
 
     # 4) Storyboard (background job). Skip if a storyboard job is already running
     #    for this show (jobs are keyed per show, not per episode). A job whose

@@ -14,9 +14,10 @@ from pathlib import Path
 
 import yaml
 
+from . import fsutil
 from .bus import make_broker
 from .bus.events import RUN_REQUESTED, RUN_STARTED, new_event
-from .config import Config, get_config
+from .config import DEFAULT_RUNTIME_TARGET_S, Config, get_config
 from .db import DB
 from .run_controller import RunController
 from .setup import run_setup
@@ -119,20 +120,102 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_script(args: argparse.Namespace) -> int:
+    """Generate an episode script via the single pipeline path (prose -> review
+    -> shots), same as the reconciler runs. Requires the show's bible/cast;
+    uses the approved plan as the skeleton when one exists."""
     from .clients.lmstudio import LMStudioClient
-    from .scriptgen import WritersRoom
+    from .planner import assemble_episode_script
     from .show import Show
     show = Show(args.show)
     llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=900)
-    result = WritersRoom(show, llm=llm).run(args.episode, synopsis=args.synopsis,
-                                            max_revisions=args.max_revisions)
-    print(f"episode {args.episode}: rounds={result['rounds']} passed={result['passed']}")
-    for name, r in result["reviews"].items():
-        print(f"  [{'PASS' if r['pass'] else 'FAIL'}] {name:12s} score={r.get('score')} "
+    script = assemble_episode_script(show, args.episode, llm=llm)
+    review = script.get("_review", {})
+    print(f"episode {args.episode}: rounds={review.get('rounds', 1)} "
+          f"passed={review.get('passed')}")
+    for n in review.get("notes", []) or []:
+        print(f"  [{n.get('severity', '?')}] ({n.get('reviewer', '?')}) {n.get('note', '')}")
+    scripts = sorted((show.dir / "runs" / f"EP{args.episode:02d}").glob("script.r*.json"))
+    print("script:", scripts[-1] if scripts else "(missing)")
+    return 0 if review.get("passed") else 1
+
+
+def _cmd_prose(args: argparse.Namespace) -> int:
+    """Prose-first episode: whole-episode screenplay -> story review -> shots by need."""
+    from .clients.lmstudio import LMStudioClient
+    from .prose import (breakdown_prose_to_shots, generate_episode_prose,
+                        write_prose_review_loop)
+    from .review import all_pass
+    from .show import Show
+    show = Show(args.show)
+    llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=900)
+    prose = generate_episode_prose(show, args.episode, llm=llm)
+    print(f"prose draft: {len(prose)} chars")
+    prose, reviews = write_prose_review_loop(show, args.episode, prose, llm=llm,
+                                             max_revisions=args.max_revisions)
+    for name, r in reviews.items():
+        print(f"  [{'PASS' if r['pass'] else 'FAIL'}] {name:12s} "
               f"notes={len(r.get('notes', []))}")
-    p = show.dir / "runs" / f"EP{args.episode:02d}" / f"script.r{result['rounds']}.json"
-    print("script:", p)
-    return 0 if result["passed"] else 1
+    print("PROSE ALL PASS" if all_pass(reviews) else "PROSE REVISION REQUIRED")
+    if args.breakdown and all_pass(reviews):
+        result = breakdown_prose_to_shots(show, args.episode, llm=llm)
+        print(f"breakdown: {len(result['scenes'])} scenes -> "
+              f"{sum(len(s.get('shots', [])) for s in result['scenes'])} shots")
+    return 0 if all_pass(reviews) else 1
+
+
+def _cmd_dump(args: argparse.Namespace) -> int:
+    """Print EVERYTHING for an episode (full text, nothing truncated) for debugging."""
+    from .show import Show
+    show = Show(args.show)
+    d = show.dir / "runs" / f"EP{args.episode:02d}"
+    if not d.exists():
+        print(f"no runs/EP{args.episode:02d} for {args.show}")
+        return 1
+    def _show_file(name: str) -> None:
+        p = d / name
+        print(f"\n===== {name} {'(missing)' if not p.exists() else f'({p.stat().st_size} bytes)'} =====")
+        if p.exists():
+            try:
+                print(p.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(f"<unreadable: {exc}>")
+    for name in ("episode_prose.txt", "dialogue.txt", "plan.json",
+                 "scene_details.json", "script_reject.json"):
+        _show_file(name)
+    scripts = sorted(d.glob("script.r*.json"))
+    print(f"\n===== scripts: {[s.name for s in scripts] or '(none)'} =====")
+    for s in scripts:
+        try:
+            script = json.loads(s.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"{s.name}: <unparseable: {exc}>")
+            continue
+        print(f"\n--- {s.name}: {len(script.get('scenes', []))} scenes, "
+              f"review={json.dumps(script.get('_review', {}), ensure_ascii=False)} ---")
+        for sc in script.get("scenes", []):
+            print(f"\n## {sc.get('id')} {sc.get('location', '')}: {sc.get('summary', '')}")
+            for sh in sc.get("shots", []) or []:
+                print(f"  [{sh.get('id')}] ({sh.get('type', '')}/{sh.get('duration_s', '')}s) "
+                      f"{sh.get('action', '')}")
+                for dlg in sh.get("dialogue", []) or []:
+                    if isinstance(dlg, dict):
+                        print(f"    {dlg.get('char')}: {dlg.get('line')}")
+    rdir = d / "reviews"
+    if rdir.exists():
+        print("\n===== reviews (FULL notes, every severity) =====")
+        for f in sorted(rdir.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except Exception as exc:
+                print(f"{f.name}: <unparseable: {exc}>")
+                continue
+            print(f"\n--- {f.name}: pass={data.get('pass')} score={data.get('score')} ---")
+            for n in data.get("notes", []) or []:
+                if isinstance(n, dict):
+                    print(f"  [{n.get('severity', '?')}] {n.get('scene', '')} {n.get('note', '')}")
+                else:
+                    print(f"  {n}")
+    return 0
 
 
 def _cmd_h3status(args: argparse.Namespace) -> int:
@@ -209,8 +292,8 @@ def _cmd_extend(args: argparse.Namespace) -> int:
     print(f"[ range ] start={retake_start} length={retake_length} "
           f"({'extension past end' if retake_start + retake_length > base_frames else 'in-place retake'})")
     wf = build_h3_retake_workflow(args.prompt, fname, base_frames, retake_start, retake_length,
-                                  seed=args.seed, steps=steps, sampler_name=sampler,
-                                  use_spectrum=use_spectrum, use_first_block_cache=use_fbc)
+                                   seed=args.seed, steps=steps, sampler_name=sampler,
+                                   use_spectrum=use_spectrum, use_first_block_cache=use_fbc)
     out = Path(args.out) if args.out else cfg.root / "cache" / "h3_extend.mp4"
     print(f"rendering {args.duration}s extension (seed={args.seed}, steps={steps}, "
           f"sampler={sampler}, spectrum={use_spectrum}, fbc={use_fbc}) - be patient...")
@@ -223,7 +306,7 @@ def _cmd_extend(args: argparse.Namespace) -> int:
         from .clients.ffmpeg import normalize_spliced_loudness
         splice_sec = retake_start / 24.0
         norm = normalize_spliced_loudness(final, final.with_name(final.stem + "_norm.mp4"),
-                                          [splice_sec])
+                                           [splice_sec])
         if norm:
             final = norm
             print("[ norm ] per-segment EBU R128 loudness normalization applied")
@@ -231,6 +314,37 @@ def _cmd_extend(args: argparse.Namespace) -> int:
         print(f"[ warn ] loudness normalization skipped: {exc}")
     print(f"[ OK ] extended render saved: {final}")
     return 0
+
+
+def _cmd_scene_master(args: argparse.Namespace) -> int:
+    from .render_scene import render_scene_master
+    from .clients.comfy import ComfyClient
+    from .show import Show
+    import json as _json
+    cfg = get_config()
+    show = Show(args.show)
+    d = show.dir / "runs" / f"EP{args.episode:02d}"
+    scripts = fsutil.existing_by_mtime(d.glob("script.r*.json"))
+    if not scripts:
+        print(f"[FAIL] no script for {args.show} EP{args.episode:02d}")
+        return 1
+    script = _json.loads(scripts[-1].read_text(encoding="utf-8"))
+    scene = next((s for s in script.get("scenes", []) if s.get("id") == args.scene), None)
+    if not scene:
+        print(f"[FAIL] scene {args.scene} not found")
+        return 1
+    node_cfg = cfg.get("comfy", "nodes", {}).get("renderer", {})
+    client = ComfyClient(node_cfg.get("url", "http://127.0.0.1:8188"))
+    ms = cfg.get("pipeline", "multishot", {}) or {}
+    print(f"[scene] {args.scene} {len(scene.get('shots', []))} shots -> seamless master (multishot {ms.get('continuity', 'context_pin')})")
+    try:
+        out = render_scene_master(show, args.episode, scene, client, cfg=cfg, seed=args.seed)
+        print(f"[ OK ] master saved: {out}")
+        return 0
+    except Exception as exc:
+        print(f"[FAIL] {exc}")
+        import traceback; traceback.print_exc()
+        return 1
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
@@ -242,13 +356,44 @@ def _cmd_review(args: argparse.Namespace) -> int:
     llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=600)
     results = run_reviewers(script, show=show, llm=llm, episode=args.episode, round_no=args.round)
     for name, r in results.items():
-        n = len(r.get("notes", []))
+        n = len(r.get("notes", []) or [])
         print(f"{'[ PASS ]' if r['pass'] else '[ FAIL ]'} {name:12s} score={r.get('score')} notes={n}")
-        for note in r.get("notes", [])[:3]:
+        # Show ALL HIGHs first, then the rest — truncating hid the blocking set.
+        def _rank(note):
+            sev = (note.get("severity", "") if isinstance(note, dict) else "").upper()
+            return {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(sev, 3)
+        ordered = sorted((r.get("notes", []) or []),
+                         key=lambda x: _rank(x) if isinstance(x, dict) else 3)
+        for note in ordered:
             text = note.get("note") if isinstance(note, dict) else str(note)
-            print(f"    - {text}")
+            sev = note.get("severity", "") if isinstance(note, dict) else ""
+            print(f"    - [{sev or '?'}] {text}")
     print("ALL PASS" if all_pass(results) else "REVISION REQUIRED")
     return 0 if all_pass(results) else 1
+
+
+def _cmd_learn(args: argparse.Namespace) -> int:
+    from pathlib import Path as _Path
+    from .learn import aggregate_reviews, distill_rules, promote_rules, summarize
+    show_dir = _Path(get_config().root) / "shows" / args.show
+    notes = aggregate_reviews(show_dir, args.episode, round_no=args.round)
+    if not notes:
+        print(f"no review notes for {args.show} EP{args.episode:02d}")
+        return 1
+    s = summarize(notes)
+    print(f"{args.show} EP{args.episode:02d}: {s['total']} notes ({s['high']} HIGH)")
+    for reviewer, counts in sorted(s["by_reviewer"].items()):
+        print(f"  {reviewer:12s} HIGH={counts.get('HIGH',0)} MED={counts.get('MEDIUM',0)} "
+              f"LOW={counts.get('LOW',0)} total={counts.get('total',0)}")
+    rules = distill_rules(notes, high_only=not args.all)
+    for r in rules:
+        print(f"  - {r}")
+    if args.promote:
+        promoted = promote_rules(show_dir, rules)
+        print(f"director_notes.json now holds {len(promoted)} constraints.")
+    elif rules:
+        print("Re-run with --promote to append these to director_notes.json (deduped).")
+    return 0
 
 
 def _cmd_keyframe(args: argparse.Namespace) -> int:
@@ -287,9 +432,11 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
             "genre": cfg.get("show_profile", "genre", []),
             "tone": cfg.get("show_profile", "tone", []),
             "language": "en",
-            "runtime_target_s": cfg.get("show_profile", "runtime_target_s", 1320),
+            "runtime_target_s": cfg.get("show_profile", "runtime_target_s", DEFAULT_RUNTIME_TARGET_S),
             "style_guide": "",  # filled by the Gate 0 bootstrap
-            "quality_baseline": cfg.get("show_profile", "baseline", "ranma-1-2"),
+            # Per-show style references (set these in the show's bible).
+            "baseline": "",
+            "fanservice_baseline": "",
         },
         "arcs": [],
         "overall_plotline": None,
@@ -641,6 +788,93 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_qc(args: argparse.Namespace) -> int:
+    """STT dialogue QC on already-rendered shots (backfill / re-check).
+
+    Every rendered clip in runs/EP##/video/*.mp4 is transcribed and compared
+    against its shot's script dialogue. Results persist to
+    runs/EP##/qc/summary.json + the qc_results DB table (what the dashboard
+    shows). Always re-runs over existing clips; skip already-QC'd shots with
+    the ``--shot`` filter to re-check just one.
+    """
+    from .qc import run_shot_qc
+    from .render import _latest_script
+    from .show import Show
+
+    cfg = get_config()
+    if args.model:
+        cfg.data["qc"]["stt"] = {**cfg.get("qc", "stt", {}), "model": args.model}
+    show = Show(args.show)
+    episodes = [args.episode] if args.episode else sorted(
+        p.name for p in (show.dir / "runs").glob("EP*") if p.is_dir()
+        and any((p / "video").glob("*.mp4")))
+    if not episodes:
+        print(f"no rendered clips for {args.show}")
+        return 0
+    results: dict[str, Any] = {}
+    for ep_name in episodes:
+        ep = int(str(ep_name).replace("EP", ""))
+        script = _latest_script(show, ep)
+        if not script:
+            continue
+        vd = show.dir / "runs" / f"EP{ep:02d}" / "video"
+        shots = {s.get("id"): s for sc in script.get("scenes", [])
+                 for s in sc.get("shots", [])}
+        print(f"\nEP{ep:02d}: {len(list(vd.glob('*.mp4')))} clips")
+        for clip in sorted(vd.glob("*.mp4")):
+            sid = clip.stem
+            if args.shot and sid != args.shot:
+                continue
+            shot = shots.get(sid, {})
+            rep = run_shot_qc(show, ep, clip, shot, cfg=cfg)
+            results[sid] = rep
+            mark = {"pass": "PASS", "fail": "FAIL", "skip": "skip"}.get(
+                rep.get("verdict"), rep.get("verdict"))
+            issue = rep.get("issues") and f" — {'; '.join(rep['issues'])[:120]}" or ""
+            print(f"  {sid:<14} {mark:<5} {rep.get('score', 0):.0%}{issue}")
+    if args.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _cmd_vcheck(args: argparse.Namespace) -> int:
+    """Post-render visual check (Qwen3-VL) on already-rendered shots.
+
+    Every rendered clip in runs/EP##/video/*.mp4 is frame-sampled and sent to
+    the vision-language model, which verifies the expected characters (vs their
+    approved refs) and that the scripted action plays out. Results persist to
+    runs/EP##/vcheck/summary.json + the vcheck_results DB table. With
+    --auto-feed (default per config vcheck.auto_feed) failures auto-reject into
+    the shot gate up to vcheck.max_auto_retakes per shot.
+    """
+    from .vcheck import run_episode_vcheck
+    from .show import Show
+    from .render import _latest_script
+
+    cfg = get_config()
+    show = Show(args.show)
+    episodes = [args.episode] if args.episode else sorted(
+        p.name for p in (show.dir / "runs").glob("EP*") if p.is_dir()
+        and any((p / "video").glob("*.mp4")))
+    if not episodes:
+        print(f"no rendered clips for {args.show}")
+        return 0
+    for ep_name in episodes:
+        ep = int(str(ep_name).replace("EP", ""))
+        if not _latest_script(show, ep):
+            continue
+        print(f"\nEP{ep:02d}: visual check…")
+        feed = None
+        if getattr(args, "no_auto_feed", False):
+            feed = False
+        elif getattr(args, "auto_feed", False):
+            feed = True
+        actions = run_episode_vcheck(show, ep, cfg=cfg, auto_feed=feed)
+        for a in actions or []:
+            print(f"  {a}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -729,8 +963,22 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--out", default="")
     ex.add_argument("--timeout", type=float, default=1800.0)
 
+    sm = sub.add_parser("scene-master", help="render one scene as a seamless multishot master (H3Multishot)")
+    sm.add_argument("--show", required=True, help="show id")
+    sm.add_argument("--episode", type=int, default=1)
+    sm.add_argument("--scene", required=True, help="scene id, e.g. s01")
+    sm.add_argument("--seed", type=int, default=1)
+
     rv = sub.add_parser("review", help="run the Stage 2a writers'-room reviewers on a script")
     rv.add_argument("--script", required=True, help="path to a script.json")
+
+    ln = sub.add_parser("learn", help="aggregate writers'-room review notes into durable prompt rules")
+    ln.add_argument("--show", required=True, help="show id")
+    ln.add_argument("--episode", type=int, required=True)
+    ln.add_argument("--round", type=int, default=None, help="review round (default: latest per reviewer)")
+    ln.add_argument("--all", action="store_true", help="include MEDIUM/LOW, not just HIGH")
+    ln.add_argument("--promote", action="store_true",
+                    help="append HIGH-derived rules to director_notes.json")
 
     dash = sub.add_parser("dashboard", help="run the local human approval & review dashboard")
     dash.add_argument("--port", type=int, default=8125)
@@ -739,11 +987,20 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--episode", type=int, default=1)
     rv.add_argument("--round", type=int, default=1)
 
-    sc = sub.add_parser("script", help="generate an episode script via the writers' room")
+    sc = sub.add_parser("script", help="generate an episode script (prose -> review -> shots)")
     sc.add_argument("--show", required=True)
     sc.add_argument("--episode", type=int, default=1)
-    sc.add_argument("--synopsis", default="", help="episode synopsis (default: next arc beat)")
-    sc.add_argument("--max-revisions", type=int, default=None)
+
+    pr = sub.add_parser("prose", help="prose-first episode: whole screenplay, review, then shots by need")
+    pr.add_argument("--show", required=True)
+    pr.add_argument("--episode", type=int, default=1)
+    pr.add_argument("--max-revisions", type=int, default=2)
+    pr.add_argument("--breakdown", action="store_true",
+                    help="after prose passes, cut it into shots")
+
+    du = sub.add_parser("dump", help="print EVERYTHING for an episode (full text, no truncation)")
+    du.add_argument("--show", required=True)
+    du.add_argument("--episode", type=int, required=True)
 
     i = sub.add_parser("init-show", help="scaffold a new show + generate the concept")
     i.add_argument("--name", required=True, help="show slug/name, e.g. neon-sutra")
@@ -787,6 +1044,24 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="show per-show run status")
     st.add_argument("--show", default="")
 
+    qc = sub.add_parser("qc", help="run STT dialogue QC on rendered shots "
+                                   "(garbled-audio detection)")
+    qc.add_argument("--show", required=True, help="show id")
+    qc.add_argument("--episode", type=int, default=None,
+                    help="episode number (default: all rendered episodes)")
+    qc.add_argument("--shot", default="", help="only QC this shot id (default: all)")
+    qc.add_argument("--model", default="", help="override config qc.stt.model")
+    qc.add_argument("--json", action="store_true", help="print a JSON rollup")
+
+    vc = sub.add_parser("vcheck", help="post-render visual QC (Qwen3-VL) on rendered shots")
+    vc.add_argument("--show", required=True, help="show id")
+    vc.add_argument("--episode", type=int, default=None,
+                    help="only check this episode (default: all with clips)")
+    vc.add_argument("--no-auto-feed", action="store_true",
+                    help="do NOT auto-reject failures into the shot gate")
+    vc.add_argument("--auto-feed", action="store_true",
+                    help="force auto-reject (overrides config vcheck.auto_feed)")
+
     return p
 
 
@@ -802,10 +1077,14 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": _cmd_doctor,
         "keyframe": _cmd_keyframe,
         "review": _cmd_review,
+        "learn": _cmd_learn,
+        "prose": _cmd_prose,
+        "dump": _cmd_dump,
         "script": _cmd_script,
         "h3status": _cmd_h3status,
         "shot": _cmd_shot,
         "extend": _cmd_extend,
+        "scene-master": _cmd_scene_master,
         "init-show": _cmd_init_show,
         "bootstrap": _cmd_bootstrap,
         "reconcile": _cmd_reconcile,
@@ -817,6 +1096,8 @@ def main(argv: list[str] | None = None) -> int:
         "dashboard": _cmd_dashboard,
         "renderer": _cmd_renderer,
         "status": _cmd_status,
+        "qc": _cmd_qc,
+        "vcheck": _cmd_vcheck,
     }
     return handlers[args.command](args)
 

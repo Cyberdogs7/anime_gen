@@ -1,0 +1,49 @@
+{
+  "concept": {
+    "status": "approved"
+  },
+  "bible": {
+    "status": "approved"
+  },
+  "characters": [
+    {
+      "name": "Ren Tojo",
+      "proposal": "approved",
+      "refs": "approved",
+      "voice": "approved",
+      "rejected_notes": ""
+    },
+    {
+      "name": "Mira Kaine",
+      "proposal": "approved",
+      "refs": "approved",
+      "voice": "approved",
+      "rejected_notes": ""
+    },
+    {
+      "name": "Sable Voss",
+      "proposal": "approved",
+      "refs": "approved",
+      "voice": "approved",
+      "rejected_notes": ""
+    },
+    {
+      "name": "Juno Hale",
+      "proposal": "approved",
+      "refs": "approved",
+      "voice": "approved",
+      "rejected_notes": ""
+    },
+    {
+      "name": "Tessa Rook",
+      "proposal": "approved",
+      "refs": "approved",
+      "voice": "approved",
+      "rejected_notes": ""
+    }
+  ],
+  "scenes": {
+    "status": "approved"
+  },
+  "complete": true
+}

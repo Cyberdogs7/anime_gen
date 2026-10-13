@@ -17,14 +17,14 @@ def propose_concepts(guidance: str = "", n: int = 3, cfg=None, llm=None) -> list
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"))
     profile = cfg.get("show_profile") or {}
     maturity = profile.get("maturity", "mature")
-    baseline = profile.get("baseline", "ranma-1-2")
+    baseline = profile.get("baseline", "")
     roles = cfg.get("llm", "roles", {})
     model = roles.get("concept") or cfg.get("llm", "model")
     system = prompts.showrunner_system(profile, maturity, baseline)
     user = prompts.proposals_prompt(guidance, profile, n)
     data = llm.chat_json(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        model=model, temperature=0.9, max_tokens=8192,
+        model=model, temperature=0.9, max_tokens=8192, role="concept",
     )
     proposals = data.get("proposals") or []
     for p in proposals:

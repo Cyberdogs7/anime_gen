@@ -30,6 +30,8 @@ class ServiceType(Enum):
     TTS = "tts"
     COMFYUI = "comfyui"
     STT = "stt"
+    VLLM = "vllm"
+    VLM = "vlm"          # LM Studio vision model (e.g. qwen/qwen3-vl-8b) for frame-based QC
 
 
 # Estimated VRAM budgets (MB) - used for scheduling decisions later.
@@ -38,6 +40,8 @@ VRAM_BUDGETS = {
     ServiceType.TTS: 7000,
     ServiceType.COMFYUI: 12000,
     ServiceType.STT: 3000,
+    ServiceType.VLLM: 15000,
+    ServiceType.VLM: 12000,
 }
 
 
@@ -129,6 +133,10 @@ class GPUManager:
             self._load_llm(model)
         elif service == ServiceType.COMFYUI:
             self._load_comfyui()
+        elif service == ServiceType.VLLM:
+            self._load_vllm()
+        elif service == ServiceType.VLM:
+            self._load_vlm()
         else:
             log.info("[gpu] load %s (stub; VRAM ~%d MB)", service.value, VRAM_BUDGETS[service])
 
@@ -139,6 +147,10 @@ class GPUManager:
             self._unload_llm()
         elif service == ServiceType.COMFYUI:
             self._unload_comfyui()
+        elif service == ServiceType.VLLM:
+            self._unload_vllm()
+        elif service == ServiceType.VLM:
+            self._unload_vlm()
         else:
             log.info("[gpu] unload %s (stub)", service.value)
 
@@ -174,12 +186,23 @@ class GPUManager:
             time.sleep(1)
             subprocess.Popen([lms, "load", model, "--gpu", gpu, "-c", str(ctx),
                               "--parallel", "1", "-y"])
-            # wait for the API to answer (LM Studio model load can take a while)
+            # wait for the model to be resident: poll `lms ps` for the model id
+            # (port alone is insufficient — server is already listening while load at 0-34%)
             for _ in range(60):
                 time.sleep(3)
                 if _port_open(port):
-                    return
-            log.warning("[gpu] LLM load: API port open but model readiness not confirmed")
+                    cur = _run([lms, "ps"]).stdout or ""
+                    if model in cur and "Loading" not in cur:
+                        # extra settle: ensure /v1/models lists it
+                        try:
+                            import httpx
+                            with httpx.Client(timeout=3.0) as _c:
+                                if _c.get(f"http://127.0.0.1:{port}/v1/models").status_code == 200:
+                                    return
+                        except Exception:
+                            return
+                        return
+            log.warning("[gpu] LLM load: API open but model readiness not confirmed for %s", model)
         else:
             log.info("[gpu] LLM: no showrunner model configured in env.yaml; using existing server")
 
@@ -243,6 +266,154 @@ class GPUManager:
         log.warning("[gpu] VRAM still constrained after LLM unload "
                     "(free=%s MiB, target=%d); proceeding anyway",
                     self._gpu_free_mib(), target)
+
+    # ---- LM Studio VLM (Qwen3-VL frame-based visual QC) ----
+
+    def _vlm_model(self) -> str:
+        """The LM Studio vision model id for the frame-sampling vcheck path."""
+        return (self.cfg.get("qc", "vcheck", {}).get("model")
+                or "qwen/qwen3-vl-8b")
+
+    def _load_vlm(self) -> None:
+        """Load the vcheck vision model (Qwen3-VL) into LM Studio under the lock.
+
+        Loads AFTER evicting the showrunner LLM and any ComfyUI models, so the
+        VLM gets the full VRAM budget. Model id comes from qc.yaml vcheck.model;
+        context/gpu_ratio reuse the env.lmstudio settings (a vision model needs
+        far less context than the showrunner). Never raises if unconfigured.
+        """
+        model = self._vlm_model()
+        if not model:
+            log.info("[gpu] vlm: no vcheck.model configured (stub)")
+            return
+        port = self.cfg.get("env", "lmstudio", {}).get("server_port", 1234)
+        # Evict ComfyUI + showrunner so the VLM has the GPU to itself.
+        try:
+            self._unload_comfyui()
+        except Exception:
+            log.debug("[gpu] vlm pre-eject comfyui failed", exc_info=True)
+        if not _port_open(port):
+            _run([self.cfg.lms_cli(), "server", "start", "--port", str(port), "--cors"])
+            time.sleep(4)
+        ctx = int(self.cfg.get("qc", "vcheck", {}).get("context")
+                  or self.cfg.get("env", "lmstudio", {}).get("context", 32768))
+        ratio = self.cfg.get("qc", "vcheck", {}).get("gpu_ratio",
+                       self.cfg.get("env", "lmstudio", {}).get("gpu_ratio", "max"))
+        gpu = "max" if ratio in (None, "", "max", "auto") else str(ratio)
+        _run([self.cfg.lms_cli(), "unload", "--all"])
+        time.sleep(1)
+        log.info("[gpu] loading VLM %s for visual QC", model)
+        subprocess.Popen([self.cfg.lms_cli(), "load", model, "--gpu", gpu,
+                          "-c", str(ctx), "--parallel", "1", "-y"])
+        # Wait for the API to serve the vision model (it appears in `lms ps`
+        # once resident; a competing unload could otherwise publish an empty
+        # model list while the load is still racing in).
+        for _ in range(60):
+            time.sleep(3)
+            if _port_open(port):
+                cur = _run([self.cfg.lms_cli(), "ps"]).stdout or ""
+                if model in cur:
+                    return
+        log.warning("[gpu] vlm: API open but model readiness not confirmed for %s", model)
+
+    def _unload_vlm(self) -> None:
+        """Unload the VLM (and any resident LM Studio model) to free VRAM."""
+        _run([self.cfg.lms_cli(), "unload", "--all"])
+        self._wait_vram_released()
+
+    # ---- vLLM (Qwen3-VL native-video VLM, served inside WSL2) ----
+
+    def _vllm_cfg(self) -> dict:
+        return dict(self.cfg.get("qc", "vcheck", {}).get("vllm", {}) or {})
+
+    @staticmethod
+    def _vllm_fps(max_frames: int) -> float:
+        """FPS that samples ~max_frames from the studio's ~10s clips.
+
+        Qwen3-VL samples video at ``fps`` (its processor kwarg), so we derive it
+        from the target frame budget instead of pinning frame counts per clip.
+        """
+        return round(max(0.5, min(8.0, int(max_frames) / 10.0)), 2)
+
+    def _vllm_port_open(self) -> bool:
+        cfg = self._vllm_cfg()
+        port = int(cfg.get("port", 8001) or 8001)
+        return _port_open(port)
+
+    def _load_vllm(self) -> None:
+        """Start the WSL2 vLLM server (Qwen3-VL-8B) for native-video checks.
+
+        Runs only in the post-render window (the render has already released
+        COMFYUI). Safety-ejects the LM Studio LLM first, then boots `vllm serve`
+        inside WSL and waits for the API on :port. Never raises if unconfigured
+        (stub mode keeps the pipeline testable).
+        """
+        cfg = self._vllm_cfg()
+        if not cfg.get("venv_python") or not cfg.get("model_dir"):
+            log.info("[gpu] vLLM: not configured in qc.yaml vcheck.vllm (stub)")
+            return
+        # Safety eject: leave the GPU entirely free before vLLM claims it.
+        try:
+            self._unload_llm()
+        except Exception:
+            log.debug("[gpu] vLLM pre-eject llm failed", exc_info=True)
+        if self._vllm_port_open():
+            log.info("[gpu] vLLM already up on :%s", cfg.get("port", 8001))
+            return
+        distro = cfg.get("distro", "Ubuntu-22.04")
+        port = int(cfg.get("port", 8001) or 8001)
+        model_arg = cfg.get("model", "Qwen3-VL-8B-Instruct-FP8")
+        model_dir = cfg.get("model_dir")
+        venv_py = cfg.get("venv_python")
+        gpu_mem = float(cfg.get("gpu_memory_utilization", 0.9) or 0.9)
+        max_len = int(cfg.get("max_model_len", 32768) or 32768)
+        max_frames = int(cfg.get("max_video_frames", 32) or 32)
+        args = [
+            "wsl", "-d", distro, "--", "bash", "-lc",
+            # vLLM's module launcher takes the model as a POSITIONAL arg (no
+            # `serve` subcommand keyword) — `... api_server serve <model>` is
+            # rejected: "unrecognized arguments: <model>".
+            f"nohup {venv_py} -m vllm.entrypoints.openai.api_server "
+            f"{model_dir} --port {port} --host 0.0.0.0 "
+            f"--served-model-name {model_arg} --max-model-len {max_len} "
+            f"--gpu-memory-utilization {gpu_mem} "
+            f"--limit-mm-per-prompt '{{\"video\": 1}}' "
+            f"--mm-processor-kwargs '{{\"fps\": {self._vllm_fps(max_frames)}}}' "
+            f"> /tmp/vllm_qwen3vl.log 2>&1 & echo started > /tmp/vllm_started.flag",
+        ]
+        try:
+            subprocess.Popen(args, creationflags=getattr(subprocess,
+                                       "CREATE_NEW_CONSOLE", 0))
+        except Exception as exc:
+            log.warning("[gpu] vLLM launch failed: %s", exc)
+            return
+        for _ in range(int(self.cfg.get("comfy", "startup_retries", 30)) * 2):
+            time.sleep(3)
+            if self._vllm_port_open():
+                log.info("[gpu] vLLM up on :%s", port)
+                return
+        log.warning("[gpu] vLLM startup on :%s not confirmed (log: /tmp/vllm_qwen3vl.log)", port)
+
+    def _unload_vllm(self) -> None:
+        """Stop the WSL vLLM server and wait for its VRAM to release."""
+        cfg = self._vllm_cfg()
+        if not cfg.get("venv_python"):
+            return
+        distro = cfg.get("distro", "Ubuntu-22.04")
+        port = int(cfg.get("port", 8001) or 8001)
+        subprocess.run(["wsl", "-d", distro, "--", "bash", "-lc",
+                        "pkill -f vllm.entrypoints.openai.api_server || true"],
+                       capture_output=True, timeout=60)
+        for _ in range(20):
+            if not _port_open(port):
+                self._wait_vram_released(timeout=30)
+                return
+            time.sleep(2)
+        # force: the server ignored the graceful kill; hard-kill its process
+        subprocess.run(["wsl", "-d", distro, "--", "bash", "-lc",
+                        "pkill -9 -f vllm.entrypoints.openai.api_server || true"],
+                       capture_output=True, timeout=60)
+        self._wait_vram_released(timeout=30)
 
     # ---- ComfyUI (portable tree per role) ----
 
@@ -316,6 +487,8 @@ class GPUManager:
                                    capture_output=True, timeout=30)
                     break
         time.sleep(1)
+        # Wait for VRAM to actually be released (Comfy's VRAM lingers after taskkill)
+        self._wait_vram_released(timeout=30, min_free_mib=4096)
 
     # ---- acquire / release ----
 

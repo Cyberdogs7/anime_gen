@@ -9,11 +9,14 @@ LLM in the loop.
 from __future__ import annotations
 
 import json
+import logging
 import random
 from pathlib import Path
 from typing import Any
 
 from .clients.comfy import ComfyClient
+
+log = logging.getLogger(__name__)
 
 
 def resolve_seed(seed: int) -> int:
@@ -99,7 +102,26 @@ def run_t2i(client: ComfyClient, workflow: dict[str, Any], out_path: Path | str,
 def generate_keyframe(client: ComfyClient, workflow: dict[str, Any], prompt: str,
                       seed: int, out_path: Path | str, aspect_ratio: str = "16:9",
                       megapixels: float = 1.0, use_lora: bool = False,
-                      front: bool = False) -> Path:
+                      front: bool = False, style_ref: Path | str | None = None,
+                      style_weight: float = 0.6,
+                      style_weight_type: str = "style transfer") -> Path:
+    """Render one krea2 image.
+
+    ``style_ref`` (a house-style anchor image) routes the render through an
+    IPAdapter pass so the result inherits the anchor's look — the shared style
+    anchor that keeps characters, props and scenes consistent. Without it the
+    render is plain text-to-image (the model picks its own style).
+    """
+    if style_ref:
+        try:
+            fn = client.upload_image(str(style_ref))
+            wf = build_keyframe_ref_workflow(workflow, prompt, seed, aspect_ratio, [fn],
+                                             weight=style_weight, weight_type=style_weight_type)
+            return run_t2i(client, wf, out_path, front=front)
+        except Exception as exc:
+            # The krea2 instance may not have IPAdapter installed. Never let the
+            # style anchor break generation — fall back to plain t2i.
+            log.warning("style-ref render failed (%s); falling back to plain t2i", exc)
     wf = parameterize_keyframe(workflow, prompt, seed, aspect_ratio, megapixels, use_lora)
     return run_t2i(client, wf, out_path, front=front)
 
@@ -107,7 +129,8 @@ def generate_keyframe(client: ComfyClient, workflow: dict[str, Any], prompt: str
 def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int,
                                 aspect_ratio: str, ref_filenames: list[str],
                                 weight: float = 0.8,
-                                weights: list[float] | None = None) -> dict[str, Any]:
+                                weights: list[float] | None = None,
+                                weight_type: str = "linear") -> dict[str, Any]:
     """Base keyframe workflow + an IPAdapter pass over the reference images.
 
     Routes the diffusion model through IPAdapterUnifiedLoader + IPAdapterAdvanced
@@ -153,7 +176,7 @@ def build_keyframe_ref_workflow(workflow: dict[str, Any], prompt: str, seed: int
                 "ipadapter": ["ipad_loader", 1],
                 "image": link,
                 "weight": weights[i] if i < len(weights) else weight,
-                "weight_type": "linear",
+                "weight_type": weight_type,
                 "combine_embeds": "concat",
                 "start_at": 0.0,
                 "end_at": 1.0,

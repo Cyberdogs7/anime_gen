@@ -1,6 +1,6 @@
 """Character-consistency reviewer -> prompt revision -> regeneration loop.
 
-The vision-capable LM Studio model (the same gemma that writes scripts) checks
+The vision-capable LM Studio model (Qwen3-VL via the 'describer' role) checks
 each storyboard keyframe against the character's APPROVED reference image. If a
 shot's character has drifted, the reviewer issues a corrective prompt instruction
 and the shot is regenerated through the same krea2 + IPAdapter path. Runs
@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+log = logging.getLogger(__name__)
+
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .show import Show
-from .storyboard import (_keyframe_prompt, _latest_script, _shot_characters,
-                         _shot_object_refs, _shot_ref_weights, _shot_refs)
+from .storyboard import (_char_appearances, _keyframe_prompt, _latest_script,
+                         _shot_characters, _shot_object_refs, _shot_ref_weights,
+                         _shot_refs, _show_style)
 REVIEW_PROMPT = (
     "You are a STRICT character-consistency reviewer for an anime production.\n"
     "You receive a storyboard keyframe and a set of EXPECTED characters, each with an "
@@ -88,6 +92,82 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+SINGLE_FIGURE_PROMPT = (
+    "You are checking an anime character portrait for a production pipeline.\n"
+    "Look at the image and count DISTINCT human figures — every separate head, "
+    "body or torso counts, including partial figures and reflections that read "
+    "as a second person. A turnaround (a front view plus a back view of the "
+    "same character side by side) counts as TWO.\n"
+    "Reply with ONLY a JSON object:\n"
+    '{"figures": <int, your count>, "detail": "<one short sentence describing what you see>"}'
+)
+
+
+def ref_figure_count(llm, model: str, image_path: Path | str) -> dict[str, Any]:
+    """Count human figures in a character-ref portrait (describer VLM).
+
+    Returns {"verdict": "single" | "multi" | "unknown", "figures": int,
+    "detail": str}. NEVER raises and never blocks the pipeline: any failure
+    (VLM down, unparseable reply, missing file) returns "unknown" so the
+    caller accepts the image instead of stalling the show.
+    """
+    path = Path(image_path)
+    if not path.exists():
+        return {"verdict": "unknown", "figures": 0, "detail": "image missing"}
+    try:
+        content = [
+            {"type": "text", "text": SINGLE_FIGURE_PROMPT},
+            {"type": "image_url", "image_url": {"url": _data_uri(_downscale(path))}},
+        ]
+        text = llm.chat([{"role": "user", "content": content}], model=model,
+                         temperature=0.0, max_tokens=200, role="describer")
+        data = _extract_json(text or "") or {}
+        n = int(data.get("figures", 1))
+        return {"verdict": "single" if n <= 1 else "multi",
+                "figures": n, "detail": str(data.get("detail", ""))}
+    except Exception as exc:
+        log.warning("[ref-gate] figure check unavailable, accepting image: %s", exc)
+        return {"verdict": "unknown", "figures": 0, "detail": str(exc)}
+
+
+def render_until_single(render_fn, image_path: Path | str,
+                        llm=None, model: str = "",
+                        max_tries: int = 3, label: str = "ref") -> dict[str, Any]:
+    """Render a ref portrait, VLM-verify it shows ONE figure, retry on doubles.
+
+    ``render_fn`` is a zero-arg callable that renders a fresh attempt (new
+    random seed) to ``image_path`` and returns truthy on success (falsy or an
+    exception on failure). Up to ``max_tries`` attempts total.
+
+    Returns {"ok": bool, "single": bool, "tries": int, "figures": int}.
+    ``ok`` mirrors whether an image landed (pipeline liveness wins: a stubborn
+    double after ``max_tries`` is still accepted so the show never stalls —
+    the human approves or rejects it at the refs gate). Without a VLM
+    (``llm``/``model`` missing) the first landed image is accepted unverified.
+    """
+    path = Path(image_path)
+    tries = 0
+    last_figures = 0
+    while tries < max_tries:
+        tries += 1
+        try:
+            landed = render_fn()
+        except Exception as exc:
+            log.warning("[ref-gate] %s render attempt %d failed: %s", label, tries, exc)
+            return {"ok": path.exists(), "single": True, "tries": tries, "figures": 0}
+        if not landed or not path.exists():
+            return {"ok": False, "single": True, "tries": tries, "figures": 0}
+        if llm is None or not model:
+            return {"ok": True, "single": True, "tries": tries, "figures": 0}
+        check = ref_figure_count(llm, model, path)
+        last_figures = int(check.get("figures", 0))
+        if check["verdict"] in ("single", "unknown"):
+            return {"ok": True, "single": True, "tries": tries, "figures": last_figures}
+        log.warning("[ref-gate] %s attempt %d shows %s figures (%s) — retrying with a fresh seed",
+                    label, tries, check["figures"], check["detail"])
+    return {"ok": True, "single": False, "tries": tries, "figures": last_figures}
+
+
 def _prev_keyframe(runs, scene: dict[str, Any], sid: str) -> Path | None:
     """The storyboard preview (mp4) or keyframe (png) of the shot just before
     `sid` within the scene."""
@@ -120,7 +200,7 @@ def review_shot(llm, model: str, names: list[str], ref_paths: list[Path],
         content.append({"type": "image_url", "image_url": {"url": _data_uri(_downscale(ref))}})
     content.append({"type": "image_url", "image_url": {"url": _data_uri(kf)}})
     text = llm.chat([{"role": "user", "content": content}], model=model,
-                    temperature=0.2, max_tokens=3000)
+                    temperature=0.2, max_tokens=3000, role="describer")
     return _extract_json(text) or {"pass": True, "issue": "unparseable",
                                    "prompt_fix": ""}
 
@@ -143,7 +223,7 @@ def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) 
         f"REVIEWER CORRECTIONS:\n{issues}\n{fix}"
     )
     text = llm.chat([{"role": "user", "content": revision}], model=model,
-                    temperature=0.6, max_tokens=1500)
+                    temperature=0.6, max_tokens=1500, role="describer")
     try:
         s = text[text.find("{"): text.rfind("}") + 1]
         out = (json.loads(s).get("prompt") or "").strip()
@@ -175,7 +255,7 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
     if not script:
         return []
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
-    model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
+    model = cfg.get("llm", "roles", {}).get("describer") or cfg.get("llm", "model")
     wf_path = cfg.workflows_dir / "image_keyframe.json"
     runs = show.dir / "runs" / f"EP{episode:02d}"
     report: list[dict[str, Any]] = []
@@ -235,7 +315,8 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
                                           "ts": __import__("time").time()}
                 enames, _ = _shot_refs(show, f["shot"])
                 base = _keyframe_prompt(f["shot"], f["scene"], enames,
-                                        _char_appearances(show))
+                                        _char_appearances(show),
+                                        _show_style(show))
                 base = revise_keyframe_prompt(llm, model, base,
                                               f.get("issue", ""), f.get("fix", ""))
                 out = runs / "storyboard" / f"{sid}.mp4"

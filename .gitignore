@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-vllm/
 venv/
 .env
 studio.db
@@ -11,7 +12,9 @@ shows/*/assets/
 shows/*/archive/
 shows/*/characters/*/refs/*.png
 shows/*/scenes/*/refs/*.png
+shows/*/style_anchor.png
 workflows/*.json
+workflows/**/*.json
 config/remotes.yaml
 /*.png
 /*.jpg
@@ -24,3 +27,8 @@ config/remotes.yaml
 *.egg-info/
 runs/
 .gpu-manager.lock
+*.log
+/*.txt
+/compare_out/
+/dashboard_snapshot.html
+/stop_dashboard.bat

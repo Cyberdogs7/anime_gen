@@ -56,6 +56,28 @@ def test_chunked_writers_room_revises_and_writes_rounds(tmp_path):
     assert (runs / "reviews" / "continuity.r2.json").exists()
     saved = json.loads((runs / "script.r2.json").read_text(encoding="utf-8"))
     assert saved["scenes"][0]["shots"][0]["action"] == "revised"
+    # The verdict MUST be persisted: the pipeline gate reads it from disk.
+    assert "_review" in saved
+    assert saved["_review"]["passed"] == final["_review"]["passed"]
+
+
+def test_writer_review_persists_failed_verdict_for_gate(tmp_path):
+    """A failed review must be written to the on-disk script, or the reject/
+    regenerate gate (which reads script.r*.json) silently never fires and bad
+    episodes ship anyway."""
+    show = _make_show(tmp_path)
+    script = {"episode": 1, "summary": "x", "cast": ["Ryou"], "scenes": []}
+
+    class FailingLLM:
+        def chat_json(self, messages, **kwargs):
+            return {"score": 0.93, "notes": [{"scene": "s01", "note": "slop"}],
+                    "pass": False}
+
+    _writer_review(show, 1, script, llm=FailingLLM(), cfg=Config(tmp_path),
+                   max_revisions=1)
+    saved = json.loads((show.dir / "runs" / "EP01" / "script.r1.json")
+                       .read_text(encoding="utf-8"))
+    assert saved["_review"]["passed"] is False
 
 
 def test_chunked_review_passes_on_round_one(tmp_path):
@@ -171,14 +193,15 @@ def test_scene_pass_prompt_carries_director_notes():
 
 
 def test_dialogue_pass_is_written_for_the_ear():
-    """The DIALOGUE WRITER pass must carry the spoken-word contract: short,
-    conversational lines that become synthesized audio, delivery for tone,
-    voice anchors per character."""
+    """The DIALOGUE WRITER pass must carry the spoken-word contract: complete,
+    natural conversational sentences that become synthesized audio, delivery for
+    tone, voice anchors per character."""
     from studio.planner import _SCENE_PASSES
     from studio.prompts import scene_pass_prompt
 
     dlg = next(p for p in _SCENE_PASSES if p["name"] == "dialogue")
-    assert "2-20 words" in dlg["instructions"]
+    assert "COMPLETE, natural sentence" in dlg["instructions"]
+    assert "noun list" in dlg["instructions"]       # explicit anti-fragment rule
     assert "SYNTHESIZED AUDIO" in dlg["instructions"]
     assert "voice-anchor" in dlg["instructions"]
     assert "`delivery`" in dlg["instructions"]
@@ -189,7 +212,7 @@ def test_dialogue_pass_is_written_for_the_ear():
                             "traits_for_llm": "terse, dry"}],
                           [{"id": "s01_sh01"}], 110)
     assert "SPOKEN-AUDIO CONTEXT" in p
-    assert "2-20 words" in p
+    assert "complete, natural sentence" in p
     assert "H3 lip-sync" in p
 
 
@@ -208,6 +231,7 @@ class FakePlanReviewLLM:
             passed = self.review_calls > 1
             return {"score": 0.1 if passed else 0.9,
                     "notes": [] if passed else [{"scene": "overall", "item": "episode 1",
+                                                 "severity": "HIGH",
                                                  "note": "cold open, zero context"}],
                     "pass": passed}
         if "REVISE the EPISODE OUTLINE" in user:      # review-driven revision
@@ -259,6 +283,7 @@ def test_plan_review_loop_marks_failure_after_max_revisions(tmp_path):
             if "Review this EPISODE OUTLINE" in user:
                 self.review_calls += 1
                 return {"score": 0.9, "notes": [{"scene": "overall", "item": "x",
+                                                 "severity": "HIGH",
                                                  "note": "still broken"}], "pass": False}
             return {"episode": 1, "plot": "still broken", "characters": ["Ryou"], "scenes": [
                 {"id": "s01", "location": "dojo", "time_of_day": "dawn",

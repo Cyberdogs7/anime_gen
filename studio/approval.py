@@ -12,7 +12,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import fsutil
 from .bootstrap import ACTIVITY, BootstrapChain
+from .config import get_config
 from .bus.events import (
     BIBLE_APPROVED, BIBLE_PENDING, BIBLE_REJECTED, CHAR_PROPOSAL_APPROVED,
     CHAR_PROPOSAL_PENDING, CHAR_PROPOSAL_REJECTED, CHAR_REFS_APPROVED,
@@ -195,7 +197,7 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
 
     if step == "char_ref":
         # Feedback on a character's BASE reference image — works for bootstrap AND
-        # episode-supporting characters (Apex-734, group units like the pods).
+        # episode-supporting characters (enemy units, group units).
         from .casting import regenerate_character_ref
         if not regenerate_character_ref(show, char, notes):
             raise ValueError(f"character ref for '{char}' regeneration failed")
@@ -442,6 +444,37 @@ def approve_story(show_id: str, episode: int | str, notes: str = "") -> list[str
     return [f"{_episode_label(episode)} script approved"]
 
 
+def approve_script(show_id: str, episode: int | str, notes: str = "") -> list[str]:
+    """Override a failed script review so the pipeline can proceed to storyboard.
+
+    Clears the ``_review`` failure state on the latest script revision, allowing
+    the reconciler to advance past the script-review gate.
+    """
+    from .storyboard import _latest_script
+    show = Show(show_id)
+    raw = str(episode).strip().upper()
+    if raw.startswith("EP"):
+        raw = raw[2:]
+    ep = int(raw)
+    script = _latest_script(show, ep)
+    if not script:
+        return [f"{_episode_label(ep)}: no script found"]
+    review = script.get("_review") or {}
+    if review.get("passed") is not False:
+        return [f"{_episode_label(ep)}: script review already passed"]
+    # Overwrite the script with the review marked as passed (human override).
+    review["passed"] = True
+    review["override"] = True
+    review["override_notes"] = notes
+    script["_review"] = review
+    runs = show.dir / "runs" / _episode_label(ep)
+    scripts = fsutil.existing_by_mtime(runs.glob("script.r*.json"))
+    if scripts:
+        scripts[-1].write_text(json.dumps(script, indent=2, ensure_ascii=False),
+                               encoding="utf-8")
+    return [f"{_episode_label(ep)} script review overridden — pipeline will proceed"]
+
+
 def reject_story(show_id: str, episode: int | str, notes: str = "no notes") -> list[str]:
     _set_story(show_id, episode, "rejected", notes)
     from .planner import reject_plan, reject_scene_details
@@ -469,3 +502,146 @@ def reject_story(show_id: str, episode: int | str, notes: str = "no notes") -> l
     # now returns True for a rejected plan, so the self-healer picks it up.
     return [f"{_episode_label(ep)} rejected — plan + scene details reset; "
             f"regenerating from your notes in the background…"]
+
+
+# ---------------------------------------------------------------------------
+# Gate 4 — per-shot approve/reject (rendered clips)
+# ---------------------------------------------------------------------------
+# Per-shot approval state lives in runs/EP##/shots.approval.json:
+#   { "<shot_id>": {"status": "approved"|"rejected"|"pending", "notes": "",
+#                   "revised_prompt": "…", "retake_count": N, "decided_at": "…"} }
+#
+# A REJECT deletes the shot's clip and stores a revised render prompt (LLM
+# rewrite of the current prompt from the rejection notes — the established
+# feedback loop, never raw append). The reconciler sees video_count < shot_count
+# and re-renders ONLY that shot with the stored revised prompt + a fresh seed.
+# Successive rejects further refine the SAME stored prompt (mirrors the
+# costume/object reject loop).
+
+
+def shot_approval_path(show: "Show | str", episode: int | str) -> Path:
+    s = show if isinstance(show, Show) else Show(show)
+    return s.dir / "runs" / _episode_label(episode) / "shots.approval.json"
+
+
+def shot_approvals(show: "Show | str", episode: int | str) -> dict[str, Any]:
+    p = shot_approval_path(show, episode)
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _save_shot_approvals(show: "Show | str", episode: int | str,
+                         data: dict[str, Any]) -> None:
+    p = shot_approval_path(show, episode)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def shot_state(show: "Show | str", episode: int | str, shot_id: str) -> dict[str, Any]:
+    return shot_approvals(show, episode).get(shot_id, {"status": "pending"})
+
+
+def approve_shot(show: "Show | str", episode: int | str, shot_id: str,
+                 notes: str = "") -> list[str]:
+    data = shot_approvals(show, episode)
+    entry = data.setdefault(shot_id, {})
+    entry["status"] = "approved"
+    entry["notes"] = notes or ""
+    entry["decided_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _save_shot_approvals(show, episode, data)
+    return [f"{shot_id} approved"]
+
+
+def reject_shot(show: "Show | str", episode: int | str, shot_id: str,
+                notes: str = "no notes", llm=None) -> list[str]:
+    """Reject ONE rendered shot and re-render it from the rejection feedback.
+
+    Records the rejection, LLM-revises the shot's stored render prompt from the
+    notes (persisting the revised prompt so successive rejects refine it), bumps
+    the retake counter, and deletes the clip so the reconciler re-renders ONLY
+    this shot with the revised prompt + a fresh seed. Returns user-facing
+    messages.
+
+    ``llm`` may be injected (tests); when None a client is built for the
+    configured LLM and the revision is best-effort (never a dead end).
+    """
+    from .qc import clear_shot_qc
+    s = show if isinstance(show, Show) else Show(show)
+    show_id = s.show_id
+    ep = _episode_num(episode)
+    label = _episode_label(ep)
+    sid = shot_id.strip()
+    runs = s.dir / "runs" / label
+
+    # Current prompt: last revised one (persisted) else the prepared/compiled one.
+    data = shot_approvals(s, ep)
+    entry = data.setdefault(sid, {})
+    current = entry.get("revised_prompt") or _current_shot_prompt(s, ep, sid)
+    revised = current
+    if notes.strip():
+        from .clients.lmstudio import LMStudioClient
+        from .prompts import revise_shot_prompt
+        cfg = get_config()
+        try:
+            llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=60)
+            model = (cfg.get("llm", "roles", {}).get("showrunner")
+                     or cfg.get("llm", "model"))
+            text = llm.chat([
+                {"role": "system", "content": (
+                    "You revise video-generation prompts for an anime production "
+                    "from the director's rejection notes.")},
+                {"role": "user", "content": revise_shot_prompt(current, notes)},
+            ], model=model, role="showrunner", temperature=0.4, max_tokens=1600, retries=1)
+            import re
+            m = re.search(r"\{.*\}", text or "", re.S)
+            if m:
+                parsed = json.loads(m.group(0))
+                candidate = (parsed.get("prompt") or "").strip()
+                if len(candidate) > 40:
+                    revised = candidate
+        except Exception:
+            pass  # keep the current prompt; still re-render from it
+
+    entry["status"] = "rejected"
+    entry["notes"] = notes
+    entry["revised_prompt"] = revised
+    entry["retake_count"] = int(entry.get("retake_count", 0) or 0) + 1
+    entry["decided_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    _save_shot_approvals(s, ep, data)
+
+    # Delete the clip so the reconciler re-renders this shot.
+    clip = runs / "video" / f"{sid}.mp4"
+    if clip.exists():
+        try:
+            clip.unlink()
+        except Exception:
+            pass
+    clear_shot_qc(s, ep, sid)
+    return [f"{sid} rejected — re-rendering from your notes (retake "
+            f"{entry['retake_count']}) in the background…"]
+
+
+def _current_shot_prompt(show: Show, episode: int, sid: str) -> str:
+    """The prompt the last render used for this shot: revised from shots.approval
+    json first, then the prepared prompts.json, else the compiled base."""
+    from .render import _latest_script, _load_prepared_prompts
+    script = _latest_script(show, episode)
+    if not script:
+        return ""
+    for sc in script.get("scenes", []):
+        for sh in sc.get("shots", []):
+            if sh.get("id") != sid:
+                continue
+            from .storyboard import _shot_refs
+            names, _ = _shot_refs(show, sh)
+            prepared = _load_prepared_prompts(show, episode)
+            entry = prepared.get(sid)
+            if entry and isinstance(entry, dict) and entry.get("rewritten"):
+                return entry["rewritten"]
+            from .render import compile_shot_prompt
+            return compile_shot_prompt(show, script, sc, sh, names)
+    return ""

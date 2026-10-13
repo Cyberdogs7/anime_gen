@@ -63,11 +63,34 @@ also has image refs (the model requires them together).
 
 ### Character refs (identity)
 Generated once at bootstrap under reference-sheet discipline
-(`studio/bootstrap.py:300`):
+(`studio/prompts.py:character_ref_prompt`, used by `bootstrap.py`,
+`casting.py`, `growth.py`):
 
-> `Anime character reference portrait of {name}. {appearance_canonical}. Full body,
-> front view, neutral standing pose, plain studio background, clean lineart,
-> consistent character design, high quality.` — aspect 3:4.
+> `Solo full-body portrait photo of one {woman|man|person}, {name},
+> standing alone facing the camera, {cleaned appearance_canonical}. Full body
+> head to feet, front view, neutral standing pose, arms relaxed at sides, plain
+> empty studio background, clean anime lineart, high quality.` — aspect 3:4.
+>
+> Three hard rules (the Krea 2 workflow zeroes its negative conditioning AND
+> runs Turbo at 8 steps / cfg 1, which has no negation handling):
+> 1. NEVER a "no ..." clause — every banned noun becomes a positive token
+>    (the v1 "no twin, no turnaround" tail rendered a front+back turnaround).
+> 2. NEVER meta vocabulary — "reference", "design", "sheet", "turnaround",
+>    "panel", "grid" trigger character sheets even inside negations.
+> 3. The canon MUST read as a single still image. `appearance_canonical` is
+>    authored as prose ("usually wears X", "signature look is Y", "when not in
+>    uniform…") which describes a *wardrobe* — and the model renders a wardrobe
+>    as several figures. `prompts._clean_canon_for_image` rewrites it before it
+>    enters the prompt: hedging phrases → present-tense "wearing", alternate-
+>    outfit sentences dropped, leftover subject pronouns stripped. The writers
+>    (`character_prompt`, `new_character_prompt`, `revise_appearance_prompt`,
+>    `casting._revise_appearance`) are also instructed via
+>    `appearance_canonical_rules` to WRITE the canon as an image prompt (one
+>    fixed head-to-toe outfit, no hedges, no wardrobe).
+> Singularity is positive facts only: one photo, one figure, one framing.
+> Every render is then VLM-checked (`consistency.render_until_single`, max 3
+> fresh-seed tries); a stubborn double is accepted for human review, never
+> blocking the show.
 
 Deliberately staged: neutral pose, plain background, minimal accessories. That makes
 the identity conditioning strong, so the ref stays reusable across every shot and

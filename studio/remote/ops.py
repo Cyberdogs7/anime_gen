@@ -418,7 +418,9 @@ class ServiceOps:
                     self._reload_llm("beast3")
 
     def generate_image(self, prompt: str, seed: int = 0, aspect_ratio: str = "16:9",
-                       out_path: str = "", use_lora: bool = False) -> dict[str, Any]:
+                       out_path: str = "", use_lora: bool = False,
+                       style_ref: str = "", style_weight: float = 0.6,
+                       style_weight_type: str = "style transfer") -> dict[str, Any]:
         import random
 
         from ..comfy_workflows import generate_keyframe, load_workflow
@@ -431,7 +433,10 @@ class ServiceOps:
             with self.krea2_gpu() as client:
                 seed = seed or random.randint(0, 2**63)
                 final = generate_keyframe(client, load_workflow(wf_path), prompt, seed, out,
-                                          aspect_ratio=aspect_ratio, use_lora=use_lora)
+                                          aspect_ratio=aspect_ratio, use_lora=use_lora,
+                                          style_ref=(style_ref or None),
+                                          style_weight=style_weight,
+                                          style_weight_type=style_weight_type)
                 return {"ok": True, "detail": f"generated {final} (seed={seed}) via {client.base_url}",
                         "path": str(final), "seed": seed, "host": client.base_url}
         except Exception as exc:

@@ -6,3 +6,54 @@ artifact_retake: true      # retake when the artifacts axis reports issues
 judge_frames: 5            # frames sampled per shot (start, 25, 50, 75, end)
 lip_sync_check: true       # sample dialogue-peak frames; degrade to ffmpeg_mux on fail
 boundary_ssim_min: 0.15    # cross-cut SSIM below this flags a jump cut for review
+
+# STT dialogue QC (garbled-audio detection): transcribe each rendered clip and
+# compare against the shot's script dialogue. Runs on CPU, never the GPU, so it
+# never contends with H3 for VRAM.
+stt:
+  enabled: true            # run after every shot render (inline, per-shot)
+  model: "small"           # faster-whisper size: tiny | base | small | medium | large-v3
+  device: "cpu"            # cpu keeps the GPU exclusively for H3 rendering
+  compute_type: "int8"
+  language: "en"
+  min_line_sim: 0.55       # per-expected-line word-overlap floor to count as matched
+  min_lines_covered: 0.5   # fraction of expected lines that must match to pass
+  min_explained: 0.70      # min fraction of the transcript accounted for by script lines.
+                           # Calibrated on EP01: clean clips 0.81-1.00, garbled 0.29-0.64.
+                           # Lower = H3 invented/garbled speech padding the clip.
+
+# Post-render visual check (Qwen3-VL on the GPU): sample frames from each rendered
+# clip and verify the characters match their approved references AND the scripted
+# action actually plays out. Runs AFTER an episode render completes (GPU free), so
+# it never contends with H3. Failures auto-feed the Shot gate as rejections (LLM
+# revises the prompt from the VL issues + retake), capped per shot.
+#
+# SERVER NOTE: `lmstudio` (frame-sampling via the local qwen/qwen3-vl-8b row) is
+# the reliably-working path on this machine. `vllm` (native whole-clip video via
+# WSL) requires UVA, which NVIDIA's WSL2 driver does not expose, and the local
+# FP8 checkpoint cannot load there (RuntimeError: UVA is not available); it is
+# only usable if you point it at a UVA-capable host. LM Studio's own endpoint
+# accepts only text + images (no video_url), so the lmstudio path samples frames.
+vcheck:
+  enabled: true
+  server: "lmstudio"           # lmstudio (frame sampling) | vllm (native video, needs UVA-capable host)
+  model: "qwen/qwen3-vl-8b"    # LM Studio model id (frame-sampling path)
+  frames: 8                    # frames sampled per clip (evenly spread across the timeline)
+  frame_sample_dim: 512        # short-side downscale for sampled frames (keeps more frames in context)
+  max_refs: 4                  # up to this many character ref images per call
+  temperature: 0.2
+  max_tokens: 3500
+  timeout_s: 300
+  auto_feed: true              # fail -> auto-reject into the shot gate (capped)
+  max_auto_retakes: 2          # auto-reject a shot at most this many times; then a human decides
+  schedule: "post_render"      # post_render | manual
+  vllm:
+    url: "http://127.0.0.1:8001/v1"
+    model: "Qwen3-VL-8B-Instruct-FP8"   # served model name in vLLM
+    distro: "Ubuntu-22.04"              # WSL2 distro hosting the vLLM server
+    venv_python: "~/vllm-venv/bin/python"
+    model_dir: "~/models/Qwen3-VL-8B-Instruct-FP8"
+    port: 8001
+    gpu_memory_utilization: 0.8          # fits 16 GB alongside the KV cache
+    max_model_len: 32768
+    max_video_frames: 32

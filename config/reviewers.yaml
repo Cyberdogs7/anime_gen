@@ -11,11 +11,12 @@ roles:
   - visual            # visual storytelling + production feasibility (not a radio play)
   - agency            # active vs passive protagonist, micro-arc, flaw/motivation, cost of decisions
   - serial            # multi-episode: arc stagnation, unearned leaps, relational dynamics
+  - repetition        # deterministic: N near-identical scenes (same location/content)
 
 # Plan-level (episode OUTLINE) review. The outline is reviewed BEFORE it drives
 # scene details + script, so plot/synopsis/scenes contradictions and cold-open
 # episode 1s are caught at the outline gate instead of after 20+ revisions.
-plan_max_revisions: 4
+plan_max_revisions: 6
 plan_roles:
   - structure          # plot vs synopsis vs scenes coherence, episode-1 context
 
@@ -25,10 +26,18 @@ thresholds:
   fanservice_quota_miss: true  # under-quota service scenes force a revision
   # Gate sensitivity for the added reviewers. 'block_any_note' fails the script if
   # the reviewer returns any note; 'block_high' fails only on HIGH-severity items.
-  voice_block: any          # any | high | never
-  exposition_block: any
-  pacing_block: any
-  stakes_block: any
-  visual_block: any
-  agency_block: any
+  # Deterministic repetition gate: N scenes sharing a location, or scene pairs whose
+  # content overlaps >= repetition_similarity, are a HIGH failure.
+  repetition_similarity: 0.6
+  repetition_min_cluster: 3
+  # Outline (structure) gate sensitivity: any | high | never.
+  # 'any' is the zero-issue default — ANY note blocks and forces another outline
+  # revision; 'high' restores HIGH-only blocking; 'never' is advisory only.
+  structure_block: any
+  voice_block: high          # any | high | never
+  exposition_block: high
+  pacing_block: high
+  stakes_block: high
+  visual_block: high
+  agency_block: high
   serial_block: high

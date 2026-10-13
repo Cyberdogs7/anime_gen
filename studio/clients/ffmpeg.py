@@ -194,3 +194,21 @@ def concat_clips(clip_paths: list[Path], out_path: Path) -> None:
     ])
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg concat failed: {proc.stderr[-500:]}")
+
+
+def concat_masters(master_paths: list[Path], out_path: Path) -> None:
+    """Concat per-scene masters (already seamless) into episode preview.
+
+    Masters are produced by H3Multishot with internal 40ms audio welds and
+    trimmed overlaps, so a simple demuxer concat is correct here (scene
+    boundaries are intentional cuts). Re-encodes audio to AAC for safety.
+    """
+    list_file = out_path.with_suffix(".txt")
+    list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in master_paths), encoding="utf-8")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = _run([
+        "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out_path),
+    ])
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg concat_masters failed: {proc.stderr[-500:]}")

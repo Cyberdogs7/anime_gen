@@ -1,0 +1,9 @@
+id: sable-voss_voice
+engine: qwen3_tts
+mode: designed
+speaker: null
+voice_description: Adult woman mid-20s, low smoky alto with a teasing rasp; fast and
+  clipped when hyped for a duel, drops to a slow deliberate drawl when claiming Ren;
+  laughs mid-sentence, only goes quiet when sincere
+speed: 1.0
+pitch: 0.0

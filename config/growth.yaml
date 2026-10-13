@@ -1,0 +1,11 @@
+season_episodes: 12
+plotline_cadence_episodes: 3
+max_new_characters_per_plotline: 2
+battle_cadence_episodes: 3
+arc_length_min: 1
+arc_length_max: 6
+battle_arc_length_min: 1
+battle_arc_length_max: 3
+plotlines_per_episode_min: 1
+plotlines_per_episode_max: 4
+cooldown_episodes: 4

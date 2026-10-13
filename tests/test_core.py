@@ -51,7 +51,7 @@ def test_broker_round_trip():
 
 def test_duration_grid():
     grid = valid_durations()
-    assert grid[0][1] == 107 and grid[-1][1] == 345  # 17k+5 envelope
+    assert grid[0][1] == 107 and grid[-1][1] == 719  # 17k+5 envelope (k=6..42)
     assert snap_duration(10.0) == (14, 243, 10.125)
     assert snap_duration(5.0) == (7, 124, 5.166666666666667)
 

@@ -1,4 +1,4 @@
-# Pipeline runtime configuration. See DESIGN.md §15 (modes/throughput), §17 (event source).
+﻿# Pipeline runtime configuration. See DESIGN.md Â§15 (modes/throughput), Â§17 (event source).
 mode: overnight            # overnight | continuous | hybrid
 nightly_time: "02:00"      # timer source publishes RunRequested at this time each night
 budget_min: 480            # nightly budget per show (or split across enabled shows)
@@ -8,14 +8,31 @@ max_retakes_per_shot: 2
 max_revisions: 2           # writers'-room review loop cap (Stage 2a)
 fallback_local: true       # if the SMB share is down, run image/TTS/assembly on node A
 
-resolution: [1344, 768]    # 16:9 native H3 canvas (768 short edge)
+resolution: [864, 480]    # 864x480 ~0.41MP - 2.3x faster than 1280x736 for testing; bump to 1280x736 for final
 fps: 24
 h3_rewrite_prompt: false    # true: run shot prompts through the local LLM (H3-Context-IR style rewriter) before render
-default_shot_duration_s: 10.125   # grid k=14 (243 frames)
-insert_shot_duration_s: 5.167     # grid k=7 (124 frames)
+default_shot_duration_s: 10.125   # grid k=14 (243 frames) - legacy per-shot
+insert_shot_duration_s: 5.167     # grid k=7 (124 frames) - legacy per-shot
 hero_best_of: 2                   # hero shots render N seeds, keep best composite
 
+# H3 Multishot seamless chaining (joeygambino/MiniMax-H3-Multishot v2.6.3)
+# When enabled, scenes render as one master per scene via H3MultishotSampler.
+multishot:
+  enabled: false              # per-scene masters OFF — back to per-shot ReferenceToVideo + last-frame anchor + ffmpeg concat
+  continuity: first_frame     # kept for reference; not used while enabled:false
+  frames_per_shot: 124        # 124=5.17s fastest
+  steps: 8
+  take_seconds: 0              # 0 = one window per prompt block (---); >0 = extend take auto-windowed
+  chain_gain_control: flatten  # flatten | off - texture ratchet mitigation
+  master_normalize: luma+contrast
+  seed_per_shot: true
+  preview_first_shot: true
+  low_ram_master: false        # stream to disk for long chains / <32GB RAM
+  remote_encoder: false
+
 pause_storyboard: false  # debug: stop reconciler from generating storyboards
+auto_start_episode: true   # hands-free: reconciler starts the next episode once the season is approved
 stale_job_s: 1800        # storyboard/render job with no progress this long is declared hung and restarted
+
 
 

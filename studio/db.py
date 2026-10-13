@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS continuity(
 CREATE TABLE IF NOT EXISTS qc_results(
   id TEXT PRIMARY KEY, shot_id TEXT, checks_json TEXT, composite REAL,
   verdict TEXT, passed INT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS vcheck_results(
+  id TEXT PRIMARY KEY, shot_id TEXT, checks_json TEXT, verdict TEXT,
+  passed INT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS script_reviews(
   id TEXT PRIMARY KEY, run_id INT, show_id TEXT, episode INT, round INT,
   reviewer TEXT, script_version TEXT, status TEXT, score REAL, notes_json TEXT, created_at TEXT,

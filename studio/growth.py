@@ -20,6 +20,7 @@ from typing import Any
 from . import prompts
 from .bootstrap import ACTIVITY
 from .config import get_config
+from .names import looks_like_character_name
 from .show import Show
 
 log = logging.getLogger(__name__)
@@ -49,12 +50,13 @@ def review_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
             if c.get("name")] or (bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("growth_reviewer") or roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(cfg["show_profile"], bible.get("content_policy", "mature"),
-                                       cfg["show_profile"].get("baseline", "ranma-1-2"))
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+                                       show.style_profile(cfg).get("baseline", ""))
     user = prompts.new_plotline_review_prompt(bible, existing, cast, proposal, episode)
     data = llm.chat_json([{"role": "system", "content": system},
                           {"role": "user", "content": user}],
-                         model=model, temperature=0.2, max_tokens=4096)
+                         model=model, temperature=0.2, max_tokens=4096,
+                         role="growth_reviewer")
     if not isinstance(data, dict):
         data = {}
     approved = bool(data.get("approved"))
@@ -76,12 +78,13 @@ def review_new_character(show: Show, name: str, plotline: dict[str, Any],
             if c.get("name")] or (bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("growth_reviewer") or roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(cfg["show_profile"], bible.get("content_policy", "mature"),
-                                       cfg["show_profile"].get("baseline", "ranma-1-2"))
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+                                       show.style_profile(cfg).get("baseline", ""))
     user = prompts.new_character_review_prompt(bible, cast, name, plotline, episode)
     data = llm.chat_json([{"role": "system", "content": system},
                           {"role": "user", "content": user}],
-                         model=model, temperature=0.2, max_tokens=2048)
+                         model=model, temperature=0.2, max_tokens=2048,
+                         role="growth_reviewer")
     if not isinstance(data, dict):
         data = {}
     return {"approved": bool(data.get("approved")), "notes": data.get("notes", []) or []}
@@ -121,6 +124,13 @@ def generate_new_character(show: Show, name: str, plotline: dict[str, Any],
     """
     from .clients.lmstudio import LMStudioClient
     cfg = cfg or get_config()
+    if not looks_like_character_name(name):
+        log.warning("growth: refusing to create a character from a non-name: %r", name)
+        return None
+    objects = {str(o).strip().lower() for o in (plotline.get("objects") or [])}
+    if name.strip().lower() in objects:
+        log.warning("growth: %r is a plotline OBJECT, not a character", name)
+        return None
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
     bible = show.read_bible()
     existing = [show.read_character(cid) for cid in show.list_characters()]
@@ -128,15 +138,15 @@ def generate_new_character(show: Show, name: str, plotline: dict[str, Any],
         bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(cfg["show_profile"], bible.get("content_policy", "mature"),
-                                       cfg["show_profile"].get("baseline", "ranma-1-2"))
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+                                       show.style_profile(cfg).get("baseline", ""))
     ACTIVITY[show.show_id] = {"detail": f"Growth: proposing new character {name}…",
                               "ts": time.time()}
     proposal = llm.chat_json(
         [{"role": "system", "content": system},
          {"role": "user", "content": prompts.new_character_prompt(
              bible, cast, name, plotline)}],
-        model=model, temperature=0.7, max_tokens=4096)
+        model=model, temperature=0.7, max_tokens=4096, role="showrunner")
     if not isinstance(proposal, dict) or not proposal.get("name"):
         return None
     proposal["name"] = name
@@ -170,20 +180,38 @@ def _generate_ref(show: Show, char: dict[str, Any], cfg=None) -> None:
     if not krea2.get("url"):
         return
     try:
+        from .clients.lmstudio import LMStudioClient
+        from .consistency import render_until_single
         from .remote import ServiceOps
         name = char.get("name", "")
         canon = (char.get("appearance_canonical") or "").strip()
-        prompt = (f"Anime character reference portrait of {name}. {canon}".rstrip(" .")
-                  + ". Full body, front view, neutral standing pose, plain studio "
-                    "background, clean lineart, consistent character design, high quality.")
+        style = ((show.read_bible() or {}).get("style_guide") or "").strip()
+        prompt = prompts.character_ref_prompt(name, canon, style)
         rd = show.character_refs_dir(char.get("id", ""))
         rd.mkdir(parents=True, exist_ok=True)
         out = rd / f"{char.get('id', 'char')}_ref_01.png"
-        res = ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="3:4",
-                                             out_path=str(out))
-        if res.get("ok") and out.exists():
+        ops = ServiceOps(cfg)
+        seeds: list[int] = []
+
+        def _render() -> bool:
+            anchor = show.dir / "style_anchor.png"
+            use_anchor = cfg.get("comfy", "style_anchor", False)
+            res = ops.generate_image(prompt, seed=0, aspect_ratio="3:4",
+                                     out_path=str(out),
+                                     style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
+            seeds.append(int(res.get("seed", 0)))
+            return bool(res.get("ok") and out.exists())
+
+        vmodel = (cfg.get("llm", "roles", {}).get("describer")
+                  or cfg.get("llm", "model"))
+        gate = render_until_single(
+            _render, out,
+            llm=LMStudioClient(cfg.get("llm", "base_url"), timeout=240),
+            model=vmodel, label=f"base ref {name}")
+        if gate["ok"]:
             (rd / "refs.json").write_text(json.dumps(
-                {"status": "real", "refs": [out.name], "seed": res.get("seed", 0)},
+                {"status": "real", "refs": [out.name],
+                 "seed": seeds[-1] if seeds else 0},
                 ensure_ascii=False), encoding="utf-8")
         else:
             (rd / "refs.json").write_text(
@@ -220,7 +248,8 @@ def process_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
 
     plotline = approve_new_plotline(show, verdict["plotline"], episode)
     _persist_continuity(show, plotline, episode)
-    names = [n for n in (plotline.get("characters") or []) if n]
+    names = [n for n in (plotline.get("characters") or [])
+             if n and looks_like_character_name(n)]
     existing = {c.get("name") for c in
                 (show.read_character(cid) for cid in show.list_characters())}
     new_names = [n for n in names if n not in existing]
@@ -248,31 +277,18 @@ def commit_plotline_on_approval(show: Show, featured_ids: list[str],
                                 new_arc_length: int | None = None) -> None:
     """Commit plotline bookkeeping ONLY when an episode plan is APPROVED.
 
-    Runs the persistence that used to happen inside develop_episode — stamping
-    last_seen on featured plotlines, applying the ARC/COOLDOWN roll, and
-    persisting a reviewed new plotline (bible canon + continuity + character
-    sheets) — but only after the outline has been approved. A rejected or deleted
-    episode therefore never mutates continuity, so regenerating EP01 cannot keep
-    re-growing the same plotlines.
+    SEASON-FIRST: the season plan already lays out every episode's featured
+    plotlines across the 12-episode arc, so there is no roll and no
+    arc/cooldown bookkeeping. This stamps last_seen on featured plotlines,
+    persists a season-introduced new plotline (bible canon + continuity +
+    character sheets), and records last_battle_episode. ``arc_lengths`` /
+    ``new_arc_length`` are accepted for backward compatibility and ignored.
 
-    Arc bookkeeping (from ``roll_episode_plotlines``):
-    - A plotline just rolled into an arc gets ``arc_remaining = length - 1`` (the
-      current episode consumed one).
-    - A plotline that was already running gets its ``arc_remaining`` decremented.
-    - When ``arc_remaining`` hits 0 the thread enters a cooldown (no longer
-      selectable) for ``cooldown_episodes``.
-    - Every plotline's ``cooldown_remaining`` ticks down by 1 each approved
-      episode; when it reaches 0 the thread is eligible again (a fresh arc length
-      is rolled the next time it is selected).
-    - A newly invented plotline (NEW roll) is persisted with its rolled arc.
-
-    Also records ``last_battle_episode`` when a battle episode is approved so the
-    battle cadence throttle in development knows how recently combat aired.
+    A rejected or deleted episode never mutates continuity, so regenerating an
+    episode cannot re-grow the same plotlines.
     """
     from .development import _overall_state, _plotline_state, _record_seen
     cfg = cfg or get_config()
-    cooldown_episodes = int(cfg.get("growth", "cooldown_episodes", 4) or 4)
-    arc_lengths = arc_lengths or {}
     bible = show.read_bible()
     continuity = show.read_continuity()
     plotlines = _plotline_state(show, bible)
@@ -281,34 +297,7 @@ def commit_plotline_on_approval(show: Show, featured_ids: list[str],
             "new_plotline": new_plotline}
     _record_seen(show, continuity, episode, data, plotlines, overall)
 
-    # Apply the arc/cooldown roll for every plotline.
     cont = show.read_continuity()
-    by_id = {p.get("id"): p for p in cont.get("plotlines", []) or []}
-    featured_set = set(featured_ids)
-    for pid, p in by_id.items():
-        # Tick down any active cooldown.
-        cd = int(p.get("cooldown_remaining", 0) or 0)
-        if cd > 0:
-            p["cooldown_remaining"] = max(0, cd - 1)
-        else:
-            p.setdefault("cooldown_remaining", 0)
-        # Feature this thread this episode: start/continue its arc.
-        if pid in featured_set:
-            if pid in arc_lengths:
-                # Freshly rolled this episode: length - 1 episodes remain.
-                p["arc_remaining"] = max(0, int(arc_lengths[pid]) - 1)
-            else:
-                # Already running: consume one episode.
-                p["arc_remaining"] = max(0, int(p.get("arc_remaining", 0) or 0) - 1)
-            if int(p.get("arc_remaining", 0) or 0) <= 0:
-                p["cooldown_remaining"] = cooldown_episodes
-    # A NEW plotline that was invented gets its own arc applied.
-    if isinstance(new_plotline, dict) and new_plotline.get("id"):
-        nid = new_plotline["id"]
-        if nid in by_id:
-            by_id[nid]["arc_remaining"] = max(0, int(new_arc_length or 1) - 1)
-            by_id[nid]["cooldown_remaining"] = 0
-    cont["plotlines"] = list(by_id.values())
     if str(episode_type or "").lower() == "battle":
         cont["last_battle_episode"] = episode
     show.write_continuity(cont)
@@ -318,9 +307,8 @@ def commit_plotline_on_approval(show: Show, featured_ids: list[str],
     if isinstance(new_plotline, dict) and new_plotline.get("id"):
         if new_plotline["id"] not in _plotline_ids(show.read_bible()):
             np = approve_new_plotline(show, new_plotline, episode)
-            np["arc_remaining"] = max(0, int(new_arc_length or 1) - 1)
-            np["cooldown_remaining"] = 0
-            names = [n for n in (np.get("characters") or []) if n]
+            names = [n for n in (np.get("characters") or [])
+                     if n and looks_like_character_name(n)]
             existing = {c.get("name") for c in
                         (show.read_character(cid) for cid in show.list_characters())}
             for n in [x for x in names if x not in existing][:2]:

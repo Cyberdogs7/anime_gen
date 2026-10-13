@@ -6,7 +6,7 @@ import shutil
 
 import yaml
 
-from .config import get_config
+from .config import DEFAULT_RUNTIME_TARGET_S, get_config
 from .db import DB
 from .show import Show
 
@@ -27,9 +27,11 @@ def _skeleton(show_id: str) -> None:
             "genre": cfg.get("show_profile", "genre", []),
             "tone": cfg.get("show_profile", "tone", []),
             "language": "en",
-            "runtime_target_s": cfg.get("show_profile", "runtime_target_s", 1320),
+            "runtime_target_s": cfg.get("show_profile", "runtime_target_s", DEFAULT_RUNTIME_TARGET_S),
             "style_guide": "",  # filled by the Gate 0 bootstrap
-            "quality_baseline": cfg.get("show_profile", "baseline", "ranma-1-2"),
+            # Per-show style references (set these in the show's bible).
+            "baseline": "",
+            "fanservice_baseline": "",
         },
         "arcs": [],
         "overall_plotline": None,

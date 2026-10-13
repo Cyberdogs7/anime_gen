@@ -13,20 +13,85 @@ concurrency_limit: 4
 gpu_guard_urls:
   - "http://127.0.0.1:8188"
   - "http://127.0.0.1:8189"
-model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-context: 131072   # gemma-4 12B: 256k native; 131072 (128k) keeps it fully GPU-resident
+model: "dolphin-2.9.3-mistral-nemo-12b"
+context: 131072
+
+# Output-token cap. max_output_tokens / max_tokens are OPTIONAL on both APIs, and
+# every model/server already caps its own output; unused budget is free (billing is
+# on ACTUAL tokens). So the client sends NO cap by default (0): omitting the field
+# lets the server/model decide, and a low client cap only truncates a reasoning
+# model (empty responses, unparseable JSON, spurious fallback to local).
+#   0 = no client cap (default).  N>0 = optional ceiling: send max(caller hint, N).
+max_output_tokens: 0
 
 # Role -> model assignment. Model names must be loaded in LM Studio's catalog.
+# Text-only roles use dolphin; vision roles (describer) use Qwen3-VL.
 roles:
-  showrunner: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  bible: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  script: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  judge: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  slop_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  continuity_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  fan_service_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  growth_reviewer: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
-  describer: ""            # vision model (e.g. Qwen2.5-VL) - optional at M0
+  showrunner: "dolphin-2.9.3-mistral-nemo-12b"
+  bible: "dolphin-2.9.3-mistral-nemo-12b"
+  script: "dolphin-2.9.3-mistral-nemo-12b"
+  judge: "dolphin-2.9.3-mistral-nemo-12b"
+  slop_reviewer: "dolphin-2.9.3-mistral-nemo-12b"
+  continuity_reviewer: "dolphin-2.9.3-mistral-nemo-12b"
+  fan_service_reviewer: "dolphin-2.9.3-mistral-nemo-12b"
+  growth_reviewer: "dolphin-2.9.3-mistral-nemo-12b"
+  describer: "qwen/qwen3-vl-8b"   # vision model for frame/image analysis
 
 gpu_offload: true          # if false, LLM runs on CPU during render phases
 evict_before_render: true  # unload LLM before Krea 2 / H3 renders (per-node GPU manager)
+
+# OpenCode GO remote models (https://opencode.ai/docs/go — $10/mo, key at
+# https://opencode.ai/auth). Text prompts go remote-first and fall back to
+# local LM Studio on transport errors AND on content-policy refusals — local
+# dolphin stays for the highly explicit scenes remote models won't write.
+# The key is read from the opencode auth.json (account "opencode-go"); the
+# environment variable is NOT consulted. Without a key the studio is exactly
+# today's local-only setup.
+#
+# GO vs Zen are separate namespaces: GO is .../zen/go/v1 (subscription limits
+# below); Zen is .../zen/v1 (pure pay-as-you-go). This section defaults to GO.
+# Non-GO users: point base_url at https://opencode.ai/zen/v1 and pick a Zen
+# model (e.g. kimi-k2.5, deepseek-v4-flash, glm-5.3-flash, minimax-m3).
+zen:
+  enabled: true
+  base_url: "https://opencode.ai/zen/go/v1"
+  # Key is ALWAYS read from the opencode auth.json (account "opencode-go" by
+  # default) — the environment is never consulted. auth_file empty = the
+  # standard ~/.local/share/opencode/auth.json; $OPENCODE_AUTH_FILE overrides
+  # the path.
+  auth_file: ""
+  auth_account: "opencode-go"
+  # Default remote model for every text role. Muse Spark 1.3 Contributor lives
+  # on GO's /responses endpoint ($0.10/$0.20 per 1M, $60/mo cap) and takes
+  # image + video inputs natively. Chat-style alternatives (auto-selected per
+  # model): kimi-k2.6, kimi-k3, deepseek-v4-pro ($15/mo caps — a few episodes
+  # per month at pipeline token volumes), mimo-v2.6-flash / deepseek-v4-flash
+  # (cheapest workhorses). NOTE: claude-*/qwen* /messages-only models are not
+  # spoken by this client (calls fall back local with a warning).
+  # Full GO list: https://opencode.ai/docs/go/#endpoints
+  model: "muse-spark-1.3-contributor"
+  # Endpoint routing per model (fnmatch): /responses vs /chat/completions.
+  responses_models: ["muse-spark-*", "gpt-*", "grok-*"]
+  # Optional per-role override: {"<local model name>": "<zen model>"}.
+  # Callers keep passing local role model names; these map to remote ones.
+  model_map: {}
+  # REMOTE MODEL SELECTION per llm role name. Example: give the heavy creative
+  # writing to kimi-k3 while cheap flash models do review duty:
+  #   roles:
+  #     showrunner: "kimi-k3"
+  #     script: "kimi-k3"
+  #     slop_reviewer: "mimo-v2.6-flash"
+  #     continuity_reviewer: "deepseek-v4-flash"
+  # Calls carrying role= use it directly; other calls reverse-match their
+  # local model name to a uniquely configured role. Empty = model/model_map.
+  roles: {}
+  # Remote vision. Responses-style models (Spark) take image + video natively;
+  # chat-style vision models (e.g. deepseek-v4-flash-vision-exp) get video
+  # resampled to still frames first. Undecodable clips or disabled vision
+  # fall back local.
+  vision:
+    enabled: true
+    model: "muse-spark-1.3-contributor"
+    frames_per_video: 6     # chat-style vision models only
+    frame_dim: 512          # chat-style vision models only
+  timeout: 180              # seconds per remote attempt

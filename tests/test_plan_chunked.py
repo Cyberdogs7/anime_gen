@@ -39,6 +39,23 @@ class ChunkLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
+        if "full 12-episode anime season" in user or "full season of high-level" in user:
+            return {
+                "season": 1, "title": "Season One",
+                "season_arc": {"premise": "p", "central_conflict": "c",
+                               "escalation": "e", "finale_payoff": "f"},
+                "episodes": [
+                    {"episode": i, "title": f"EP{i}", "episode_type": "character",
+                     "logline": "A day in the life.",
+                     "featured_plotlines": ["p1"], "new_plotline": None,
+                     "key_beats": ["beat a", "beat b"],
+                     "cliffhanger": "hook", "character_arc": "grows"}
+                    for i in range(1, 13)],
+            }
+        if "The season plan has FIXED this episode" in user:
+            return {"episode": 1, "episode_type": "character",
+                    "featured_plotlines": [{"id": "p1", "role": "advanced"}],
+                    "new_plotline": None, "synopsis": "A day in the life."}
         if "Development stage" in user:
             return {"episode": 1, "episode_type": "character",
                     "featured_plotlines": [{"id": "op", "role": "advanced"}],

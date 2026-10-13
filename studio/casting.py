@@ -13,14 +13,28 @@ import re
 import time
 from typing import Any
 
+from . import fsutil, prompts
 from .bootstrap import ACTIVITY
 from .config import get_config
+from .names import looks_like_character_name  # noqa: F401  (re-exported)
 from .show import Show
+
+
+def _style_ref(show: Show) -> str | None:
+    """The house-style anchor for IPAdapter, or None when off/absent.
+
+    Gated by ``comfy.style_anchor``: the SDXL ip-adapter has no effect on krea2.
+    """
+    if not get_config().get("comfy", "style_anchor", False):
+        return None
+    p = show.dir / "style_anchor.png"
+    return str(p) if p.exists() else None
+
 
 
 def _latest_script(show: Show, episode: int) -> dict[str, Any] | None:
     d = show.dir / "runs" / f"EP{episode:02d}"
-    scripts = sorted(d.glob("script.r*.json"), key=lambda p: p.stat().st_mtime)
+    scripts = fsutil.existing_by_mtime(d.glob("script.r*.json"))
     if not scripts:
         return None
     return json.loads(scripts[-1].read_text(encoding="utf-8"))
@@ -57,11 +71,12 @@ def _approved_names(show: Show) -> set[str]:
     return approved
 
 
-# A group-count marker on a character name: "Chitinous Marauder Pods (x6)",
-# "Marauder Pods x6", "(6)"… A count is a SCENE fact (how many of that unit
-# appear), not part of the character's identity — the ref must be ONE unit.
-# A bare trailing number like "Apex-734" is a DESIGNATION, not a count, so the
-# marker must be parenthesized/bracketed or explicitly prefixed with "x".
+# A group-count marker on a character name, e.g. "Swarmer Pods (x6)",
+# "Swarmer Pods x6", "(6)"... A count is a SCENE fact (how many of that unit
+# appear), not part of the character's identity - the ref must be ONE unit.
+# A bare trailing number (an entity DESIGNATION such as "Unit-734") is NOT a
+# count, so the marker must be parenthesized/bracketed or explicitly prefixed
+# with "x".
 _GROUP_COUNT_RE = re.compile(
     r"[\s]*[\(\[][\s]*x?\s*(\d+)\s*[\)\]]\s*$"   # (x6), (6), [x6]
     r"|[\s]*x\s*(\d+)\s*$",                       # x6 (no brackets)
@@ -71,8 +86,8 @@ _GROUP_COUNT_RE = re.compile(
 def _unit_name(name: str) -> str:
     """De-quantify + de-pluralize a group character name into a single unit.
 
-    'Chitinous Marauder Pods (x6)' -> 'Chitinous Marauder Pod'. A ref generated
-    from this name describes ONE pod; the scene's action text still says how many.
+    e.g. 'Swarmer Pods (x6)' -> 'Swarmer Pod'. A ref generated from this name
+    describes ONE unit; the scene's action text still says how many.
     """
     s = (name or "").strip()
     m = _GROUP_COUNT_RE.search(s)
@@ -90,8 +105,8 @@ def _unit_name(name: str) -> str:
 def _unit_key(name: str) -> str:
     """Normalized key for matching a script name to a character sheet/ref.
 
-    'Chitinous Marauder Pods (x6)', 'Chitinous Marauder Pods' and
-    'Chitinous Marauder Pod' all key to 'chitinous marauder pod'.
+    e.g. 'Swarmer Pods (x6)', 'Swarmer Pods' and 'Swarmer Pod' all key to
+    'swarmer pod'.
     """
     return _unit_name(name).lower()
 
@@ -105,8 +120,9 @@ def _revise_appearance(llm, model: str, name: str, current: str, notes: str) -> 
          f"Character: {name}\n"
          f"CURRENT APPEARANCE:\n{current}\n"
          f"DIRECTOR'S FEEDBACK:\n{notes}\n"
+         + prompts.appearance_canonical_rules() + "\n"
          'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
-    ], model=model, temperature=0.6, max_tokens=1200)
+    ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
     try:
         s = text[text.find("{"): text.rfind("}") + 1]
         return (json.loads(s).get("appearance_canonical") or "").strip()
@@ -118,13 +134,14 @@ def regenerate_character_ref(show: Show, name: str, notes: str = "",
                              cfg=None, llm=None) -> bool:
     """Feedback-driven regeneration of a character's BASE reference image.
 
-    Works for bootstrap AND episode-supporting characters (Apex-734, group units):
-    finds the sheet by unit name, revises the appearance from the notes (LLM),
-    re-renders the ref via Krea 2, and rewrites refs.json. Returns True when a
-    fresh ref image landed.
+    Works for bootstrap AND episode-supporting characters (enemy units, group
+    units): finds the sheet by unit name, revises the appearance from the notes
+    (LLM), re-renders the ref via Krea 2, and rewrites refs.json. Returns True
+    when a fresh ref image landed.
     """
     from .clients.lmstudio import LMStudioClient
     from .comfy_workflows import generate_keyframe, load_workflow
+    from .consistency import render_until_single
     from .remote.ops import ServiceOps
 
     cfg = cfg or get_config()
@@ -139,6 +156,7 @@ def regenerate_character_ref(show: Show, name: str, notes: str = "",
     cid, c = target
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
     model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
+    vmodel = cfg.get("llm", "roles", {}).get("describer") or model
     canon = (c.get("appearance_canonical") or "").strip()
     if notes.strip():
         revised = _revise_appearance(llm, model, c.get("name", ""), canon, notes)
@@ -156,19 +174,35 @@ def regenerate_character_ref(show: Show, name: str, notes: str = "",
             out.unlink()
     except Exception:
         pass
-    prompt = (f"Anime character reference portrait of {c.get('name')}. {canon}".rstrip(" .")
-              + ". Full body, front view, neutral standing pose, plain studio background, "
-                "clean lineart, consistent character design, high quality.")
+    style = ((show.read_bible() or {}).get("style_guide") or "").strip()
+    prompt = prompts.character_ref_prompt(c.get('name', ''), canon, style)
     ops = ServiceOps(cfg)
     wf_path = cfg.workflows_dir / "image_keyframe.json"
+    wf = load_workflow(wf_path)
     client, stop = ops._krea2_client()
     try:
-        generate_keyframe(client, load_workflow(wf_path), prompt, 0, str(out),
-                          aspect_ratio="3:4")
-        (refs_dir / "refs.json").write_text(
-            json.dumps({"status": "real", "refs": [out.name],
-                        "variants": {"base": out.name}}),
-            encoding="utf-8")
+        def _render() -> bool:
+            generate_keyframe(client, wf, prompt, 0, str(out),
+                              aspect_ratio="3:4", style_ref=_style_ref(show))
+            return out.exists()
+
+        gate = render_until_single(_render, out, llm=llm, model=vmodel,
+                                   label=f"base ref {c.get('name', '')}")
+        if not gate["ok"]:
+            return False
+        # Preserve any existing costume variants / prompts / approvals — a base-ref
+        # regen must NOT wipe the character's other registered refs.
+        rj = refs_dir / "refs.json"
+        prior: dict[str, Any] = {}
+        if rj.exists():
+            try:
+                prior = json.loads(rj.read_text(encoding="utf-8")) or {}
+            except Exception:
+                prior = {}
+        variants = dict(prior.get("variants") or {})
+        variants["base"] = out.name
+        prior.update({"status": "real", "refs": [out.name], "variants": variants})
+        rj.write_text(json.dumps(prior, ensure_ascii=False), encoding="utf-8")
     except Exception:
         return False
     finally:
@@ -178,13 +212,19 @@ def regenerate_character_ref(show: Show, name: str, notes: str = "",
 
 
 def _ask_appearance(llm, model: str, name: str, context: str) -> str:
+    """Write a rich, image-prompt-style appearance_canonical for a supporting
+    character — the SAME discipline the main cast uses (appearance_canonical_rules),
+    not the old terse '1-3 sentences' ask, so the ref renders in one fixed look."""
     text = llm.chat([
         {"role": "user", "content":
-         f"Write a canonical appearance description of the anime character '{name}' for image "
-         "generation: hair color and style, eye color, outfit, build. 1-3 vivid sentences.\n"
-         f"How the episode depicts them: {context or 'a supporting character in this episode'}\n"
+         f"Write the canonical appearance for the anime character '{name}'.\n"
+         f"How the episode depicts them: {context or 'a supporting character in this episode'}\n\n"
+         + prompts.appearance_canonical_rules() + "\n\n"
+         "MANDATORY: name the single outfit they wear, head to toe (garments, "
+         "colors, materials, footwear). The character is NEVER nude or "
+         "underwear-only — always fully dressed in the outfit.\n\n"
          'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
-    ], model=model, temperature=0.6, max_tokens=1200)
+    ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
     try:
         s = text[text.find("{"): text.rfind("}") + 1]
         return (json.loads(s).get("appearance_canonical") or "").strip()
@@ -214,6 +254,7 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
     from .clients.lmstudio import LMStudioClient
     from .remote.ops import ServiceOps
     from .comfy_workflows import generate_keyframe, load_workflow
+    from .consistency import render_until_single
 
     cfg = cfg or get_config()
     script = _latest_script(show, episode)
@@ -227,13 +268,17 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
     from .planner import read_episode_plan
     plan = read_episode_plan(show, episode)
     threat = (plan.get("threat_of_the_week") or "").strip()
-    if threat and threat not in cast:
+    if (threat and threat.lower() != "none"
+            and looks_like_character_name(threat) and threat not in cast):
         cast.append(threat)
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
     model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
+    vmodel = cfg.get("llm", "roles", {}).get("describer") or model
     approved = _approved_names(show)
     approved_units = {_unit_key(n) for n in approved}
-    missing = [name for name in cast if _unit_key(name) not in approved_units][:max_new]
+    missing = [name for name in cast
+               if _unit_key(name) not in approved_units
+               and looks_like_character_name(name)][:max_new]
     if not missing:
         return []
 
@@ -274,14 +319,24 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
             refs_dir = show.character_refs_dir(slug)
             refs_dir.mkdir(parents=True, exist_ok=True)
             out = refs_dir / f"{slug}_ref_01.png"
-            prompt = (f"Anime character reference portrait of {name}. {canon}".rstrip(" .")
-                      + ". Full body, front view, neutral standing pose, plain studio "
-                        "background, clean lineart, consistent character design, high quality.")
+            # Use the de-quantified unit name (ONE pod, not "Pods (x6)") so a
+            # group-count suffix never asks the model for multiple figures.
+            style = ((show.read_bible() or {}).get("style_guide") or "").strip()
+            prompt = prompts.character_ref_prompt(unit, canon, style)
             ACTIVITY[show.show_id] = {"detail": f"Ref pass: rendering ref for {name} (Krea 2)…",
                                       "ts": time.time()}
             try:
-                generate_keyframe(client, load_workflow(wf_path), prompt, 0, str(out),
-                                  aspect_ratio="3:4")
+                wf = load_workflow(wf_path)
+
+                def _render(name=name, out=out, prompt=prompt, wf=wf) -> bool:
+                    generate_keyframe(client, wf, prompt, 0, str(out),
+                                      aspect_ratio="3:4", style_ref=_style_ref(show))
+                    return out.exists()
+
+                gate = render_until_single(_render, out, llm=llm, model=vmodel,
+                                           label=f"base ref {name}")
+                if not gate["ok"]:
+                    raise RuntimeError("krea2 render produced no image")
                 (refs_dir / "refs.json").write_text(
                     json.dumps({"status": "real", "refs": [out.name],
                                 "variants": {"base": out.name}}),

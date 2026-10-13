@@ -26,100 +26,39 @@ def _show(tmp_path) -> Show:
     return show
 
 
-class _KeyItemsLLM:
-    """The model returns only KEY items — the whole point of the LLM extraction."""
-
-    def __init__(self, objects):
-        self.objects = objects
-        self.prompt = ""
-
-    def chat_json(self, messages, **kwargs):
-        self.prompt = messages[-1]["content"]
-        return {"objects": self.objects}
+def _write_plan(show: Show, episode: int, objects: list[str]) -> None:
+    """Write a minimal plan.json with the given objects list."""
+    plan_dir = show.dir / "runs" / f"EP{episode:02d}"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    plan = {"episode": episode, "objects": objects, "scenes": []}
+    (plan_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
 
 
-def test_llm_recurring_objects_keeps_key_items_only(tmp_path):
+def test_llm_recurring_objects_reads_from_plan(tmp_path):
     show = _show(tmp_path)
-    script = {"summary": "The crew tries to steal the Hellbringer Cannon.",
-              "scenes": [{"shots": [
-                  {"action": "Blade drives the Hellbringer Cannon", "camera": "Shallow Depth Of Field"},
-                  {"action": "Dahlia secures the Hellbringer Cannon", "camera": "Rack Focus"},
-              ]}]}
-    llm = _KeyItemsLLM(["The Hellbringer Cannon", "Blade's Motorcycle"])
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
+    _write_plan(show, 1, ["The Hellbringer Cannon", "Blade's Motorcycle"])
+    objs = _llm_recurring_objects(show, 1, {})
     assert objs == ["The Hellbringer Cannon", "Blade's Motorcycle"]
-    # The prompt gave the model the whole story + warned about camera language.
-    assert "EPISODE STORY" in llm.prompt
-    assert "Hellbringer Cannon" in llm.prompt
 
 
-def test_llm_recurring_objects_never_falls_back_to_regex(tmp_path):
+def test_llm_recurring_objects_empty_when_no_plan(tmp_path):
     show = _show(tmp_path)
-    script = {"scenes": [{"shots": [
-        {"action": "uses the Power Armor", "camera": ""},
-        {"action": "dodges the Power Armor", "camera": ""},
-    ]}]}
-
-    class FailingLLM:
-        def chat_json(self, messages, **kwargs):
-            raise RuntimeError("LLM down")
-
-    # On LLM failure we return [] — a bogus object is worse than none. There is
-    # NO regex fallback that could resurrect "Power Armor".
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=FailingLLM())
+    objs = _llm_recurring_objects(show, 1, {})
     assert objs == []
 
 
-def test_llm_recurring_objects_dedups_near_duplicates(tmp_path):
+def test_llm_recurring_objects_deduplicates(tmp_path):
     show = _show(tmp_path)
-    script = {"scenes": [{"shots": [{"action": "x", "camera": ""}]}]}
-    llm = _KeyItemsLLM(["Hellbringer Cannon", "Hellbringer Heavy Cannon"])
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
-    # Near-duplicate picks collapse to the shorter, cleaner name.
-    assert objs == ["Hellbringer Cannon"]
+    _write_plan(show, 1, ["Cannon", "Cannon", "Motorcycle"])
+    objs = _llm_recurring_objects(show, 1, {})
+    assert objs == ["Cannon", "Motorcycle"]
 
 
-def test_llm_recurring_objects_rejects_scenery_even_if_llm_says_so(tmp_path):
+def test_llm_recurring_objects_caps_at_six(tmp_path):
     show = _show(tmp_path)
-    script = {"scenes": [{"shots": [{"action": "x", "camera": ""}]}]}
-    # The 12B showrunner sometimes lists debris despite the prompt. The junk
-    # filter must drop it deterministically — key items survive.
-    llm = _KeyItemsLLM(["Pulverized Ferrocrete Dust Chunks", "Shattered Rebar Girders",
-                        "The Hellbringer Cannon"])
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
-    assert objs == ["The Hellbringer Cannon"]
-
-
-def test_llm_recurring_objects_rejects_structural_scenery(tmp_path):
-    show = _show(tmp_path)
-    script = {"scenes": [{"shots": [{"action": "x", "camera": ""}]}]}
-    llm = _KeyItemsLLM(["Collapsed Viaduct Edge Supports", "Blade's Motorcycle"])
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
-    assert objs == ["Blade's Motorcycle"]
-
-
-def test_llm_recurring_objects_rejects_location_fixtures(tmp_path):
-    show = _show(tmp_path)
-    script = {"scenes": [{"shots": [{"action": "x", "camera": ""}]}]}
-    # Fountains/statues/plazas belong to the LOCATION's ref, not a recurring
-    # prop — the deterministic filter drops them even when the LLM lists them.
-    llm = _KeyItemsLLM(["Chrome Fountain", "Polished Chrome Fountain",
-                        "The Hellbringer Cannon"])
-    objs = _llm_recurring_objects(show, 1, script, cfg=Config(tmp_path), llm=llm)
-    assert objs == ["The Hellbringer Cannon"]
-
-
-def test_recurring_objects_prompt_is_bounded():
-    from studio.prompts import recurring_objects_prompt
-    # A full 130-shot episode log must fit a local 12B model's context window —
-    # the oversized prompt (63KB) used to make every extraction silently fail.
-    script = {"summary": "s", "scenes": [
-        {"id": "s%02d" % (i + 1), "location": "loc", "shots": [
-            {"id": "s%02d_sh%02d" % (i + 1, j + 1),
-             "action": "Blade drives the Hellbringer Cannon " * 3} for j in range(11)]
-         } for i in range(12)]}
-    p = recurring_objects_prompt(script, ["Blade"], ["loc"], "s")
-    assert len(p) < 40000
+    _write_plan(show, 1, [f"Object {i}" for i in range(10)])
+    objs = _llm_recurring_objects(show, 1, {})
+    assert len(objs) == 6
 
 
 def test_approved_names_requires_real_ref(tmp_path):
@@ -167,7 +106,7 @@ def test_create_missing_character_refs_fills_sheet_without_ref(tmp_path, monkeyp
     monkeypatch.setattr(ops_mod.ServiceOps, "_krea2_client", lambda self: (None, None))
     monkeypatch.setattr(cw, "load_workflow", lambda p: {})
 
-    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None):
+    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None, **kwargs):
         _Path(out_path).write_bytes(b"png")
 
     monkeypatch.setattr(cw, "generate_keyframe", fake_keyframe)
@@ -232,7 +171,7 @@ def test_regenerate_character_ref_from_feedback(tmp_path, monkeypatch):
     monkeypatch.setattr(ops_mod.ServiceOps, "_krea2_client", lambda self: (None, None))
     monkeypatch.setattr(cw, "load_workflow", lambda p: {})
 
-    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None):
+    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None, **kwargs):
         _Path(out_path).write_bytes(b"new")
 
     monkeypatch.setattr(cw, "generate_keyframe", fake_keyframe)
@@ -250,10 +189,11 @@ def test_regenerate_character_ref_from_feedback(tmp_path, monkeypatch):
 
 def test_shot_object_refs_match_by_slug(tmp_path):
     show = _show(tmp_path)
+    _write_plan(show, 1, ["Power Armor"])
     shot = {"action": "Blade powers up the Power Armor", "camera": "close-up"}
     refs = _shot_object_refs(show, 1, shot)
     assert any(p.endswith("power-armor.png") for p in refs)
-    # a non-recurring / absent object yields no ref
+    # object not in plan yields no ref even if file exists
     shot2 = {"action": "talks", "camera": ""}
     assert _shot_object_refs(show, 1, shot2) == []
 

@@ -71,6 +71,45 @@ Automatic after storyboard:
 - `studio/storyboard.py` — keyframes, `_char_ref_map`, `_shot_refs`, `ensure_variant_refs`, shot-line refs.
 - `studio/casting.py` — ref pass for new characters (diff of script `cast` vs approved refs).
 - `studio/consistency.py` — vision reviewer, prompt rewrite, regenerate, converge.
+- `studio/approval.py` — **Shot gate (Gate 4)**: per-shot approve/reject-with-notes on rendered clips.
+  State in `runs/EP##/shots.approval.json`. A reject LLM-revises the shot's render prompt from the
+  notes (persisted so successive rejects refine it), bumps `retake_count`, deletes the clip + QC
+  entry; the reconciler re-renders ONLY that shot with the revised prompt and a fresh seed
+  (`seed = done + 1000*retake`). `render.py` `_render_shot` prefers the stored `revised_prompt`.
+  Dashboard: per-shot "Approve" / "Reject with feedback" buttons + retaking badge + reject notes.
+- `studio/vcheck.py` — **post-render visual check (Qwen3-VL)**: verifies every rendered clip's
+  characters match their approved refs AND the scripted action actually plays out. Two serving
+  paths (`config/qc.yaml → vcheck.server`):
+  - **`lmstudio`** (default, and the ONLY reliably-working path on BEAST5): frame-sampling via the
+    local `qwen/qwen3-vl-8b` GGUF. LM Studio's OpenAI endpoint accepts **text + images only** —
+    it rejects `video_url` (`400: content objects must have a 'type' field that is either 'text'
+    or 'image_url'`). Frames are spread evenly across the clip (`frames`, default 8) and
+    downscaled to `frame_sample_dim` (default 512) so more of the motion fits the context window.
+    The model's load/unload is **managed by the GPU lock**: `run_episode_vcheck` acquires the VLM
+    GPU lease (`ServiceType.VLM`), which `lms load qwen/qwen3-vl-8b` on entry and `lms unload
+    --all` on exit — the model never has to be resident by hand, and VRAM is freed when QC
+    finishes. Verified working end-to-end against the live server.
+  - **`vllm`** (native whole-clip video in WSL2): BLOCKED on this machine. `_load_vllm`'s launch
+    command was fixed (vLLM's module launcher takes `<model>` positionally, not `serve <model>`),
+    but the FP8 checkpoint cannot start in WSL2 — `RuntimeError: UVA is not available`. Qwen3-VL
+    FP8 needs Unified Virtual Addressing, which NVIDIA's WSL2 driver does not expose. Only usable
+    if pointed at a UVA-capable host (Windows-native vLLM on the RTX 4060, or another box).
+  Reports live in `runs/EP##/vcheck/summary.json` + the `vcheck_results` DB table; VL
+  badges/rollup on the dashboard. Runs automatically after an episode render completes (the render
+  job calls `run_episode_vcheck` post-render, when the GPU is free). Fails auto-feed the Shot gate
+  (`reject_shot` from the VL issues) capped by `vcheck.max_auto_retakes` → prompt revision + retake.
+  Backfill: `studio.py vcheck --show <id>[ --no-auto-feed]`.
+  NOTE: `_load_vllm` spawns the WSL server via `wsl -d <distro> -- bash -lc "nohup ..."`; a
+  transient `wsl` call does not keep a backgrounded child alive, so if the native path is ever
+  enabled a **systemd unit** (e.g. `/etc/systemd/system/vllm-qwen3vl.service`) is the reliable
+  way to run it.
+- `studio/qc.py` — **STT dialogue QC (garbled-audio detection)**: transcribes every rendered clip
+  with faster-whisper (CPU, never GPU) and compares against the shot's script dialogue. Reports
+  live in `runs/EP##/qc/summary.json` + the `qc_results` DB table; per-shot verdicts show on the
+  dashboard. Config under `config/qc.yaml → stt` (model, thresholds). Backfill already-rendered
+  clips with `studio.py qc --show <id> --episode <n>`. Calibrated on blade-s-bedlam EP01: clean
+  clips explain 0.81–1.00 of their transcript, garbled clips 0.29–0.64 → `min_explained: 0.70`.
+  Auto-runs inline after each shot in `render_episode` (config `qc.stt.enabled`).
 - `studio/prompts.py` — ALL prompts incl. `story_engine_architect_prompt`, `scene_breakdown_prompt`, `scene_detail_prompt`, `scene_pass_prompt` (per-scene shot passes), `episode_plan_prompt` (REVISE), `development_prompt`.
 - `studio/comfy_workflows.py` — krea2 workflow builders incl. IPAdapter chaining.
 - `studio/clients/{lmstudio,comfy,tts,ffmpeg}.py` — clients (LM Studio streaming, Comfy uploads, Qwen3-TTS, ffprobe).
@@ -96,6 +135,7 @@ Data under `shows/<id>/`: `bible.yaml`, `concept.json`, `bootstrap.json`, `story
 
 ## 5. Known issues / decisions (read before touching anything)
 
+- **Native video → Qwen3-VL is blocked on BEAST5.** LM Studio's endpoint accepts images only (rejects `video_url`), and WSL vLLM can't load the FP8 checkpoint (`UVA is not available` in WSL2). The render-clip QC therefore runs as **frame-sampling** through the local `qwen/qwen3-vl-8b` GGUF (`vcheck.server: lmstudio`) — this is the intended, working config. If native video is ever required, it must run on a UVA-capable host.
 - **Single-pass scripts are too short.** `WritersRoom.run` writes ~15 shots (~2 min) even with 65536 ctx and a length demand. The **chunked planner is the real path**; keep using it.
 - **Context poisoning.** The bible's plotline summaries ("Lily's Rivalry … compete for Blade", "four mercs fight for his affection") get injected verbatim and make the LLM produce infighting during battles. Mitigation: the show-specific story engine's **CRITICAL RULE #1 (Combat Purity)** + `director_notes`. Per user decision, **rejections do NOT auto-edit the bible** (the `revise_bible_for_director` behavior was removed).
 - **Director notes** (`director_notes.json`) currently reach the **Development** prompt only; they are NOT injected into the outline creation prompt (the template's rules are static from the architect). If a user's standing note must shape outlines directly, wire `read_director_notes` into the outline prompt or into the story-engine template.
@@ -112,12 +152,13 @@ Data under `shows/<id>/`: `bible.yaml`, `concept.json`, `bootstrap.json`, `story
 ## 6. What remains / next steps
 
 1. **H3 video rendering** — the final stage. The storyboard/consistency produces the reviewable per-shot input; rendering shots into video via H3 ComfyUI is not wired end-to-end yet.
-2. **Writers' room review on chunked scripts** — the chunked assemble writes `script.r1.json` but doesn't run the slop/continuity/fan-service review loop. Apply `run_reviewers`/`revision_prompt` to chunked scripts.
-3. **Object/recurring-prop consistency** — object refs are generated and shown but not injected into keyframes via IPAdapter yet.
-4. **Per-character IPAdapter region control** for true multi-character consistency.
-5. **Continuity state population** — the state tracker reads `last_seen_episode` from continuity; make sure `develop_episode`/`_record_seen` updates it each episode.
-6. **Director notes → outline prompt** (see Issues) if standing notes must drive outlines directly.
-7. **Git**: repo on `main` at `github.com/Cyberdogs7/anime_gen`. The initial commit is pushed; **the large body of later work is committed locally but not yet pushed** — the user pushes when ready (never push to prod).
+2. **STT QC automation** — `studio/qc.py` runs per-shot dialogue verification (garbled-audio detection) after each render and records `qc_results` + `runs/EP##/qc/summary.json`. Next: auto-retake flagged shots (or route them to the human Shot gate) instead of only surfacing them on the dashboard.
+3. **Writers' room review on chunked scripts** — the chunked assemble writes `script.r1.json` but doesn't run the slop/continuity/fan-service review loop. Apply `run_reviewers`/`revision_prompt` to chunked scripts.
+4. **Object/recurring-prop consistency** — object refs are generated and shown but not injected into keyframes via IPAdapter yet.
+5. **Per-character IPAdapter region control** for true multi-character consistency.
+6. **Continuity state population** — the state tracker reads `last_seen_episode` from continuity; make sure `develop_episode`/`_record_seen` updates it each episode.
+7. **Director notes → outline prompt** (see Issues) if standing notes must drive outlines directly.
+8. **Git**: repo on `main` at `github.com/Cyberdogs7/anime_gen`. The initial commit is pushed; **the large body of later work is committed locally but not yet pushed** — the user pushes when ready (never push to prod).
 
 ---
 
@@ -130,8 +171,19 @@ Data under `shows/<id>/`: `bible.yaml`, `concept.json`, `bootstrap.json`, `story
 # tests
 .venv\Scripts\python.exe -m pytest tests -q
 
+# backfill STT dialogue QC on already-rendered clips (also auto-runs per shot during render)
+.venv\Scripts\python.exe studio.py qc --show <show-id> --episode 1
+
+# post-render visual QC (Qwen3-VL); native video via WSL vLLM by default
+.venv\Scripts\python.exe studio.py vcheck --show <show-id> --episode 1
+
+# vLLM runtime (Qwen3-VL-8B) lives inside WSL2 (Ubuntu-22.04):
+#   ~/vllm-venv/bin/vllm serve ~/models/Qwen3-VL-8B-Instruct-FP8 --port 8001 ...
+# Started/stopped automatically by the GPU manager (ServiceType.VLLM) around each
+# post-render vcheck pass; never leave it running during an H3 render.
+
 # run the bootstrap chain (advance gates)
-.venv\Scripts\python.exe -c "import sys; sys.path.insert(0,'.'); from studio.show import Show; from studio.bootstrap import BootstrapChain; print(BootstrapChain(Show('blade-s-bedlam')).advance())"
+.venv\Scripts\python.exe -c "import sys; sys.path.insert(0,'.'); from studio.show import Show; from studio.bootstrap import BootstrapChain; print(BootstrapChain(Show('<show-id>')).advance())"
 
 # Beast3 LM Studio
 $cred = Import-Clixml "$env:TEMP\beast3-cred.xml"; $s = New-PSSession -ComputerName 192.168.50.173 -Credential $cred

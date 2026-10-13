@@ -75,6 +75,30 @@ def run_checks(cfg=None) -> list[Check]:
     checks.append(Check("lmstudio", ok,
                         f"{llm['base_url']} ({llm.get('model')})" if ok else "unreachable"))
 
+    # 5b. OpenCode Zen (remote-first text generation; optional, not required).
+    zen = llm.get("zen", {}) or {}
+    from .config import resolve_zen_api_key
+    zen_key = resolve_zen_api_key(cfg)
+    if not zen.get("enabled"):
+        checks.append(Check("zen", True, "disabled in config (local-only mode)"))
+    elif not zen_key:
+        checks.append(Check(
+            "zen", True,
+            "enabled but no key found in the opencode auth.json — local-only "
+            "until set; sign in with `opencode auth login`"))
+    else:
+        import httpx as _httpx
+        try:
+            r = _httpx.Client(timeout=10.0).get(
+                f"{zen.get('base_url', '').rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {zen_key}"})
+            reachable = r.status_code == 200
+        except Exception:
+            reachable = False
+        checks.append(Check("zen", reachable,
+                            f"{zen.get('base_url')} (model={zen.get('model')})"
+                            if reachable else "unreachable (check key/network)"))
+
     # 6. TTS (null adapter always works; real engine reports at M1)
     tts = NullTTS()
     checks.append(Check("tts", tts.health() is not False, "null adapter (real engines at M1)"))

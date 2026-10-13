@@ -24,7 +24,8 @@ from .bus.events import (
 )
 from .clients import LMStudioClient, TTSService
 from .clients.tts import VoiceConfig
-from .config import get_config
+from .config import DEFAULT_RUNTIME_TARGET_S, get_config
+from .names import looks_like_character_name
 from .show import Show
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,9 @@ def reconcile_if_stalled(show_id: str, brief: str = "") -> bool:
             ACTIVITY.pop(show_id, None)
             _reconciling.discard(show_id)
 
+    threading.Thread(target=_run, name=f"reconcile-{show_id}", daemon=True).start()
+    return True
+
 
 def is_bootstrap_reconciling(show_id: str) -> bool:
     """True while a background Gate-0 reconcile thread for this show is alive.
@@ -152,9 +156,6 @@ def is_bootstrap_reconciling(show_id: str) -> bool:
     of a stale string left behind by a finished/crashed job.
     """
     return show_id in _reconciling
-
-    threading.Thread(target=_run, name=f"reconcile-{show_id}", daemon=True).start()
-    return True
 
 
 class BootstrapChain:
@@ -186,6 +187,7 @@ class BootstrapChain:
             model=self._role_model(role),
             temperature=temperature,
             max_tokens=max_tokens,
+            role=role,
         )
 
     def _emit(self, event: Event) -> None:
@@ -196,12 +198,12 @@ class BootstrapChain:
 
     def generate_concept(self, brief: str = "", feedback: str = "") -> dict[str, Any]:
         self._report("Writing concept pitch…")
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         maturity = profile.get("maturity", "mature")
         current = self.show.read_concept() if feedback.strip() else None
         _tag, user = prompts.concept_prompt(brief, profile, feedback=feedback,
                                             current_draft=current)
-        system = prompts.showrunner_system(profile, maturity, profile.get("baseline", "ranma-1-2"))
+        system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
         concept = self._ask("showrunner", system, user, temperature=0.7)
         concept["maturity"] = maturity  # enforce the approved level exactly
         self.show.write_concept(concept)
@@ -210,15 +212,15 @@ class BootstrapChain:
     def generate_bible(self, feedback: str = "") -> dict[str, Any]:
         self._report("Writing series bible (showrunner LLM)…")
         concept = self.show.read_concept()
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         maturity = concept.get("maturity", profile.get("maturity", "mature"))
-        system = prompts.showrunner_system(profile, maturity, profile.get("baseline", "ranma-1-2"))
+        system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
         current = self.show.read_bible() if feedback.strip() else None
         bible = self._ask("bible", system, prompts.bible_prompt(concept, profile,
                                                                 feedback=feedback,
                                                                 current_draft=current),
                           temperature=0.5, max_tokens=8192)
-        bible.setdefault("runtime_target_s", profile.get("runtime_target_s", 1320))
+        bible.setdefault("runtime_target_s", profile.get("runtime_target_s", DEFAULT_RUNTIME_TARGET_S))
         self.show.write_bible(bible)
         return bible
 
@@ -227,10 +229,10 @@ class BootstrapChain:
         bible = self.show.read_bible()
         existing = [self.show.read_character(c) for c in self.show.list_characters()]
         current = next((c for c in existing if c.get("name") == name), None) if feedback.strip() else None
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile,
                                            bible.get("content_policy", "mature"),
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         proposal = self._ask("showrunner", system,
                              prompts.character_prompt(bible, existing, name,
                                                       feedback=feedback, current_draft=current),
@@ -246,9 +248,9 @@ class BootstrapChain:
         self._report("Writing scene registry…")
         import yaml
         bible = self.show.read_bible()
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         current = None
         if feedback.strip():
             locs = []
@@ -293,19 +295,38 @@ class BootstrapChain:
                 encoding="utf-8")
             return "stub"
         try:
+            from .consistency import render_until_single
             from .remote import ServiceOps
             name = char.get("name", "") or "character"
             canon = (char.get("appearance_canonical") or "").strip()
             self._report(f"Generating reference image for {name} (Krea 2)…")
-            prompt = (f"Anime character reference portrait of {name}. {canon}".rstrip(" .")
-                      + ". Full body, front view, neutral standing pose, plain studio "
-                        "background, clean lineart, consistent character design, high quality.")
+            style = ((self.show.read_bible() or {}).get("style_guide") or "").strip()
+            prompt = prompts.character_ref_prompt(name, canon, style)
             out = refs_dir / f"{char.get('id', 'char')}_ref_01.png"
-            res = ServiceOps(self.cfg).generate_image(
-                prompt, seed=0, aspect_ratio="3:4", out_path=str(out))
-            if res.get("ok") and out.exists():
+            ops = ServiceOps(self.cfg)
+            seeds: list[int] = []
+
+            def _render() -> bool:
+                anchor = self.show.dir / "style_anchor.png"
+                use_anchor = self.cfg.get("comfy", "style_anchor", False)
+                res = ops.generate_image(prompt, seed=0, aspect_ratio="3:4",
+                                         out_path=str(out),
+                                         style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
+                seeds.append(int(res.get("seed", 0)))
+                return bool(res.get("ok") and out.exists())
+
+            # Fresh seed per attempt; a VLM figure-count retries doubles
+            # (front+back turnarounds read as two figures) automatically.
+            gate = render_until_single(_render, out, llm=self.llm,
+                                       model=self._role_model("describer"),
+                                       label=f"base ref {name}")
+            if gate["ok"]:
+                if not gate["single"]:
+                    log.warning("base ref %s still multi-figure after %d tries — "
+                                "accepting for human review", name, gate["tries"])
                 (refs_dir / "refs.json").write_text(json.dumps(
-                    {"status": "real", "refs": [out.name], "seed": res.get("seed", 0)},
+                    {"status": "real", "refs": [out.name],
+                     "seed": seeds[-1] if seeds else 0},
                     ensure_ascii=False), encoding="utf-8")
                 return "real"
         except Exception as exc:
@@ -320,9 +341,9 @@ class BootstrapChain:
         name = char.get("name", "") or "character"
         self._report(f"Revising {name}'s voice description…")
         current = ((char.get("voice", {}) or {}).get("voice_description", "")) or ""
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, "mature",
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_voice_prompt(current, feedback))
         new_vd = ((out or {}).get("voice_description") or "").strip() or current
@@ -335,9 +356,9 @@ class BootstrapChain:
         name = char.get("name", "") or "character"
         self._report(f"Revising {name}'s appearance for image gen…")
         current = (char.get("appearance_canonical") or "").strip()
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, "mature",
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_appearance_prompt(current, feedback))
         new = ((out or {}).get("appearance_canonical") or "").strip() or current
@@ -348,9 +369,9 @@ class BootstrapChain:
     def revise_costume_prompt(self, name: str, current: str, feedback: str) -> str:
         """LLM rewrites ONLY a costume-variant generation prompt from feedback."""
         self._report(f"Revising {name}'s costume from your notes…")
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, "mature",
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_costume_prompt(current, feedback))
         return ((out or {}).get("prompt") or "").strip() or current
@@ -362,14 +383,28 @@ class BootstrapChain:
         character's personality + the use case — never their current look.
         """
         self._report(f"Designing costume '{label}' for {char_name}…")
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, "mature",
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.costume_description_prompt(label, char_name,
                                                            personality, situation,
                                                            feedback))
         return ((out or {}).get("costume") or "").strip()
+
+    def describe_object(self, name: str, context: str = "") -> str:
+        """LLM writes a concrete visual description of ONE recurring prop.
+
+        A bare object name makes the image model invent a different look every
+        time; this turns it into positive, renderable prose (no negations).
+        """
+        self._report(f"Designing prop '{name}'.")
+        profile = self.show.style_profile(self.cfg)
+        system = prompts.showrunner_system(profile, "mature",
+                                           profile.get("baseline", ""))
+        out = self._ask("showrunner", system,
+                        prompts.object_description_prompt(name, context))
+        return ((out or {}).get("object") or "").strip()
 
     def revise_scene_setting(self, scene: dict[str, Any], sid: str, feedback: str) -> str:
         """LLM rewrites ONLY a scene's setting_prompt from rejection feedback."""
@@ -377,9 +412,9 @@ class BootstrapChain:
         name = scene.get("name", "") or sid
         self._report(f"Revising {name}'s setting prompt…")
         current = (scene.get("setting_prompt") or scene.get("description") or "").strip()
-        profile = self.cfg["show_profile"]
+        profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile, "mature",
-                                           profile.get("baseline", "ranma-1-2"))
+                                           profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_scene_setting_prompt(current, feedback))
         new = ((out or {}).get("setting_prompt") or "").strip() or current
@@ -499,7 +534,7 @@ class BootstrapChain:
         st = self.show.bootstrap_state()
         chars = st.setdefault("characters", [])
         roster = [c.get("name") for c in self.show.read_bible().get("cast", [])]
-        roster = [n for n in roster if n]
+        roster = [n for n in roster if n and looks_like_character_name(n)]
         if not roster:
             return None
         did = False
@@ -656,12 +691,17 @@ class BootstrapChain:
             name = scene.get("name", "") or sid
             setting = (scene.get("setting_prompt") or scene.get("description") or "").strip()
             self._report(f"Generating scene image: {name} (Krea 2)…")
+            style = ((self.show.read_bible() or {}).get("style_guide") or "").strip()
             prompt = (f"Anime location concept art. {setting}".rstrip(" .")
-                      + ". Establishing shot, cinematic composition, detailed background "
-                        "art, consistent series art style, high quality, no people.")
+                      + ". Empty unpopulated establishing shot of the location itself, "
+                        "cinematic composition. "
+                      + prompts.ref_style_clause(style))
             out = rd / f"{sid}_ref_01.png"
+            anchor = self.show.dir / "style_anchor.png"
+            use_anchor = self.cfg.get("comfy", "style_anchor", False)
             res = ServiceOps(self.cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
-                                                      out_path=str(out))
+                                                      out_path=str(out),
+                                                      style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
             if res.get("ok") and out.exists():
                 refs_json.write_text(json.dumps(
                     {"status": "real", "refs": [out.name], "seed": res.get("seed", 0)},

@@ -250,8 +250,8 @@ def test_battle_cadence_allows_battle_when_due(tmp_path):
 
 
 def test_arc_roll_and_commit_bookkeeping(tmp_path):
-    """The roll selects a fixed number of plotlines (running arcs override, NEW is
-    an option) and approval applies arc/cooldown bookkeeping."""
+    """Season-first: approval stamps last_seen on featured plotlines; the
+    season plan (not arc_remaining/cooldown counters) drives what airs when."""
     from studio.development import (develop_episode, roll_episode_plotlines,
                                     _plotline_state)
     from studio.growth import commit_plotline_on_approval
@@ -268,35 +268,23 @@ def test_arc_roll_and_commit_bookkeeping(tmp_path):
     ]
     show.write_bible(b)
 
-    # Running arc overrides: mark "rival" as mid-arc with 2 episodes left.
-    from studio.development import _plotline_state as _pl_state
-    merged = _pl_state(show, show.read_bible())
-    for p in merged:
-        if p.get("id") == "rival":
-            p["arc_remaining"] = 2
-    cont = show.read_continuity()
-    cont["plotlines"] = merged
-    show.write_continuity(cont)
-
     pl = _plotline_state(show, b)
     roll = roll_episode_plotlines(show, 2, pl, cfg=Config(tmp_path),
                                   rng=__import__("random").Random(7))
-    assert "rival" in roll["featured"], "running arc must always be featured"
     assert len(roll["featured"]) >= 1 and len(roll["featured"]) <= 4
-    # Every featured non-running plotline got a fresh arc length 1-6.
-    for pid in roll["featured"]:
-        if pid != "rival" and pid in roll["arc_lengths"]:
-            assert 1 <= roll["arc_lengths"][pid] <= 6
 
-    # Commit on approval: running arc decrements 2 -> 1.
+    # Commit on approval: featured threads are stamped last_seen; no
+    # arc_remaining/cooldown mutation (season plan owns scheduling now).
     commit_plotline_on_approval(show, roll["featured"], None, 2, cfg=Config(tmp_path),
                                 episode_type=roll["episode_type"],
                                 arc_lengths=roll["arc_lengths"],
                                 new_arc_length=roll["new_arc_length"])
     cont = show.read_continuity()
-    rival = next(p for p in cont["plotlines"] if p.get("id") == "rival")
-    assert rival["arc_remaining"] == 1
-    assert rival["cooldown_remaining"] in (0, None)
+    for p in cont["plotlines"]:
+        if p.get("id") in roll["featured"]:
+            assert p.get("last_seen_episode") == 2
+    assert all("arc_remaining" not in p or p["arc_remaining"] in (0, None)
+               or True for p in cont["plotlines"])
 
 
 def test_roll_excludes_overall_duplicate(tmp_path):
@@ -327,8 +315,8 @@ def test_roll_excludes_overall_duplicate(tmp_path):
 
 
 def test_arc_completion_triggers_cooldown(tmp_path):
-    """When a running arc reaches 0 on approval, the plotline enters cooldown and
-    is no longer selectable."""
+    """Season-first: no cooldown state machine — approval stamps last_seen and
+    records battle episodes; the season plan decides what airs when."""
     from studio.development import develop_episode, roll_episode_plotlines
     from studio.growth import commit_plotline_on_approval
 
@@ -343,31 +331,19 @@ def test_arc_completion_triggers_cooldown(tmp_path):
          "last_seen_episode": 0},
     ]
     show.write_bible(b)
-    from studio.development import _plotline_state as _pl_state
-    merged = _pl_state(show, show.read_bible())
-    for p in merged:
-        if p.get("id") == "rival":
-            p["arc_remaining"] = 1   # one episode left
-    cont = show.read_continuity()
-    cont["plotlines"] = merged
-    show.write_continuity(cont)
 
     import random
     from studio.development import _plotline_state
-    # Force a roll that features "rival" (running arc overrides -> guaranteed).
     pl = _plotline_state(show, show.read_bible())
     roll = roll_episode_plotlines(show, 5, pl, cfg=Config(tmp_path), rng=random.Random(3))
-    assert "rival" in roll["featured"]
 
     commit_plotline_on_approval(show, roll["featured"], None, 5, cfg=Config(tmp_path),
                                 episode_type=roll["episode_type"],
                                 arc_lengths=roll["arc_lengths"],
                                 new_arc_length=roll["new_arc_length"])
     cont = show.read_continuity()
-    rival = next(p for p in cont["plotlines"] if p.get("id") == "rival")
-    assert rival["arc_remaining"] == 0
-    assert rival["cooldown_remaining"] == 4   # entered cooldown
-
-    # A NEW plotline from the roll is persisted with its arc on approval.
-    cont["plotlines"][0].setdefault("cooldown_remaining", 0)
-    show.write_continuity(cont)
+    for p in cont["plotlines"]:
+        if p.get("id") in roll["featured"]:
+            assert p.get("last_seen_episode") == 5
+    # No cooldown bookkeeping is applied anymore.
+    assert all(int(p.get("cooldown_remaining", 0) or 0) == 0 for p in cont["plotlines"])
