@@ -10,8 +10,9 @@ def test_runtime_review_flags_short_scripts():
     from studio.scriptgen import _runtime_review
     short = {"scenes": [{"shots": [{"duration_s": 10.125}] * 3}]}      # ~30s vs 1320 target
     assert _runtime_review(short, 1320) is not None
+    _L = "This is a line with twelve actual spoken words inside it right now."
     full = {"scenes": [{"shots": [{"duration_s": 10.125,
-              "dialogue": [{"char": "Ryou", "line": "x", "on_camera": True}
+              "dialogue": [{"char": "Ryou", "line": _L, "on_camera": True}
                            for _ in range(3)]}] * 130}]}    # ~1316s, 390 lines
     assert _runtime_review(full, 1320) is None
 
@@ -28,9 +29,9 @@ def test_runtime_review_ignores_padded_dialogue():
     assert _runtime_review(padded, 1320) is not None
     # A delivery note prefix is fine as long as real words follow.
     spoken = {"scenes": [{"shots": [{"duration_s": 10.125,
-              "dialogue": [{"char": "Ryou", "line": "(whispering) Stay close.", "on_camera": True},
-                           {"char": "Ryou", "line": "Keep up.", "on_camera": True},
-                           {"char": "Ryou", "line": "Move.", "on_camera": True}]}
+              "dialogue": [{"char": "Ryou", "line": "(whispering) Stay close to me and do not make a single sound tonight.", "on_camera": True},
+                           {"char": "Ryou", "line": "Keep up with me and I will keep you alive through this tonight.", "on_camera": True},
+                           {"char": "Ryou", "line": "Move now and do not look back at anything that stands behind us.", "on_camera": True}]}
                                 ] * 130}]}
     assert _runtime_review(spoken, 1320) is None
 

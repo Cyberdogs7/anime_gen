@@ -22,6 +22,13 @@ from ..config import get_config
 
 log = logging.getLogger(__name__)
 
+# Shared warm state for the transient krea2 ComfyUI. ServiceOps is constructed PER
+# RENDER, so this MUST live at module level: per-instance state means each render
+# has its own copy, the idle timer is never reset by the next render, and the
+# instance shuts down mid-queue (a start/stop per image).
+_KREA2_PROC: subprocess.Popen | None = None
+_KREA2_STOP_TIMER = None
+
 
 def _run(cmd: list[str], timeout: int = 600) -> tuple[int, str]:
     try:
@@ -240,7 +247,8 @@ class ServiceOps:
         cmd = [str(py), "-s", "ComfyUI/main.py", "--windows-standalone-build",
                "--listen", "127.0.0.1", "--port", str(port), "--disable-auto-launch"]
         try:
-            self._krea2_proc = subprocess.Popen(
+            global _KREA2_PROC
+            _KREA2_PROC = subprocess.Popen(
                 cmd, cwd=tree, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 | getattr(subprocess, "DETACHED_PROCESS", 0x8))
@@ -259,24 +267,50 @@ class ServiceOps:
 
     def _stop_krea2(self) -> None:
         """Stop the transient krea2 comfy we started (taskkill /T kills the tree)."""
-        proc = getattr(self, "_krea2_proc", None)
+        global _KREA2_PROC, _KREA2_STOP_TIMER
+        _KREA2_STOP_TIMER = None
+        proc = _KREA2_PROC
         if proc is not None:
             try:
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                capture_output=True, timeout=20)
             except Exception:
                 pass
-            self._krea2_proc = None
+            _KREA2_PROC = None
             log.info("transient krea2 comfy stopped")
+
+    def _release_krea2(self) -> None:
+        """Defer stopping the transient krea2 comfy.
+
+        A queue of renders (a ref pass, a costume batch) reuses ONE warm instance
+        instead of launching + tearing down ComfyUI per image: each release just
+        (re)arms an idle timer, and the instance stops only after
+        ``comfy.krea2_idle_stop_s`` seconds with no render. No-op when we didn't
+        launch the instance (a remote primary / fallback we don't own).
+        """
+        global _KREA2_STOP_TIMER
+        import threading
+        t = _KREA2_STOP_TIMER
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        if _KREA2_PROC is None:
+            return
+        warm = int(self.cfg.get("comfy", "krea2_idle_stop_s", 60) or 60)
+        timer = threading.Timer(warm, self._stop_krea2)
+        timer.daemon = True
+        timer.start()
+        _KREA2_STOP_TIMER = timer
 
     def _krea2_client(self):
         """Pick the krea2 instance to use for one generation.
 
-        Returns (ComfyClient, stop_fn | None):
-          - primary (BEAST5 LanguageLearner krea2, 16 GB) is used whenever it is
-            up, or started on demand when H3 (idle_guard_url) isn't rendering.
-          - only falls back to Beast3 when the primary is down/unusable or a
-            render (H3) is occupying the local GPU.
+        Returns (ComfyClient, release_fn). The release fn is deferred (see
+        :meth:`_release_krea2`): consecutive renders keep the instance warm and it
+        shuts down only after an idle window, so a queue doesn't pay a ComfyUI
+        start/stop per image.
         """
         from ..clients.comfy import ComfyClient
         inst = self._comfy_cfg("krea2")
@@ -287,13 +321,13 @@ class ServiceOps:
         if primary and self._comfy_up(primary):
             # Prefer the 16 GB primary when it is answering.
             log.info("krea2 primary up (%s) -> using primary", primary)
-            return ComfyClient(primary), None
+            return ComfyClient(primary), self._release_krea2
         if guard and not self._comfy_idle(ComfyClient(guard)):
             log.info("H3 comfy (%s) is rendering -> using krea2 fallback", guard)
-            return fb, None
+            return fb, self._release_krea2
         if primary and self._launch_krea2():
-            return ComfyClient(primary), self._stop_krea2
-        return fb, None
+            return ComfyClient(primary), self._release_krea2
+        return fb, self._release_krea2
 
     def _beast3_llm_host(self) -> str:
         """Host:port of the fallback LLM (Beast3), from llm.fallback_url."""

@@ -165,8 +165,46 @@ def _shot_ref_paths(show: Show, episode: int, scene: dict[str, Any],
     return paths
 
 
-def _shot_character_ref(show: Show, name: str) -> str | None:
-    """First approved reference-image path for one character, or None."""
+def _fuzzy_costume_label(want: str, approved) -> str:
+    """Best approved costume matching ``want`` by shared wardrobe words, or ''.
+
+    The shot writer paraphrases/decorates labels ("relaxed off-duty tank and
+    shorts", "off duty tank & shorts, slightly visible"). Rather than silently
+    falling back to the BASE ref, match the approved label on its outfit words so
+    an approved variant is still used.
+    """
+    def toks(s: str) -> set[str]:
+        return {t for t in re.sub(r"[^a-z0-9 ]+", " ", (s or "").lower()).split()
+                if t and t not in ("the", "a", "an", "and", "with", "of", "in",
+                                   "her", "his", "their")}
+    w = toks(want)
+    if not w:
+        return ""
+    best, score = "", 0
+    for k in approved:
+        if str(k).lower() in ("base", "nude"):
+            continue
+        kt = toks(k)
+        if not kt:
+            continue
+        common = len(w & kt)
+        if common > score and (kt <= w or w <= kt or common >= max(1, len(kt) - 1)):
+            best, score = k, common
+    return best
+
+
+def _shot_character_ref(show: Show, name: str, costume: str = "") -> str | None:
+    """Reference-image path for one character — the identity anchor for a shot.
+
+    When ``costume`` names an APPROVED appearance variant, that variant is the
+    anchor (the scene's outfit, per ``shot.references.costumes``); otherwise the
+    character's base ref is used. The base ref stays the fallback when the shot
+    declares no costume, names "base", or names a variant that isn't approved —
+    so an unapproved outfit can never replace an approved base. Returns None when
+    neither is available.
+    """
+    from .storyboard import _approved_costume_labels
+    want = (costume or "").strip()
     for cid in show.list_characters():
         c = show.read_character(cid)
         if c.get("name") != name:
@@ -181,6 +219,15 @@ def _shot_character_ref(show: Show, name: str) -> str | None:
             prior = {}
         if prior.get("status") != "real":
             continue
+        if want and want.lower() != "base":
+            approved = _approved_costume_labels(show, cid)
+            label = want if want in approved else next(
+                (k for k in approved if k.lower() == want.lower()), "")
+            if not label:
+                label = _fuzzy_costume_label(want, approved)
+            fname = (prior.get("variants") or {}).get(label) if label else None
+            if fname and (rd / fname).exists():
+                return str(rd / fname)
         refs = prior.get("refs") or []
         if refs and (rd / refs[0]).exists():
             return str(rd / refs[0])
@@ -195,6 +242,25 @@ def _voice_sample_path(show: Show, name: str) -> Path | None:
             vp = show.dir / "assets" / "voice" / f"{cid}_voice.wav"
             return vp if vp.exists() else None
     return None
+
+
+def _character_identity(show: Show, name: str) -> str:
+    """identity_canonical (face/hair/build) for a name — NEVER the wardrobe.
+
+    A reference image is supplied for every character and carries the outfit
+    (base or variant), so the prompt describes IDENTITY only; stating canonical
+    clothing would contradict a variant ref and make H3 render the base outfit.
+    """
+    for cid in show.list_characters():
+        c = show.read_character(cid)
+        if c.get("name") == name:
+            ident = (c.get("identity_canonical") or "").strip()
+            if ident:
+                return ident
+            # Legacy sheets: strip the " Wears <wardrobe>" clause off the blob.
+            app = (c.get("appearance_canonical") or "").strip()
+            return app.split(" Wears ")[0].strip()
+    return ""
 
 
 def _character_appearance(show: Show, name: str) -> str:
@@ -292,6 +358,15 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
 
     ``audio_refs`` carries {"char": name, "token": "<Audio N>"} per voice ref.
     """
+    # A reference image IS supplied for every character, and it carries the
+    # outfit (base OR variant). Describing clothing in the prompt text would
+    # contradict the image and make H3 render the base outfit, so the subject
+    # definition carries IDENTITY only (face/hair/build) - never wardrobe.
+    # Characters visible ONLY through a screen/monitor/broadcast (e.g. a rival
+    # laughing on the jumbotron). Their ref IS included - but the prompt must say
+    # they appear INSIDE the display, or H3 renders them physically in the scene.
+    via_display = set((shot.get("references") or {}).get("via_display") or [])
+
     # --- subject_definitions ---
     subject_by_name: dict[str, str] = {}
     subject_lines: list[str] = []
@@ -299,17 +374,28 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
         pic = f"<Picture {i + 1}>"
         subj = f"<Subject {i + 1}>"
         subject_by_name[name] = subj
-        appearance = _character_appearance(show, name) if show else ""
+        appearance = _character_identity(show, name) if show else ""
         appearance = appearance[:1].lower() + appearance[1:] if appearance else ""
         appearance = appearance.rstrip(" .") if appearance else ""
+        display_clause = (", visible ONLY on the screen/broadcast WITHIN the shot - "
+                          "NOT physically present in the scene" if name in via_display
+                          else "")
         subject_lines.append(f"{subj} is {name}, shown in {pic}"
-                             + (f", {appearance}" if appearance else "") + ".")
+                             + (f", {appearance}" if appearance else "")
+                             + display_clause + ".")
     for a in (audio_refs or []):
         char = a.get("char", "")
-        subj = subject_by_name.get(char, f"<Subject {len(subject_by_name) + 1}>")
         sid = _speaker_id(char, shot)
-        subject_lines.append(f"{a['token']} is the voice-timbre reference "
-                             f"for {subj} {sid}.")
+        subj = subject_by_name.get(char)
+        if subj:
+            subject_lines.append(f"{a['token']} is the voice-timbre reference "
+                                 f"for {subj} {sid}.")
+        else:
+            # Off-screen speaker: keeps a VOICE ref but has NO picture/subject,
+            # so H3 must not render them.
+            subject_lines.append(f"{a['token']} is the voice-timbre reference "
+                                 f"for {char} {sid}, who is OFF-SCREEN and must "
+                                 f"not be shown in the shot.")
 
     # --- summary ---
     # Use shot/scene-local context, not episode-level script.summary (which bleeds 4+ irrelevant names into a 2-person bar shot and truncates to "…a").
@@ -337,22 +423,26 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
             f"clothing and appearance are retained exactly as shown.")
     for a in (audio_refs or []):
         char = a.get("char", "")
-        subj = subject_by_name.get(char, "<Subject 1>")
+        who = subject_by_name.get(char) or f"{char} (off-screen)"
         retention_lines.append(
             f"{a['token']}: reference - its vocal timbre guides the dialogue "
-            f"delivery of {subj} without copying the original signal.")
+            f"delivery of {who} without copying the original signal.")
 
     # --- detailed_description ---
     placed: list[str] = []
     for name in names:
         subj = subject_by_name.get(name, "")
-        appearance = _character_appearance(show, name) if show else ""
+        appearance = _character_identity(show, name) if show else ""
         appearance = appearance[:1].lower() + appearance[1:] if appearance else ""
         appearance = appearance.rstrip(" .") if appearance else ""
         if appearance:
-            placed.append(f"{subj} ({name}), {appearance}")
+            placed.append(f"{subj} ({name}), {appearance}"
+                          + (" - appearing ONLY on the screen/broadcast in the scene, "
+                             "not physically present" if name in via_display else ""))
         else:
-            placed.append(f"{subj} ({name})")
+            placed.append(f"{subj} ({name})"
+                          + (" - appearing ONLY on the screen/broadcast in the scene, "
+                             "not physically present" if name in via_display else ""))
     placed_txt = ", ".join(placed)
 
     parts: list[str] = []
@@ -366,7 +456,7 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
     for d in spoken:
         line = (d.get("line") or "").strip()
         char = d.get("char", "")
-        subj = subject_by_name.get(char, "")
+        subj = subject_by_name.get(char) or char
         sid = _speaker_id(char, shot)
         audio = next((a["token"] for a in (audio_refs or [])
                       if a.get("char") == char), "")
@@ -557,6 +647,7 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
     from .storyboard import _shot_refs
     sid = shot.get("id", "shot")
     names, _ = _shot_refs(show, shot)
+    costumes = ((shot.get("references") or {}).get("costumes") or {}) or {}
 
     # Official ref2va graph: refs are SOCKETS on MiniMaxH3ReferenceToVideo.
     # Images (character refs first, then objects/keyframe) become <Picture N>;
@@ -565,7 +656,7 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
     # <Picture N> numbers match `names`.
     image_filenames: list[str] = []
     for name in names:
-        ref = _shot_character_ref(show, name)
+        ref = _shot_character_ref(show, name, costume=costumes.get(name, ""))
         if not ref:
             continue
         try:
@@ -795,6 +886,12 @@ def build_render(show: Show, episode: int, cfg=None) -> None:
     (no progress for a long time) and restart it instead of waiting forever.
     """
     cfg = cfg or get_config()
+    # Never start a SECOND render for the same show: a shot reject kicks a
+    # re-render, and a manual Render click may arrive while one is in flight.
+    _existing = RENDER_JOBS.get(show.show_id) or {}
+    _th = _existing.get("_thread")
+    if _existing.get("state") == "running" and _th is not None and _th.is_alive():
+        return
     # A render is expensive; never start it against an unapproved/stale outline.
     from .storyboard import storyboard_blockers
     blockers = storyboard_blockers(show, episode)
@@ -803,10 +900,9 @@ def build_render(show: Show, episode: int, cfg=None) -> None:
             "state": "blocked", "done": 0, "total": 0, "ts": time.time(),
             "detail": "Cannot render: " + "; ".join(blockers)}
         return
-    ms_cfg = cfg.get("pipeline", "multishot", {}) if isinstance(cfg.get("pipeline", "multishot", {}), dict) else {}
-    if bool(ms_cfg.get("enabled", False)):
-        from .render_scene import build_scene_masters as _build_scene
-        return _build_scene(show, episode, cfg=cfg)
+    # The ref-approval gate must clear for EVERY render path, including the
+    # multishot summary path (which previously returned before this check and
+    # rendered with unapproved costume/object refs).
     from .storyboard import pending_ref_approvals
     pending = pending_ref_approvals(show, episode)
     if pending:
@@ -815,6 +911,10 @@ def build_render(show: Show, episode: int, cfg=None) -> None:
             "detail": "Waiting for ref approval: " + ", ".join(pending),
         }
         return
+    ms_cfg = cfg.get("pipeline", "multishot", {}) if isinstance(cfg.get("pipeline", "multishot", {}), dict) else {}
+    if bool(ms_cfg.get("enabled", False)):
+        from .render_scene import build_scene_masters as _build_scene
+        return _build_scene(show, episode, cfg=cfg)
 
     job: dict[str, Any] = {"state": "running", "done": 0, "total": 0,
                            "detail": "Preparing render…", "ts": time.time()}

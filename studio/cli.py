@@ -372,6 +372,49 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0 if all_pass(results) else 1
 
 
+def _cmd_rewrite(args: argparse.Namespace) -> int:
+    from .clients.lmstudio import LMStudioClient
+    from .rewrite import regenerate_outline_once, rewrite_script_once
+    from .show import Show
+    cfg = get_config()
+    show = Show(args.show)
+    llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
+    where = "remote" if args.remote else "local"
+    if args.stage == "outline":
+        plan = regenerate_outline_once(show, args.episode, args.model, remote=args.remote,
+                                       cfg=cfg, llm=llm, notes=args.notes)
+        pr = plan.get("plan_review") or {}
+        print(f"{args.show} EP{args.episode:02d}: regenerated outline with {args.model} ({where})")
+        print(f"  passed={pr.get('passed')}  rounds={pr.get('rounds')}  "
+              f"notes={len(pr.get('notes') or [])}")
+        return 0
+    script = rewrite_script_once(show, args.episode, args.model, remote=args.remote,
+                                 cfg=cfg, llm=llm, notes=args.notes)
+    rev = script.get("_review") or {}
+    print(f"{args.show} EP{args.episode:02d}: rewrote script with {args.model} ({where})")
+    print(f"  passed={rev.get('passed')}  rounds={rev.get('rounds')}  "
+          f"notes={len(rev.get('notes') or [])}")
+    return 0
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from .evals import run_eval
+    run_eval(args.show, args.episode, args.stage, args.runs,
+             temperature=args.temperature, quality=not args.no_quality,
+             out_dir=args.out, label=args.label)
+    return 0
+
+
+def _cmd_eval_compare(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path as _Path
+    from .evals import compare_reports, print_comparison
+    a = json.loads(_Path(args.a).read_text(encoding="utf-8"))
+    b = json.loads(_Path(args.b).read_text(encoding="utf-8"))
+    print_comparison(compare_reports(a, b, args.a, args.b))
+    return 0
+
+
 def _cmd_learn(args: argparse.Namespace) -> int:
     from pathlib import Path as _Path
     from .learn import aggregate_reviews, distill_rules, promote_rules, summarize
@@ -437,6 +480,9 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
             # Per-show style references (set these in the show's bible).
             "baseline": "",
             "fanservice_baseline": "",
+            # Optional per-show art medium for reference images; empty = the
+            # house default (prompts.REF_MEDIUM).
+            "medium": "",
         },
         "arcs": [],
         "overall_plotline": None,
@@ -536,8 +582,8 @@ def _pending_step(state: dict) -> str | None:
 def _cmd_approve(args: argparse.Namespace) -> int:
     from .bootstrap import BootstrapChain
     from .bus.events import (
-        BIBLE_APPROVED, CONCEPT_APPROVED, SCENE_REGISTRY_APPROVED,
-        VOICE_APPROVED, new_event,
+        BIBLE_APPROVED, CHAR_PROPOSAL_APPROVED, CHAR_REFS_APPROVED,
+        CONCEPT_APPROVED, SCENE_REGISTRY_APPROVED, VOICE_APPROVED, new_event,
     )
     from .show import Show
     show = Show(args.show)
@@ -559,11 +605,31 @@ def _cmd_approve(args: argparse.Namespace) -> int:
         if entry is None:
             print(f"error: no character named '{name}' in bootstrap state")
             return 1
-        entry["voice"] = "approved"
-        show.set_bootstrap_state(st)
         chain = BootstrapChain(show)
-        chain._emit(new_event(VOICE_APPROVED, show_id=args.show,
-                              payload={"char": name, "manual": True}))
+        if step == "character":
+            # Whole-character approval: the proposal, its reference image and its
+            # voice are all signed off — identical to the dashboard's
+            # approve_step("character") so both entry points agree.
+            entry["proposal"] = "approved"
+            entry["refs"] = "approved"
+            entry["voice"] = "approved"
+            c = next((show.read_character(cid) for cid in show.list_characters()
+                      if show.read_character(cid).get("name") == name), None)
+            if c and c.get("id"):
+                from .storyboard import mark_base_ref_approved
+                mark_base_ref_approved(show, c["id"])
+            show.set_bootstrap_state(st)
+            chain._emit(new_event(CHAR_PROPOSAL_APPROVED, show_id=args.show,
+                                  payload={"char": name, "manual": True}))
+            chain._emit(new_event(CHAR_REFS_APPROVED, show_id=args.show,
+                                  payload={"char": name, "manual": True}))
+            chain._emit(new_event(VOICE_APPROVED, show_id=args.show,
+                                  payload={"char": name, "manual": True}))
+        else:
+            entry["voice"] = "approved"
+            show.set_bootstrap_state(st)
+            chain._emit(new_event(VOICE_APPROVED, show_id=args.show,
+                                  payload={"char": name, "manual": True}))
     elif step == "scenes":
         st["scenes"]["status"] = "approved"
         show.set_bootstrap_state(st)
@@ -718,13 +784,32 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     # at the next human gate and never auto-approves a gated artifact.
     def _reconcile_all() -> None:
         from .bootstrap import reconcile_if_stalled
+        from .clients.lmstudio import LMStudioClient
+        from .refs import rebuild_missing
+        from .show import Show
         time.sleep(1.0)
+        try:
+            llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
+        except Exception:
+            llm = None
         for show in shows:
             try:
                 if reconcile_if_stalled(show):
                     log.info("[reconcile] resumed Gate-0 chain for %s", show)
             except Exception:
                 log.exception("[reconcile] precheck failed for %s", show)
+            # Auto-build refs for any character missing a real one (nude-first for
+            # the recurring cast). Serialized with the bootstrap chain's lock so the
+            # two startup passes can't race and clobber each other.
+            try:
+                from .bootstrap import run_show_locked
+                done = run_show_locked(
+                    show, lambda s=show: rebuild_missing(Show(s), cfg=cfg, llm=llm))
+                if done:
+                    log.info("[refs] startup-generated refs for %s: %s",
+                             show, ", ".join(done))
+            except Exception:
+                log.exception("[refs] startup ref build failed for %s", show)
 
     threading.Thread(target=_reconcile_all, daemon=True,
                      name="startup-reconcile").start()
@@ -980,6 +1065,32 @@ def build_parser() -> argparse.ArgumentParser:
     ln.add_argument("--promote", action="store_true",
                     help="append HIGH-derived rules to director_notes.json")
 
+    rw = sub.add_parser("rewrite", help="one-off rewrite with a chosen model, then re-review")
+    rw.add_argument("--show", required=True)
+    rw.add_argument("--episode", type=int, default=1)
+    rw.add_argument("--stage", choices=["script", "outline"], default="script",
+                    help="what to rewrite: the failed script (default) or the outline")
+    rw.add_argument("--model", required=True, help="model id (local or remote)")
+    rw.add_argument("--remote", action="store_true",
+                    help="treat --model as a remote (Zen) model id")
+    rw.add_argument("--notes", default="", help="extra director note folded into the rewrite")
+
+    ev = sub.add_parser("eval", help="run a stage N times on frozen inputs; measure variance/quality/cost")
+    ev.add_argument("--show", required=True, help="show id")
+    ev.add_argument("--episode", type=int, default=1)
+    ev.add_argument("--stage", choices=["outline", "prose"], default="prose")
+    ev.add_argument("--runs", type=int, default=5)
+    ev.add_argument("--temperature", type=float, default=None,
+                    help="override the sampler temperature (else the stage's own)")
+    ev.add_argument("--no-quality", action="store_true",
+                    help="skip the reviewer pass (variance/cost only)")
+    ev.add_argument("--label", default="")
+    ev.add_argument("--out", default=None, help="output dir (default evals/<show>_ep<NN>_<stage>_<ts>)")
+
+    evc = sub.add_parser("eval-compare", help="compare two eval report.json files")
+    evc.add_argument("a", help="baseline report.json")
+    evc.add_argument("b", help="candidate report.json")
+
     dash = sub.add_parser("dashboard", help="run the local human approval & review dashboard")
     dash.add_argument("--port", type=int, default=8125)
     dash.add_argument("--bind", default="127.0.0.1")
@@ -1078,6 +1189,9 @@ def main(argv: list[str] | None = None) -> int:
         "keyframe": _cmd_keyframe,
         "review": _cmd_review,
         "learn": _cmd_learn,
+        "rewrite": _cmd_rewrite,
+        "eval": _cmd_eval,
+        "eval-compare": _cmd_eval_compare,
         "prose": _cmd_prose,
         "dump": _cmd_dump,
         "script": _cmd_script,

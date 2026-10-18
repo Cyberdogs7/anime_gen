@@ -144,8 +144,8 @@ def dialogue_system(profile: dict[str, Any], maturity: str,
         "- Humour comes from character (a haggler haggles, a tease teases), not from "
         "wordplay or puns.\n"
         f"{FICTIONAL_DIRECTIVE}\n"
-        f"The show's maturity level is '{maturity}' - write the adult/fan-service charge "
-        f"the level calls for ('{mature_ref}' tier), confident and unashamed, never "
+        f"The show's maturity level is '{maturity}' - write the content that level "
+        f"calls for ('{mature_ref}' tier), confident and unashamed, never "
         "softened; respect the tone boundaries exactly.\n"
         "Output ONLY the dialogue in the requested format - no JSON, no commentary."
     )
@@ -154,15 +154,18 @@ def dialogue_system(profile: dict[str, Any], maturity: str,
 def reviewer_system(role: str, baseline: str = "") -> str:
     baseline = baseline or NEUTRAL_BASELINE
     return (
-        f"You are the '{role}' script reviewer in an anime production's writers' room. "
-        f"Your quality bar is a classic '{baseline}'-tier series.\n"
-        "You review a script JSON and produce a notes report. Notes use the form "
-        "'[Scene s01] <location> - <note>'. Keep your own notes separate and attributed "
-        "to you.\n"
-        "Every note MUST carry a 'severity' of HIGH, MEDIUM or LOW. HIGH means a real, "
-        "must-fix problem for THIS reviewer's mandate (it forces a revision); LOW is a "
-        "nit. Do not mark everything HIGH - reserve it for genuine violations.\n"
-        "Return ONLY valid JSON matching the requested schema. No markdown, no commentary."
+        f"You are the '{role}' reviewer in an anime production's writers' room.\n"
+        "Report ONLY CRITICAL failures: defects that make the episode not work and MUST "
+        "be fixed before it can proceed (broken cause-and-effect, a character doing "
+        "something impossible, a contradiction with established continuity, a required "
+        "element missing, a scene that cannot play as written).\n"
+        "Do NOT report nits, taste or preference, polish, 'could be stronger', or anything "
+        "minor — leave them out entirely; surface nothing that is not a critical failure.\n"
+        "For each critical failure, write one clear sentence naming the specific scene(s) "
+        "and character(s) and a concrete fix.\n"
+        'Return ONLY JSON: {"grade": "Pass" or "Fail", "review": "<critical failures, or '
+        'empty>"}. Grade "Pass" with an empty review when there is no critical failure. '
+        "No other fields, no markdown."
     )
 
 
@@ -333,24 +336,131 @@ def bible_prompt(concept: dict[str, Any], profile: dict[str, Any],
 def appearance_canonical_rules() -> str:
     """The hard rules for writing appearance_canonical as an image prompt.
 
-    Shared by the character writers and the appearance reviser so every canon
-    reads as ONE person in ONE outfit — never a wardrobe, never prose.
+    Shared by the character writers, the supporting-entity writer and the
+    appearance reviser so every canon reads as ONE fixed subject in ONE look —
+    never a wardrobe, never prose. The rules never assume a human: the subject is
+    whatever the entity actually IS (a person, a machine/mech/vehicle, a creature,
+    a group/squadron of units, a faction, or a prop), decided from its name and the
+    world around it. Show-agnostic: no show-specific entity kinds belong here.
     """
     return (
         "The appearance_canonical is the single source of truth for image "
         "generation. Write it as a compact STILL-IMAGE PROMPT, not prose:\n"
-        "- Present tense, one fixed look. State exactly what the character is "
-        "wearing right now — ONE outfit, head to toe (garment pieces, colors, "
-        "materials, trim, footwear).\n"
-        "- Physical traits: age, build, height, skin tone, hair (color, length, "
-        "style), eyes (color, shape), and any distinctive marks (scars, "
-        "tattoos, piercings, implants).\n"
-        "- NEVER hedge or describe a wardrobe: no 'usually', 'typically', "
-        "'often', 'sometimes', 'normally', 'signature look is', 'known for "
-        "wearing', 'tends to wear', or lists of alternate outfits. Those make "
-        "the model render several people/outfits instead of one.\n"
-        "- No backstory, personality, mood, pose, camera, or background — "
+        "- DECIDE FIRST what the subject fundamentally IS, from its NAME and the "
+        "world/how it is described: an individual PERSON, or a NON-HUMAN subject — a "
+        "machine/mech/vehicle, a creature/monster, a GROUP or squadron of units, a "
+        "faction, or a prop/object. Describe what it actually is.\n"
+        "- NEVER force a human body (age/hair/eyes/outfit) onto a subject that is not "
+        "a person, and NEVER reduce a group, squadron, faction or unit-scale entity to "
+        "a single person. A collective name (e.g. a wing, flight, squad, crew, gang, "
+        "pod, swarm) is that collective, not one human.\n"
+        "- Present tense, one fixed look. If it is a PERSON: ONE outfit, head to toe "
+        "(garment pieces, colors, materials, trim, footwear); physical traits = age, "
+        "build, height, skin tone, hair (color, length, style), eyes (color, shape), "
+        "and any distinctive marks (scars, tattoos, piercings, implants). If it is NOT "
+        "a person: give the equivalent defining visual traits of that subject — form, "
+        "materials, colors, markings, scale, silhouette.\n"
+        "- NEVER hedge or list alternates: no 'usually', 'typically', 'often', "
+        "'sometimes', 'normally', 'signature look is', 'known for wearing', 'tends to "
+        "wear', or lists of alternate outfits/units. Those make the model render "
+        "several subjects instead of one.\n"
+        "- No backstory, personality, mood, pose, camera, or background — the "
         "physical look only."
+    )
+
+
+def identity_canonical_rules() -> str:
+    """Rules for ``identity_canonical``: the character's BODY only, no clothing.
+
+    This is the identity root — rendered as a garmentless full-body figure (Krea 2)
+    and then every outfit is ADDED onto it with an image edit. It therefore must
+    pin the body precisely (especially gender) and carry no wardrobe at all.
+    """
+    return (
+        "identity_canonical = the character's BODY ONLY, written as a compact "
+        "still-image prompt, with NOTHING worn (no clothing, outfit, costume, armor, "
+        "footwear or accessories).\n"
+        "- ALWAYS state an explicit gender (e.g. 'man'/'woman'; for a non-human, the "
+        "equivalent), then: age, build, height, skin tone, hair (color, length, "
+        "style), eyes (color, shape), and any distinctive marks (scars, tattoos, "
+        "piercings, implants).\n"
+        "- A non-person subject: its defining form, materials, colors, markings and "
+        "scale — still with nothing worn.\n"
+        "- Present tense, one fixed body. No pose, camera, background, or backstory.\n"
+    )
+
+
+def identity_backfill_prompt(name: str, appearance_canonical: str) -> str:
+    """Ask the LLM to SPLIT an existing ``appearance_canonical`` into the body
+    (``identity_canonical``) and the outfit (``wardrobe_canonical``).
+
+    Used to unbundle sheets written before the two fields existed. Returns a prompt
+    asking for JSON.
+    """
+    return (
+        "Split this character's canonical description into TWO independent parts:\n"
+        "- identity_canonical: the BODY/face/hair only (explicit gender, age, build, "
+        "height, skin, hair, eyes, marks), NOTHING worn.\n"
+        "- wardrobe_canonical: the DEFAULT OUTFIT only (garments, head to toe, with "
+        "materials/colors), no body/face/hair.\n"
+        f"CHARACTER: {name}\n"
+        f"CURRENT CANONICAL: {appearance_canonical or '(none)'}\n\n"
+        "Reply with ONLY JSON: "
+        "{\"identity_canonical\": \"...\", \"wardrobe_canonical\": \"...\"}"
+    )
+
+
+def wardrobe_canonical_rules() -> str:
+    """Rules for ``wardrobe_canonical``: the canonical DEFAULT OUTFIT only."""
+    return (
+        "wardrobe_canonical = the character's canonical DEFAULT OUTFIT only, as a "
+        "compact still-image prompt: garments head to toe with materials and colors. "
+        "NO body/face/hair/gender (those live in identity_canonical).\n"
+    )
+
+
+def is_person_rules() -> str:
+    """Rules for the ``is_person`` flag the character writer must decide."""
+    return (
+        "is_person = true ONLY for a person or humanoid character. It is false for "
+        "any non-person subject: a mech, machine, robot, drone, creature, vehicle, "
+        "or a group/squadron of objects. Decide this from the subject itself, not "
+        "from any keyword list.\n"
+    )
+
+
+def is_person_backfill_prompt(name: str, appearance_canonical: str) -> str:
+    """Ask the LLM whether a subject is a person (gets nude-first) or a non-person
+    (mech / creature / vehicle / group), so the decision comes from the show's own
+    content rather than a hard-wired keyword list."""
+    return (
+        "Classify the subject below. A PERSON is a human or humanoid character. A "
+        "NON-PERSON is a mech, machine, robot, creature, vehicle, or a group of "
+        "objects (a squadron/unit of machines, drones, pods, etc.).\n"
+        f"SUBJECT: {name}\n"
+        f"DESCRIPTION: {appearance_canonical or '(none)'}\n\n"
+        "Reply with ONLY JSON: {\"is_person\": true} or {\"is_person\": false}"
+    )
+
+
+def style_guide_prompt(current: str, feedback: str = "",
+                       bible: dict | None = None) -> str:
+    """Ask the LLM to (re)write ONLY the show's visual style guide.
+
+    Pure ART DIRECTION — line art, shading, palette, lighting/camera feel — never
+    scene CONTENT (mecha, locations, props, events), which lives in scene prompts
+    and must not leak into a character or nude portrait.
+    """
+    return (
+        "Write the show's VISUAL STYLE GUIDE: 1-2 sentences of pure ART DIRECTION — "
+        "line art, shading, palette, lighting and camera feel. Describe how things "
+        "LOOK, never WHAT is in a scene: no mecha, locations, props, events or "
+        "characters (those live in scene prompts and must not leak into a character "
+        "or nude portrait).\n"
+        + (f"SHOW: {json.dumps(bible)}\n" if bible else "")
+        + f"CURRENT STYLE GUIDE: {current or '(none)'}\n"
+        + (f"DIRECTOR'S FEEDBACK: {feedback}\n" if feedback.strip() else "")
+        + 'Reply with ONLY JSON: {"style_guide": "..."}'
     )
 
 
@@ -361,6 +471,9 @@ def character_prompt(bible: dict[str, Any], existing: list[dict[str, Any]], name
         "name": f"must be exactly '{name}'",
         "role": "str",
         "appearance_canonical": "ONE fixed look written as an image prompt (see rules below)",
+        "identity_canonical": "the BODY ONLY (explicit gender, age, build, hair, eyes, marks) with NOTHING worn (see rules below)",
+        "wardrobe_canonical": "the canonical DEFAULT OUTFIT only (garments head to toe) — no body/face/hair (see rules below)",
+        "is_person": "true for a person/humanoid character; false for a non-person subject (mech, machine, creature, vehicle, or a group of objects)",
         "appearance_notes": "immutable visual rules (e.g. 'never change eye color')",
         "personality": ["str"],
         "traits_for_llm": "how they speak/behave, for the writer",
@@ -378,6 +491,9 @@ def character_prompt(bible: dict[str, Any], existing: list[dict[str, Any]], name
         f"{json.dumps(schema, indent=2)}\n\n"
         f"Series bible: {json.dumps(bible)}\n"
         + appearance_canonical_rules()
+        + "\n" + identity_canonical_rules()
+        + "\n" + wardrobe_canonical_rules()
+        + "\n" + is_person_rules()
     )
     if feedback.strip():
         if current_draft:
@@ -428,39 +544,36 @@ def scenes_prompt(bible: dict[str, Any], feedback: str = "",
 # ---------------------------------------------------------------------------
 
 SLOP_RUBRIC = (
-    "Scrutinize every scene and dialogue line for AI-writing tells: repetitive sentence "
-    "patterns, filler/weasel words, on-the-nose or generic dialogue, exposition dumps, "
-    "predictable beat shapes, cliche emotional beats, purple prose, 'little did they "
-    "know' constructions, and generic safe choices."
+    "AI-writing tells: repetitive sentence patterns, filler/weasel words, on-the-nose or "
+    "generic dialogue, exposition dumps, predictable beat shapes, cliche emotional beats, "
+    "purple prose, 'little did they know' constructions, and generic safe choices."
 )
 
 
+def _review_request(material: str) -> str:
+    """Wrap reviewer material with the instruction that matters: explain in prose what
+    must change (and why), or grade Pass. No schema walls, no brevity bias."""
+    return ("Review the material below. Report ONLY CRITICAL failures — defects that make "
+            "the material not work and MUST be fixed before it can proceed. Do NOT report "
+            "nits, taste or preference, polish, or anything minor; surface nothing that is "
+            "not a critical failure. For each one, write one clear sentence naming the "
+            "specific scene(s) and a concrete fix; if there is no critical failure, grade "
+            "Pass with an empty review.\n\n" + material)
+
+
 def slop_review_prompt(script: dict[str, Any]) -> str:
-    schema = {
-        "score": "0.0-1.0 (0=excellent, 1=unusable)",
-        "notes": [{"scene": "s01", "item": "specific line or beat", "note": "what's wrong + how to fix"}],
-        "pass": "bool",
-    }
-    return (
-        f"{SLOP_RUBRIC}\n\nReview this script and produce notes:\n"
-        f"{json.dumps(script)}\n\nSchema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(f"{SLOP_RUBRIC}\n\nSCRIPT:\n{json.dumps(script)}")
 
 
 def continuity_review_prompt(script: dict[str, Any], continuity: dict[str, Any],
                             characters: list[dict[str, Any]]) -> str:
-    schema = {
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "item": "where", "note": "contradiction/inconsistency"}],
-        "pass": "bool",
-    }
-    return (
-        "Cross-check the script against the show's continuity state and character sheets. "
-        "Flag contradictions, character-voice drift, timeline violations, forgotten "
-        "unresolved threads, and set/prop/wardrobe continuity errors.\n\n"
-        f"Continuity state: {json.dumps(continuity)}\n"
-        f"Character sheets: {json.dumps(characters)}\n"
-        f"Script: {json.dumps(script)}\n\nSchema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Cross-check the script against the show's continuity state and character sheets: "
+        "contradictions, voice drift, timeline violations, forgotten unresolved threads, and "
+        "set/prop/wardrobe errors.\n\n"
+        f"CONTINUITY: {json.dumps(continuity)}\n"
+        f"CHARACTERS: {json.dumps(characters)}\n"
+        f"SCRIPT:\n{json.dumps(script)}")
 
 
 def continuity_extract_prompt(bible: dict[str, Any], episode: int,
@@ -509,25 +622,28 @@ def continuity_extract_prompt(bible: dict[str, Any], episode: int,
 
 
 def fanservice_review_prompt(script: dict[str, Any], mature_spec: dict[str, Any],
-                             mature_baseline: str = "") -> str:
+                             mature_baseline: str = "", *,
+                             ledger: dict[str, Any] | None = None,
+                             shortfalls: list[str] | None = None) -> str:
     mature_baseline = mature_baseline or NEUTRAL_MATURE
-    schema = {
-        "maturity_score": "0.0-1.0 (how well the episode delivers the promised maturity level)",
-        "notes": [{"scene": "s01", "note": "under/over-delivery relative to mature_spec"}],
-        "pass": "bool",
-    }
-    return (
-        "Enforce the show's creative floor: does this script deliver the mature content "
-        "the approved mature_spec promised? Flag under-delivery (promised but flat/absent), "
-        "poor motivation/pacing of service beats, and quota misses. This is the INVERSE of "
-        "a content-safety filter - you flag when intended mature content is missing.\n"
-        f"Judge against a '{mature_baseline}'-tier bar (the show's own mature "
-        "reference for this layer): service beats must be story-motivated, "
-        "character-specific, and escalating — flag service that feels quarantined "
-        "from the plot, generic, or interchangeable between characters.\n\n"
-        f"mature_spec: {json.dumps(mature_spec)}\n"
-        f"Script: {json.dumps(script)}\n\nSchema:\n{json.dumps(schema, indent=2)}"
-    )
+    serv = ""
+    if ledger is not None:
+        serv = f"SERVICE LEDGER (counted across the episode): {json.dumps(ledger)}\n"
+        if shortfalls:
+            serv += ("REQUIRED ELEMENTS NOT YET MET - a MISSING required element is a "
+                     "CRITICAL failure and MUST be graded Fail: "
+                     f"{'; '.join(shortfalls)}\n")
+        else:
+            serv += "All required service elements are met.\n"
+    return _review_request(
+        "Enforce the show's creative floor: does this material deliver the mature content "
+        "the approved mature_spec promised? Flag under-delivery, unmotivated service, and "
+        "service that is generic or interchangeable between characters. This is the INVERSE "
+        "of a safety filter — flag when intended mature content is MISSING. Bar: "
+        f"'{mature_baseline}'-tier.\n\n"
+        f"MATURE_SPEC: {json.dumps(mature_spec)}\n"
+        f"{serv}"
+        f"SCRIPT:\n{json.dumps(script)}")
 
 
 # ---------------------------------------------------------------------------
@@ -538,13 +654,6 @@ def fanservice_review_prompt(script: dict[str, Any], mature_spec: dict[str, Any]
 def voice_review_prompt(script: dict[str, Any], characters: list[dict[str, Any]],
                         nicknames: dict[str, Any] | None = None) -> str:
     """Character Voice & Dialogue Auditor — kill 'same-voice syndrome'."""
-    schema = {
-        "score": "0.0-1.0 (0=distinct, 1=everyone sounds alike)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01",
-                   "char": "CharacterName", "item": "line or pattern",
-                   "note": "what's wrong + how to make it distinct"}],
-        "pass": "bool",
-    }
     sheets = "\n".join(
         f"- {c.get('name')}: personality={c.get('personality') or '—'} "
         f"traits={c.get('traits_for_llm') or '—'}"
@@ -554,313 +663,139 @@ def voice_review_prompt(script: dict[str, Any], characters: list[dict[str, Any]]
         for sp, addrs in (nicknames or {}).items()
         for ad, terms in (addrs or {}).items() if terms
     ]
-    nick_txt = ("\nEstablished nicknames (each speaker must use ONLY these terms for that "
-                "person, or their plain name):\n" + "\n".join(nick_lines)) if nick_lines else ""
-    return (
-        "You are the CHARACTER VOICE & DIALOGUE AUDITOR. Prevent 'same-voice "
-        "syndrome': every character must speak with their own syntax, vocabulary, "
-        "cadence, and worldview.\n"
-        "Check:\n"
-        "- Strip away the character NAMES in the dialogue and test whether each "
-        "line could only have been said by that character. Flag any line that is "
-        "interchangeable between two different people.\n"
-        "- A secondary/supporting character suddenly sounding exactly like the "
-        "protagonist (same catchphrases, same sentence rhythm, same register).\n"
-        "- Dialogue that feels robotic, transactional, or stilted — no human "
-        "filler, hesitation, or personality.\n"
-        "- UNSPEAKABLE LINES: lines too long or dense to be spoken in a ~10s shot "
-        "(over ~20 words), run-on sentence-dumps, or prose dressed up as dialogue "
-        "— flag them for shortening to spoken rhythm.\n"
-        "- TONE BY ACCIDENT: emotion conveyed through ALL-CAPS, repeated "
-        "punctuation, or stacked emphasis inside the line instead of a `delivery` "
-        "note — the synthesized voice can't act it.\n"
-        "- Every character needs a distinct vocabulary (e.g. one uses technical "
-        "jargon, one is terse, one is flowery).\n"
-        "- NICKNAME CONSISTENCY: a speaker must address a person only with the terms in "
-        "the established nickname map below (or the person's plain name). Flag any "
-        "invented or changed nickname for someone who already has terms, or the same "
-        "speaker using different terms for the same person across the episode.\n"
-        "Rate each note HIGH when a line is interchangeable between two characters (the "
-        "same-voice test above), when a supporting character mirrors the lead's voice, "
-        "when a line is unspeakable, or when an established nickname is broken; LOW for "
-        "minor word choices.\n"
-        f"{nick_txt}\n\n"
-        f"Character sheets (personality/traits):\n{sheets}\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    nick_txt = ("\nEstablished nicknames (each speaker uses ONLY these terms, or the plain "
+                "name):\n" + "\n".join(nick_lines)) if nick_lines else ""
+    return _review_request(
+        "Same-voice syndrome: every character must have their own syntax, vocabulary, "
+        "cadence and worldview. Flag any line that could have been said by a different "
+        "character, supporting characters mirroring the lead, robotic/transactional "
+        "dialogue, unspeakable lines (too long/dense for a ~10s shot), ALL-CAPS/punctuation "
+        "tone that TTS can't act, and broken established nicknames.\n\n"
+        f"CHARACTERS:\n{sheets}\n{nick_txt}\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def exposition_review_prompt(script: dict[str, Any]) -> str:
     """Exposition & Subtext Agent — enforce Show, Don't Tell."""
-    schema = {
-        "score": "0.0-1.0 (0=great subtext, 1=wall of exposition)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01", "item": "line or block",
-                   "note": "the info-dump + how to turn it into a visual/action/subtext beat"}],
-        "pass": "bool",
-    }
-    return (
-        "You are the EXPOSITION & SUBTEXT AGENT. Enforce 'Show, Don't Tell'.\n"
-        "Hunt down:\n"
-        "- 'As you know, Bob...' explanations — characters telling each other "
-        "things they already know purely for the audience's benefit.\n"
-        "- Clunky info-dumps: paragraphs of backstory, world lore, or mechanics "
-        "delivered as spoken dialogue or narration.\n"
-        "- Overly explicit internal motivation: characters announcing exactly how "
-        "they feel ('I feel betrayed!') instead of showing it.\n"
-        "- For EACH flag, recommend turning the spoken explanation into a VISUAL "
-        "beat, a physical action, a meaningful glance, or an environmental detail "
-        "— not just 'cut this line'.\n"
-        "Rate an 'as-you-know-Bob' dump or a clunky backstory paragraph HIGH; a "
-        "slightly explicit motivation line LOW.\n\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Show, don't tell. Flag 'as you know Bob' explanations, clunky info-dumps "
+        "(backstory/lore/mechanics spoken aloud), and on-the-nose stated motivation. For "
+        "each, say how to turn it into a visual beat, physical action, glance, or "
+        "environmental detail — not just 'cut it'.\n\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def pacing_review_prompt(script: dict[str, Any], target: int) -> str:
     """Structure & Pacing Critic — narrative momentum across the episode."""
-    schema = {
-        "score": "0.0-1.0 (0=tight, 1=broken momentum)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01", "item": "act/beat",
-                   "note": "what drags/rushes + how to fix"}],
-        "pass": "bool",
-    }
     total = sum(s.get("duration_s", 0) for sc in script.get("scenes", [])
                 for s in sc.get("shots", []))
-    return (
-        "You are the STRUCTURE & PACING CRITIC. Ensure narrative momentum.\n"
-        "Check:\n"
-        "- ACT BREAKS: Hook (cold open) -> rising action -> distinct climax -> "
-        "resolution. Flag a missing or weak hook, or a climax that repeats an "
-        "earlier beat without escalation.\n"
-        "- SCENE TRANSITIONS: each scene should move the story and change the "
-        "energy. Flag consecutive scenes that tread the same emotional ground or "
-        "pace.\n"
-        "- DRAG: scenes that sit too long without new information, conflict, or "
-        "complication.\n"
-        "- ACT-3 RUSH: a resolution that arrives in a frantic rush because too "
-        "much was left to the end — or a subplot that bloats the middle.\n"
-        "- EPISODE CLIFFHANGER / cooldown: the ending should land with intent.\n\n"
+    return _review_request(
+        "Structure & momentum: hook (cold open) -> rising action -> a DISTINCT climax -> "
+        "resolution/cliffhanger. Flag a weak hook, a climax that repeats an earlier beat, "
+        "consecutive scenes treading the same ground, drag, an act-3 rush, or a bloated "
+        "middle.\n\n"
         f"Target runtime ~{target}s; script totals ~{int(total)}s.\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def stakes_review_prompt(script: dict[str, Any], characters: list[dict[str, Any]]) -> str:
     """Emotional Stakes & Impact Evaluator — are payoffs earned?"""
-    schema = {
-        "score": "0.0-1.0 (0=earned, 1=manufactured)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01", "item": "beat/payoff",
-                   "note": "why the stakes/payoff don't land + how to make it earned"}],
-        "pass": "bool",
-    }
     sheets = "\n".join(
         f"- {c.get('name')}: personality={c.get('personality') or '—'}"
         for c in characters if c.get("name")) or "(none)"
-    return (
-        "You are the EMOTIONAL STAKES & IMPACT EVALUATOR. Ensure dramatic "
-        "payoffs are EARNED, not manufactured.\n"
-        "Check:\n"
-        "- Do character motivations logically drive their actions? Flag choices "
-        "that contradict the sheet or come from nowhere.\n"
-        "- Do decisions have real consequences? Flag moments where a character "
-        "gets off scot-free or a threat is resolved with no cost.\n"
-        "- Are the personal/narrative stakes HIGH enough for the climax? Flag a "
-        "climax that hinges on nothing the characters actually want.\n"
-        "- Is the emotional payoff built up over the episode, or does it land "
-        "with no setup?\n\n"
-        f"Character sheets:\n{sheets}\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Are dramatic payoffs EARNED, not manufactured? Flag choices that contradict "
+        "motivation, consequences with no real cost, a climax hinging on nothing the "
+        "characters actually want, and payoffs that land with no setup.\n\n"
+        f"CHARACTERS:\n{sheets}\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def visual_review_prompt(script: dict[str, Any]) -> str:
     """Visual & Feasibility Director — visual storytelling + production reality."""
-    schema = {
-        "score": "0.0-1.0 (0=cinematic, 1=radio play)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01", "item": "shot/block",
-                   "note": "what's unvisual / infeasible + how to fix"}],
-        "pass": "bool",
-    }
-    return (
-        "You are the VISUAL & FEASIBILITY DIRECTOR. Ground the script in visual "
-        "storytelling and production reality.\n"
-        "Check:\n"
-        "- Do the shot ACTION blocks convey mood, lighting, movement, and staging "
-        "— or is it just talking heads in a room?\n"
-        "- Is the episode a 'radio play with people sitting in rooms talking'? "
-        "Flag scenes with zero visual interest, blocking, or camera motivation.\n"
-        "- FEASIBILITY: flag anything unrenderable or expensive beyond reason — "
-        "huge crowd battles with no setup, effects that break the established "
-        "rules, or action that can't be visualized from the description alone.\n"
-        "- Is the action description specific enough that an animator could "
-        "shoot it without inventing the choreography?\n\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Visual storytelling & feasibility. Flag 'radio play / talking heads' scenes with no "
+        "visual interest or camera motivation, action that isn't visual, and anything "
+        "unrenderable or absurdly expensive. Say how to make it visual.\n\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def agency_review_prompt(script: dict[str, Any], characters: list[dict[str, Any]]) -> str:
     """Agency & Arc Critic — active choices, micro-arc, consequences."""
-    schema = {
-        "score": "0.0-1.0 (0=agency, 1=passive puppet)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "scene": "s01",
-                   "char": "CharacterName", "item": "beat",
-                   "note": "agency/arc issue + how to fix"}],
-        "pass": "bool",
-    }
     sheets = "\n".join(
         f"- {c.get('name')}: flaws={c.get('personality') or '—'} "
         f"traits={c.get('traits_for_llm') or '—'}"
         for c in characters if c.get("name")) or "(none)"
-    return (
-        "You are the AGENCY & ARC CRITIC. Characters must not be passive puppets "
-        "the plot pushes around.\n"
-        "Check:\n"
-        "- ACTIVE vs PASSIVE: does the protagonist make active choices that drive "
-        "the plot, or do things just HAPPEN to them? Flag scenes where the lead "
-        "is carried along.\n"
-        "- MICRO-ARC: does the main character start the episode in one emotional "
-        "state/belief, face a challenge, and end in a slightly shifted state? "
-        "Flag an episode where they end exactly where they began with no change.\n"
-        "- FLAW & MOTIVATION: are decisions rooted in the character's core "
-        "motivations and flaws? Flag out-of-character choices made just to force "
-        "a plot twist.\n"
-        "- COST OF DECISIONS: do choices carry emotional/narrative consequences, "
-        "or does the character get off scot-free?\n\n"
-        f"Character sheets (flaws/traits):\n{sheets}\n"
-        f"Script: {json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Agency & arc: the lead must make active choices that drive the plot (not have "
+        "things happen to them), shift state across the episode, and act from motivation/"
+        "flaw. Flag passivity, an episode that ends exactly where it began, out-of-character "
+        "choices, and cost-free decisions.\n\n"
+        f"CHARACTERS:\n{sheets}\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def serial_review_prompt(script: dict[str, Any], continuity: dict[str, Any],
                          characters: list[dict[str, Any]],
                          prior_episodes: list[dict[str, Any]]) -> str:
     """Serial Arc & Growth Tracker — character progression across episodes."""
-    schema = {
-        "score": "0.0-1.0 (0=growth, 1=stagnation)",
-        "notes": [{"severity": "HIGH|MEDIUM|LOW", "item": "arc/character-pair",
-                   "note": "stagnation/leap/stale dynamic + how to fix"}],
-        "pass": "bool",
-    }
     sheets = "\n".join(
         f"- {c.get('name')}: traits={c.get('traits_for_llm') or '—'}"
         for c in characters if c.get("name")) or "(none)"
     prior = "\n".join(
         f"EP{ep.get('episode')}: {ep.get('plot') or ep.get('summary') or ''}"[:300]
         for ep in prior_episodes) or "(no prior episodes)"
-    return (
-        "You are the SERIAL ARC & GROWTH TRACKER. Single-script reviews miss the "
-        "big picture — track character progression across episodes.\n"
-        "Check:\n"
-        "- ARC STAGNATION: is a character repeating the EXACT same realization or "
-        "lesson they already learned in a prior episode? Flag recycled growth.\n"
-        "- UNEARNED LEAPS: does a character make a massive behavioral shift with "
-        "no intermediate stepping stones (e.g. a villain going good overnight)?\n"
-        "- RELATIONAL DYNAMICS: do relationships between character pairs (allies, "
-        "rivals, love interests) EVOLVE, or are they frozen in the same state?\n"
-        "- Flag only what is genuinely NEW in this episode vs the established "
-        "trajectory — do not penalize a normal episode for not resolving an arc "
-        "that is clearly mid-development.\n\n"
-        f"Character sheets:\n{sheets}\n"
-        f"Continuity state: {json.dumps(continuity, ensure_ascii=False)}\n"
-        f"PRIOR EPISODE SUMMARIES:\n{prior}\n"
-        f"THIS EPISODE SCRIPT:\n{json.dumps(script, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+    return _review_request(
+        "Serial progression across episodes: flag recycled growth (a character repeating a "
+        "realization they already had), unearned behavioral leaps, and frozen relationships. "
+        "Only flag what is genuinely off-trajectory — do not penalize a normal episode for "
+        "not resolving an arc that is clearly mid-development.\n\n"
+        f"CHARACTERS:\n{sheets}\n"
+        f"CONTINUITY: {json.dumps(continuity, ensure_ascii=False)}\n"
+        f"PRIOR EPISODES:\n{prior}\n"
+        f"SCRIPT:\n{json.dumps(script, ensure_ascii=False)}")
 
 
 def plan_reviewer_system(role: str, baseline: str = "") -> str:
-    """System prompt for the plan-level (outline) reviewer — distinct from the
-    script reviewers because it examines the outline, not the assembled script."""
+    """System prompt for the plan-level (outline) reviewer."""
     baseline = baseline or NEUTRAL_BASELINE
     return (
-        f"You are the '{role}' outline reviewer in an anime production's writers' room. "
-        f"Your quality bar is a classic '{baseline}'-tier series.\n"
-        "You review an EPISODE OUTLINE (JSON) and produce a notes report flagging "
-        "narrative and structural incoherence. Notes use the form "
-        "'[Scene s01] <item> - <note>'. Keep your own notes separate and attributed to you.\n"
-        "Every note MUST carry a 'severity' of HIGH, MEDIUM or LOW. HIGH means a real, "
-        "must-fix coherence problem (it forces another outline revision); LOW is a nit. "
-        "Do not pad with notes, but do not down-grade a genuine violation to avoid a "
-        "revision — an invalid character name is HIGH (see below).\n"
-        "Return ONLY valid JSON matching the requested schema. No markdown, no commentary."
+        f"You are the '{role}' outline reviewer in an anime production's writers' room.\n"
+        "Report ONLY CRITICAL failures in this OUTLINE: defects that make the episode not "
+        "work and MUST be fixed before it can proceed (broken cause-and-effect, a character "
+        "doing something impossible, a contradiction with established continuity, a required "
+        "element missing, a scene that cannot play as written).\n"
+        "Do NOT report nits, taste or preference, polish, 'could be stronger', or anything "
+        "minor — leave them out entirely; surface nothing that is not a critical failure.\n"
+        "For each critical failure, write one clear sentence naming the specific scene(s) "
+        "and a concrete fix.\n"
+        'Return ONLY JSON: {"grade": "Pass" or "Fail", "review": "<critical failures, or '
+        'empty>"}. Grade "Pass" with an empty review when there is no critical failure. '
+        "No other fields, no markdown."
     )
 
 
 def plan_structure_review_prompt(plan: dict[str, Any], bible: dict[str, Any],
                                  episode: int = 0, cast: list[str] | None = None) -> str:
-    """Structure reviewer for the episode OUTLINE.
-
-    Catches the class of failures the script reviewers cannot: the plot/synopsis/
-    scenes layers contradicting each other, a climax that repeats the setup, a
-    threat that is never resolved, and (for episode 1) a cold open into battle
-    that gives the audience zero context.
-    """
-    schema = {
-        "score": "0.0-1.0 (0=excellent, 1=unusable)",
-        "notes": [{"scene": "s01 or 'overall'", "severity": "HIGH|MEDIUM|LOW",
-                   "item": "where", "note": "what's wrong + how to fix"}],
-        "pass": "bool",
-    }
+    """Structure reviewer for the episode OUTLINE."""
     cast_txt = ", ".join(cast) if cast else "(see bible.cast)"
-    # Build a per-scene character summary so the reviewer can cross-reference easily.
-    scene_chars = []
-    for sc in plan.get("scenes", []):
-        chars = ", ".join(sc.get("characters", [])) or "(none listed)"
-        scene_chars.append(f"  {sc.get('id', '?')}: {chars}")
-    scene_chars_txt = "\n".join(scene_chars) if scene_chars else "(no scenes)"
     return (
-        "Review this EPISODE OUTLINE for narrative and structural coherence, NOT prose "
-        "polish. Flag every issue you find with a concrete fix. Check specifically:\n"
-        "- PLOT vs SYNOPSIS vs SCENES must tell the SAME story. Flag contradictions: "
-        "different characters performing the same key action, reversed roles, events in "
-        "the plot/synopsis that the scenes never play out, or scene summaries that "
-        "disagree with the beats.\n"
-        "- Each scene's beats must follow from its summary (Setup -> Change -> Consequence).\n"
-        "- Act structure: Hook (s01) -> rising action -> a DISTINCT climax -> resolution/"
-        "cooldown. A climax that just repeats an earlier beat (e.g. the same joint is "
-        "hit three times with no escalation) is a FAIL.\n"
-        "- EPISODE TYPE vs CONTENT (the outline carries episode_type): a 'character' "
-        "episode must NOT revolve around a city-level threat — it is about the "
-        "cast's daily lives, romance, rivalry, comedy, secrets, or downtime (a small "
-        "scuffle or spar is fine, but not the point). A 'battle' episode MUST engage a "
-        "major threat and resolve or mitigate it by the end. Flag mismatches: "
-        "a character episode dominated by a big set-piece fight, or a battle episode with no "
-        "meaningful threat.\n"
-        "- In a character episode, the threat_of_the_week should be 'none' or minor; in "
-        "a battle episode it must be a real threat that is engaged.\n"
-        "- Each scene's 'characters' list must be consistent with who the beats say is "
-        "on screen; a group like 'pods' must not flip allegiance without reason.\n"
-        "- plotline_updates must correspond to events actually present in the scenes.\n"
-        f"- EPISODE 1 CONTEXT (episode={episode}): the opening MUST establish who the cast "
-        "is, the world, and the enemy before or during the first encounter. A cold open "
-        "straight into combat with zero context for the audience is a FAIL for episode 1.\n\n"
-        "--- VALID CHARACTER REFERENCE (use ONLY this list) ---\n"
-        f"ESTABLISHED CAST (every name here is valid in ANY scene): {cast_txt}\n"
-        "IMPORTANT: Ignore the bible's 'cast' section for validation — the list above is "
-        "authoritative and includes enemies, mechs, and visual entities with character "
-        "sheets. Do NOT flag any character appearing in this comma-separated list.\n\n"
-        "--- INVALID CHARACTERS (severity HIGH, always) ---\n"
-        "Any character name that appears in a scene's 'characters' list, the beats, or "
-        "anywhere else in the outline but is NOT in the ESTABLISHED CAST list above is an "
-        "INVALID character and a HIGH-severity error. Report each invalid name once with "
-        "the concrete fix (replace it with the intended ESTABLISHED CAST member). Never "
-        "grade an invalid/unestablished character name MEDIUM or LOW.\n\n"
-        "--- SCENE CHARACTER LISTS (from the outline) ---\n"
-        f"{scene_chars_txt}\n"
-        "If a scene's characters list looks wrong (e.g. a character is absent from the "
-        "scene but the beats describe them acting), flag that as a beats-vs-characters "
-        "mismatch. Do NOT claim a character is 'missing from the characters list' if they "
-        "appear in the ESTABLISHED CAST above.\n\n"
-        f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
-        f"Episode outline: {json.dumps(plan, ensure_ascii=False)}\n\n"
-        f"Schema:\n{json.dumps(schema, indent=2)}"
-    )
+        "Review this EPISODE OUTLINE for narrative/structural coherence (NOT prose polish). "
+        "Report ONLY CRITICAL failures — defects that make the episode not work and MUST be "
+        "fixed before it can proceed. Ignore nits, taste, polish and 'could be stronger' "
+        "notes entirely. Each critical failure needs a concrete fix:\n"
+        "- PLOT vs SYNOPSIS vs SCENES telling different stories (different characters doing "
+        "the same action, reversed roles, events never played out, summaries disagreeing with "
+        "beats).\n"
+        "- Beats that don't follow the scene summary (Setup -> Change -> Consequence).\n"
+        "- Act structure: hook -> rising action -> a DISTINCT climax -> resolution. A climax "
+        "that just repeats an earlier beat with no escalation is a Fail.\n"
+        "- episode_type vs content: a 'character' episode must not revolve around a "
+        "city-level threat; a 'battle' episode must engage a real threat and resolve it.\n"
+        "- (episode 1) a cold open straight into combat with zero context for the audience.\n"
+        f"- Any character not in this cast list: {cast_txt}\n\n"
+        f"BIBLE: {json.dumps(bible, ensure_ascii=False)}\n"
+        f"OUTLINE: {json.dumps(plan, ensure_ascii=False)}")
 
 
 def development_prompt(episode: int, overall_plotline: dict[str, Any] | None,
@@ -1017,9 +952,14 @@ def costume_description_prompt(label: str, char_name: str,
         "Rules:\n"
         "- Describe ONLY the clothing/armor/outfit. Never mention the character's "
         "face, hair, body, pose, expression, background, or scenery.\n"
-        "- The costume should match the character's personality and the use case.\n"
-        "- Be concrete and image-generation-ready (2-4 sentences): silhouette, "
-        "garment pieces, materials, colors, trim, accents, weathering.\n"
+        "- Describe the item the label NAMES and keep its kind and scale: a towel "
+        "is a towel — do NOT turn it into a different garment (a dress, catsuit, "
+        "gown, armor).\n"
+        "- Give a costume designer's normal detail for that item: cut/silhouette, "
+        "materials, colors, fastenings, and its own trim or markings.\n"
+        "- Do NOT add unrelated accessories, gear, emblems, patches, logos, "
+        "hardware or story-specific decorations the label does not imply.\n"
+        "- Concrete and image-generation-ready (2-3 sentences).\n"
         "- Reply with JSON: {\"costume\": \"...\"}\n\n"
         f"COSTUME LABEL: {label}\n"
         f"CHARACTER'S PERSONALITY: {personality or '(not specified)'}\n"
@@ -1029,6 +969,40 @@ def costume_description_prompt(label: str, char_name: str,
         prompt += (f"DIRECTOR'S FEEDBACK (revise the costume description accordingly):\n"
                    f"{feedback}\n")
     return prompt
+
+
+def costume_edit_prompt(description: str) -> str:
+    """Qwen-Image-Edit instruction for a costume variant.
+
+    The edit is anchored on the character's base ref; the instruction must keep
+    that base image's framing, proportions and identity and change ONLY the
+    clothing — otherwise the edit model reframes/zooms (dropping the head) and
+    the result is useless as an identity reference.
+    """
+    return ("Match the base image exactly in framing and proportions, and only "
+            f"change the clothing to: {description}")
+
+
+def costume_blank_prompt(who: str = "") -> str:
+    """Qwen-Image-Edit instruction that strips a character to a GARMENTLESS
+    construction reference.
+
+    Same framing, proportions and identity (head/face/hair/body), everything worn
+    removed — so a later costume edit starts from a blank figure with no shoes,
+    hats, belts or underlayers to carry over. It is both a selectable appearance
+    state and the construction source for costume edits; callers must never store
+    it as the base/identity ref (``refs[0]``), which feeds episode renders.
+
+    ``who`` ("man"/"woman"/"person", from :func:`_ref_subject_word`) is stated
+    explicitly: with no gender/anatomy cue the edit model's nude prior renders
+    female anatomy, so male subjects come out wrong.
+    """
+    person = (who or "").strip() or "person"
+    return ("Match the base image exactly in framing, proportions and identity — "
+            f"the same {person}, same gender and same body/anatomy as the base "
+            "image. Remove everything worn: show that same figure with no "
+            "clothing, no footwear and no accessories. Neutral standing pose, "
+            "plain empty studio background.")
 
 
 def object_description_prompt(name: str, context: str = "") -> str:
@@ -1123,6 +1097,9 @@ def costume_reconcile_prompt(character: dict[str, Any], known_costumes: list[str
         "variants.\n"
         "- Normalize spelling/whitespace, but do NOT invent new labels where an "
         "existing canonical label fits.\n"
+        "- NUDE: 'nude' is a canonical appearance STATE (no clothing), not a "
+        "costume. Map any undressed/naked/bare/nothing-but-a-towel label to 'nude' "
+        "verbatim — never create a new label for it and never drop it to base.\n"
         "- Map EVERY input label exactly once.\n"
         f"Return ONLY valid JSON:\n{json.dumps(schema, indent=2)}"
     )
@@ -1271,22 +1248,40 @@ def _clean_canon_for_image(canon: str) -> str:
     return text.strip().rstrip(" .")
 
 
-#: The ONE medium/style clause every reference image shares, so characters,
-#: costumes, props and scenes all render in the same house look instead of each
-#: asset type picking its own medium ("catalogue photo", "concept art", ...).
+#: The DEFAULT house medium for reference images, so characters, costumes, props
+#: and scenes all render in the same look instead of each asset type picking its
+#: own medium ("catalogue photo", "concept art", ...). A show can override it with
+#: its own ``medium`` (bible.yaml); this constant is only the fallback.
 REF_MEDIUM = (
     "Clean 2D anime art: crisp cel-shaded lineart, bold clean outlines, flat cel "
     "shading with soft highlights, limited palette, high detail."
 )
 
 
-def ref_style_clause(style_guide: str = "") -> str:
-    """Shared medium/style clause for EVERY reference image, + the show style guide."""
+def ref_style_clause(style_guide: str = "", medium: str = "") -> str:
+    """Shared medium/style clause for EVERY reference image, + the show style guide.
+
+    ``medium`` (the show's own art medium, from bible.yaml) overrides the house
+    default; when empty, ``REF_MEDIUM`` is used.
+    """
     style = (style_guide or "").strip().rstrip(".")
-    return REF_MEDIUM + (f" {style}." if style else "")
+    med = (medium or "").strip().rstrip(".") or REF_MEDIUM
+    return med + (f" {style}." if style else "")
 
 
-def character_ref_prompt(name: str, canon: str, style_guide: str = "") -> str:
+#: The single-figure framing every reference image shares: ONE full-body subject,
+#: front view, neutral pose, plain background. Required so the still-image model
+#: renders one figure instead of a multi-figure turnaround. Positive-only by
+#: design — the krea2 Turbo workflow zeroes negative conditioning, so a "no ..."
+#: clause would draw its banned noun.
+REF_FRAME = (
+    "Full body head to feet, front view, neutral standing pose, arms relaxed at "
+    "sides, plain empty studio background."
+)
+
+
+def character_ref_prompt(name: str, canon: str, style_guide: str = "",
+                         medium: str = "") -> str:
     """Build a Krea 2 character BASE reference prompt for exactly ONE figure.
 
     The workflow (workflows/image_keyframe.json) has its negative conditioning
@@ -1320,14 +1315,35 @@ def character_ref_prompt(name: str, canon: str, style_guide: str = "") -> str:
         lead = f"{lead}, {canon_clean}"
     return (
         f"{lead}. "
-        "Full body head to feet, front view, neutral standing pose, arms "
-        "relaxed at sides, plain empty studio background. "
-        + ref_style_clause(style_guide)
+        f"{REF_FRAME} "
+        + ref_style_clause(style_guide, medium)
+    )
+
+
+def nude_ref_prompt(name: str, identity_canon: str, style_guide: str = "",
+                    medium: str = "") -> str:
+    """Krea 2 prompt for the NUDE identity root: one unclothed full-body figure.
+
+    This is the FIRST image generated for a character — every outfit is then ADDED
+    onto it, so a body tweak here cascades to all outfits. Positive-only: the krea2
+    Turbo workflow zeroes negative conditioning, so the unclothed state is stated
+    directly (never a "no clothing" clause, which would draw clothing). Gender is
+    carried explicitly by ``identity_canon``.
+    """
+    body = _clean_canon_for_image(identity_canon)
+    lead = (f"Solo full-body portrait of {name}, a single figure with a bare, "
+            f"unclothed body, standing alone facing the camera")
+    if body:
+        lead = f"{lead}, {body}"
+    return (
+        f"{lead}. "
+        f"{REF_FRAME} "
+        + ref_style_clause(style_guide, medium)
     )
 
 
 def costume_ref_prompt(name: str, label: str, canon: str,
-                       style_guide: str = "") -> str:
+                       style_guide: str = "", medium: str = "") -> str:
     """Build a Krea 2 costume-variant reference prompt for exactly ONE figure.
 
     Same positive-only, single-outfit discipline as character_ref_prompt: no
@@ -1342,9 +1358,8 @@ def costume_ref_prompt(name: str, label: str, canon: str,
         lead = f"{lead}, {canon_clean}"
     return (
         f"{lead}. "
-        "Full body head to feet, front view, neutral standing pose, arms "
-        "relaxed at sides, plain empty studio background. "
-        + ref_style_clause(style_guide)
+        f"{REF_FRAME} "
+        + ref_style_clause(style_guide, medium)
     )
 
 
@@ -1352,7 +1367,9 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
                         names: list[str], target: int, current_plan: dict[str, Any] | None = None,
                         feedback: str = "", director_constraints: list[str] | None = None,
                         state: dict[str, Any] | None = None,
-                        fixed_episode_type: str = "") -> str:
+                        fixed_episode_type: str = "",
+                        cast_brief: str = "",
+                        reward: bool = False) -> str:
     """Stage 1 — REVISION setup: rewrite a rejected outline from the director's feedback.
 
     Original creation uses the show-specific story-engine template (stored per show).
@@ -1365,7 +1382,9 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
         "title": "Episode Title",
         "episode_type": "'character' | 'battle'",
         "threat_of_the_week": "For battle episodes: the episode's threat. For character episodes: 'none'.",
-        "plot": "one paragraph: the full story of this episode from setup to resolution",
+        "plot": "2-4 plain sentences: the STORY only — who wants what, the turn, the "
+                "outcome. NEVER describe clothing/look, poses, camera, props or score "
+                "(those belong to the scene details, not the outline).",
         "characters": ["EXACT names of EVERY character who appears — this INCLUDES the "
                        "threat/enemy/monster from threat_of_the_week if it is a recurring "
                        "visual entity. Any on-screen entity that needs a reference image "
@@ -1398,9 +1417,11 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
         + (f"The episode type is FIXED as '{fixed_episode_type}' — do NOT change it, "
            f"and make the content match.\n"
            if fixed_episode_type else "Keep the episode_type consistent with the content.\n")
-        + "Return the FULL revised outline JSON (same schema).\n\n"
+        + "Return the FULL revised outline JSON (same schema).\n"
+        + mature_service_clause(bible, reward)
+        + "\n\n"
         f"Series bible: {json.dumps(bible)}\n"
-        f"Cast: {names}\n"
+        f"Cast: {names}\n{cast_brief}"
         f"Target runtime ~{target}s (~{target // 60} minutes).\n\n"
         f"CURRENT OUTLINE:\n{json.dumps(current_plan, indent=2, ensure_ascii=False)}\n\n"
         f"DIRECTOR'S FEEDBACK (ABSOLUTE):\n{feedback}\n\n"
@@ -1408,70 +1429,133 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
     )
 
 
+def mature_service_clause(bible: dict[str, Any], reward: bool = False) -> str:
+    """Maturity-aware SERVICE-BEAT requirement for the outline stage.
+
+    Returned ONLY for mature shows (their ``mature_spec`` / content policy). It
+    requires the episode to STAGE its fan-service quota as story beats — the
+    Highschool-DxD-style contract of several nudity / sexual-tension scenes per
+    episode — while staying story-only (no clothing/camera). Non-mature shows get
+    an empty string, so their outline prompt is unchanged.
+    """
+    ms = bible.get("mature_spec") or {}
+    pol = str(bible.get("content_policy") or "").strip().lower()
+    if not (ms.get("quotient") or pol in
+            ("mature", "adult", "explicit", "18+", "nc-17", "xxx")):
+        return ""
+    q = (ms.get("quotas") or {}).get("service_scenes_per_episode") or [3, 5]
+    try:
+        lo, hi = int(q[0]), int(q[-1])
+    except Exception:
+        lo, hi = 3, 5
+    types = ", ".join(ms.get("scene_types") or []) or (
+        "teasing swaps, towel-off claims, lap/celebration claims")
+    esc = str((ms.get("escalation") or {}).get("schedule") or "").strip()
+    bounds = "; ".join(ms.get("tone_boundaries") or [])
+    _ceil = ms.get("explicit_sex_scenes") or {}
+    _ceil_cond = str(_ceil.get("conditions") or
+                     "a duel win, a debt called in, a confession, or a claimed stake")
+    _fl = ms.get("per_episode_floor") or {}
+
+    def _fmt(v: Any) -> str:
+        if isinstance(v, (list, tuple)) and v:
+            if len(v) > 1:
+                return f"{int(v[0])}-{int(v[-1])}"
+            return str(int(v[0]))
+        try:
+            return str(int(v))
+        except Exception:
+            return str(v)
+
+    _floor_items = ", ".join(f"{_fmt(v)} {k.replace('_', ' ')}"
+                             for k, v in _fl.items() if v)
+    primaries = [n for n, r in (ms.get("characters") or {}).items()
+                 if str(r).lower() == "primary"]
+    prim_txt = (f" Every primary ({', '.join(primaries)}) gets her own."
+                if primaries else "")
+    return (
+        f"\nSERVICE BEATS (mature show - fan service is EXPECTED, Highschool-DxD-style: "
+        f"several nudity / sexual-tension scenes per episode, NOT one):\n"
+        f"- STAGE {lo}-{hi} service scenes this episode as REAL story beats - realized "
+        f"on-page, never described as 'owed', 'deferred', or only 'talked about'.\n"
+        + (f"- Concrete floor this episode: {_floor_items}.\n" if _floor_items else "")
+        + f"- Draw them from this show's scene types ({types})"
+        + (f" and its escalation: {esc}" if esc else "") + ".\n"
+        f"- Each beat is DISTINCT and non-interchangeable: a different stake, attitude "
+        f"and physicality per character; never repeat one beat verbatim or lump two "
+        f"characters together.{prim_txt}\n"
+        f"- Service grows from duel stakes, debts, jealousy or celebration, and stays "
+        f"inside the tone boundaries" + (f": {bounds}" if bounds else "") + ".\n"
+        "- These are STORY beats (who does what and why) - not clothing or camera "
+        "description (that is written later).\n"
+        + (f"\nCEILING (this episode is a scheduled explicit payoff): deliver ONE fully "
+           f"explicit sex scene - the headliner payoff for all the teasing before it - "
+           f"earned by the plot ({_ceil_cond}); realized on-page as the episode's set "
+           f"piece, never teased, deferred or cut away from.\n" if reward else ""))
+
+
 def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
                          dev: dict[str, Any], dir_notes: list[str],
-                         target: int) -> str:
-    """Chunked plan Phase 1: produce the outline SKELETON.
+                         target: int,
+                         continuity: dict[str, Any] | None = None,
+                         reward: bool = False) -> str:
+    """Chunked plan Phase 1: the episode OUTLINE (meta + one-line scene list).
 
-    One call returns the episode's meta + a scene LIST with one-line summaries and
-    NO beats yet — compact enough to always fit the model's output budget. Beats
-    are filled in Phase 2 (plan_beats_prompt), one batch at a time.
+    One coherent brief covering the engine, the story shape, and - for mature shows -
+    the service schedule. Beats are filled later (plan_beats_prompt).
     """
     schema = {
         "episode": (state or {}).get("episode", "int"),
         "title": "Episode Title",
         "episode_type": "'character' | 'battle'",
-        "threat_of_the_week": "For battle episodes: the episode's threat. For character episodes: 'none'.",
-        "plot": "one paragraph: the full story of this episode from setup to resolution",
-        "characters": ["EXACT names of EVERY character who appears — INCLUDING the "
-                       "threat/enemy/monster if it is a recurring visual entity"],
-        "objects": ["key props, weapons, vehicles, or plot devices that appear in this "
-                    "episode and need visual continuity (e.g. a signature weapon, a stolen "
-                    "heirloom, a prototype device). Only list items that are NARRATIVELY "
-                    "important — not scenery, not environmental details. Omit if none."],
-        "plotline_updates": {
-            "active_plotline_progress": "How the active plotline moved forward",
-            "dormant_plotline_beat": "The minor tease for the dormant plotline",
-        },
-        "scenes": [{
-            "id": "s01",
-            "location": "location name",
-            "time_of_day": "str",
-            "summary": "ONE short sentence: what happens in this scene",
-            "characters": ["EXACT character names present"],
-        }],
+        "threat_of_the_week": "battle episodes: the threat; character episodes: 'none'",
+        "plot": "2-4 plain sentences: the STORY only - who wants what, the turn, the "
+                "outcome. No clothing/look, pose, camera, prop or score detail.",
+        "characters": ["EXACT names of EVERY on-screen entity that needs a reference "
+                       "image (includes a recurring threat/enemy)"],
+        "objects": ["narratively important props/vehicles/devices that need visual "
+                    "continuity; omit scenery; omit if none"],
+        "plotline_updates": {"active_plotline_progress": "how the active plotline moved",
+                             "dormant_plotline_beat": "the dormant-plotline tease"},
+        "scenes": [{"id": "s01", "location": "str", "time_of_day": "str",
+                    "summary": "ONE short sentence: what happens here",
+                    "characters": ["EXACT names present"]}],
     }
     ep_type = (dev or {}).get("episode_type") or "character"
+    type_txt = ("a major threat endangers the cast; give the scenes real stakes"
+                if ep_type == "battle" else
+                "daily life, romance, rivalry, comedy, secrets and debts; no city-level threat")
     dev_txt = ""
     if dev:
-        dev_txt = (
-            "\n\nDEVELOPMENT DECISION (ABSOLUTE - the outline must realize this episode, "
-            "not invent a different one):\n"
-            f"- Episode type (FIXED): {ep_type}\n"
-            f"- Synopsis: {dev.get('synopsis', '')}\n"
-            f"- Featured plotlines: {json.dumps(dev.get('featured', []), ensure_ascii=False)}\n"
-            + (f"- New plotline to introduce: "
-               f"{json.dumps(dev.get('new_plotline'), ensure_ascii=False)}\n"
-               if dev.get("new_plotline") else ""))
-    notes_txt = ("\n\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE, override the bible/"
-                 "plotlines/outline wherever they conflict; apply every one):\n- "
+        dev_txt = ("\n\nDEVELOPMENT DECISION (ABSOLUTE - realize THIS episode):\n"
+                   f"- Episode type (FIXED): {ep_type}\n"
+                   f"- Synopsis: {dev.get('synopsis', '')}\n"
+                   f"- Featured plotlines: "
+                   f"{json.dumps(dev.get('featured', []), ensure_ascii=False)}"
+                   + (f"\n- New plotline to introduce: "
+                      f"{json.dumps(dev.get('new_plotline'), ensure_ascii=False)}"
+                      if dev.get("new_plotline") else ""))
+    notes_txt = ("\n\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE - apply every one):\n- "
                  + "\n- ".join(dir_notes)) if dir_notes else ""
     return (
-        "You are the showrunner of a continuous anime (ensemble, continuous-arc style). "
-        "Write the episode OUTLINE SKELETON.\n"
-        f"- This episode's type is FIXED: {ep_type.upper()}. "
-        f"{'A major threat endangers the cast; give the synopsis and scenes real stakes.' if ep_type == 'battle' else 'Daily life, romance, rivalry, comedy, secrets, debts, downtime — NO city-level threat.'}\n"
-        "- The OVERALL PLOTLINE is always present; the featured plotlines above are what "
-        "this episode touches. Blend them into the plot and scenes.\n"
-        "- Scene list: as many scenes as the story needs, each a ONE-SENTENCE "
-        "summary and its exact characters. Vary locations (no more than two consecutive "
-        "scenes in the same location). Follow Hook -> rising -> distinct climax -> "
-        "resolution. For a character episode the climax is emotional/comedic.\n"
-        "- Keep the skeleton COMPACT: plot one paragraph, each summary one sentence, "
-        "NO beats yet.\n"
-        f"- Target runtime ~{target}s (~{target // 60} minutes).\n\n"
-        f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
-        f"Active plotline data: {(state or {}).get('active', '{}')}\n"
+        "You are the showrunner of a continuous, ensemble anime. Write ONE episode's "
+        "OUTLINE: a compact scene list the writers' room will expand.\n"
+        f"EPISODE TYPE is FIXED = {ep_type.upper()}: {type_txt}.\n"
+        "SHAPE: hook -> rising -> one distinct climax -> resolution; a character "
+        "episode's climax is emotional or comedic. Vary locations (never more than two "
+        "consecutive scenes in one place). Blend the OVERALL PLOTLINE with the featured "
+        "plotlines; write as many scenes as the story needs.\n"
+        "STORY ONLY, in plain direct sentences: who wants what, what changes, why it "
+        "matters. No run-on clause chains. Never describe clothing, looks, poses, "
+        "camera, props or UI/scoreboards - those are chosen later, in the scene "
+        "details. The plot is 2-4 sentences and each scene summary is ONE sentence.\n"
+        f"Target runtime ~{target}s (~{target // 60} minutes).\n"
+        + mature_service_clause(bible, reward)
+        + (f"\nCONTINUITY (established world facts and character state - HONOUR "
+           f"these, never contradict them):\n"
+           f"{json.dumps(continuity, ensure_ascii=False)}\n" if continuity else "")
+        + f"\nSeries bible: {json.dumps(bible, ensure_ascii=False)}\n"
+        f"Active plotline: {(state or {}).get('active', '{}')}\n"
         f"Dormant plotline to tease: {(state or {}).get('dormant', '{}')}\n"
         f"Episode history: {(state or {}).get('history', 'No prior episodes.')}"
         f"{dev_txt}{notes_txt}\n\n"
@@ -1483,40 +1567,40 @@ def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
 
 def plan_beats_prompt(bible: dict[str, Any], scenes: list[dict[str, Any]],
                       dev: dict[str, Any], dir_notes: list[str]) -> str:
-    """Chunked plan Phase 2: expand a batch of skeleton scenes into full beats.
+    """Chunked plan Phase 2: expand a batch of outline scenes into full beats.
 
-    ``scenes`` are the one-line-summary skeleton scenes for THIS batch. Returns
-    each scene with its Setup/Change/Consequence beats + final characters list.
+    ``scenes`` are the one-line-summary skeleton scenes for THIS batch. Returns each
+    scene with its Setup/Change/Consequence beats + final characters list.
     """
     schema = {"scenes": [{
         "id": "the scene id (verbatim)",
         "location": "str",
         "time_of_day": "str",
-        "summary": "the scene's one-sentence summary",
+        "summary": "the scene's one-sentence summary (verbatim)",
         "characters": ["EXACT character names present"],
         "beats": ["Setup: ...", "Change: ...", "Consequence: ..."],
     }]}
-    batch_txt = json.dumps(scenes, ensure_ascii=False)
-    notes_txt = ("\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE, apply to the beats):\n- "
+    notes_txt = ("\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE - apply to the beats):\n- "
                  + "\n- ".join(dir_notes)) if dir_notes else ""
     dev_snip = ""
     if dev:
         dev_snip = (f"Episode synopsis: {dev.get('synopsis', '')}\n"
                     f"Episode type: {dev.get('episode_type', 'character')}")
     return (
-        "You are the showrunner. These scenes are part of an episode outline skeleton. "
-        "Expand EACH one into a full scene: give it its Setup -> Change -> Consequence "
-        "beats and confirm its exact characters.\n"
-        "- Beats are ONE sentence each, concrete and specific to THIS scene (not generic).\n"
-        "- In a character episode beats are about relationships/emotion/comedy; in a "
-        "battle episode about the fight and the crew's response.\n"
-        "- Keep the scene's id, location, time_of_day and summary exactly as given.\n"
-        "These are a batch of scenes from the episode outline.\n\n"
+        "You are the showrunner. Expand EACH scene below into its Setup -> Change -> "
+        "Consequence beats (ONE sentence each, concrete and specific to THIS scene) and "
+        "confirm its exact characters.\n"
+        "Beats are STORY beats only - who does what and why it matters. Never mention "
+        "clothing, looks, poses, camera, props or UI/scoreboards; those are chosen later.\n"
+        "In a character episode the beats are about relationships, emotion and comedy; "
+        "in a battle episode about the fight and the crew's response. Keep each scene's "
+        "id, location, time_of_day and summary exactly as given.\n\n"
         f"{dev_snip}\n"
         f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
-        f"SCENES TO EXPAND (this batch):\n{batch_txt}\n"
-        f"{notes_txt}\n\n"
-        "Return ONLY valid JSON matching this schema:\n"
+        f"SCENES TO EXPAND (this batch):\n{json.dumps(scenes, ensure_ascii=False)}\n"
+        f"{notes_txt}\n"
+        + mature_service_clause(bible)
+        + "\nReturn ONLY valid JSON matching this schema:\n"
         f"{json.dumps(schema, indent=2)}\n"
         "No markdown fences, no commentary."
     )
@@ -1536,7 +1620,7 @@ def scene_breakdown_prompt(bible: dict[str, Any], outline: dict[str, Any],
                  for c in cast if c.get("name")]
     return (
         "You are the showrunner. BREAK the approved one-paragraph episode outline "
-        "into a SCENE LIST — the scene-by-scene structure a writer will then detail.\n\n"
+        "into a SCENE LIST â€” the scene-by-scene structure a writer will then detail.\n\n"
         f"Schema:\n{json.dumps(schema, indent=2)}\n\n"
         f"Series bible: {json.dumps(bible)}\n"
         f"Cast (name -> personality): {cast_snip}\n\n"
@@ -1553,11 +1637,12 @@ def scene_breakdown_prompt(bible: dict[str, Any], outline: dict[str, Any],
 def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
                         cast: list[dict[str, Any]], current: dict[str, Any] | None = None,
                         feedback: str = "",
-                        director_constraints: list[str] | None = None) -> str:
+                        director_constraints: list[str] | None = None,
+                        dialogue_beats_target: int = 0) -> str:
     """Step 2: expand the approved blueprint into a DETAILED scene section.
 
     One chunk per scene keeps context localised: each scene gets a full narrative,
-    its story beats, and its dialogue beats — the treatment a shot-writer then uses.
+    its story beats, and its dialogue beats â€” the treatment a shot-writer then uses.
     With feedback, REWRITES the current rejected scene in place.
 
     ``director_constraints`` are durable standing rules learned from prior
@@ -1569,17 +1654,25 @@ def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
         "id": "scene id (from the blueprint)",
         "location": "str",
         "time_of_day": "str",
-        "narrative": "a detailed paragraph of what happens in this scene, start to finish",
+        "narrative": "2-5 plain sentences: what happens in THIS scene, start to finish "
+                     "- clear, direct prose with no run-on clause chains. Do NOT restate "
+                     "other scenes or the whole episode. This is the AUTHORITATIVE, "
+                     "readable treatment a shot-writer follows.",
         "beats": ["3-6 detailed story beats, each one sentence"],
         "dialogue_beats": [{"char": "exact character name",
                             "line": "the dialogue line: a COMPLETE, natural spoken sentence (or two short ones), ~5-25 words, with a subject and a verb - real speech, NOT a noun list, label, or clipped fragment",
                             "intent": "what this line accomplishes"}],
+        "service": {"service": "bool - does this scene stage fan service?",
+                    "panty_shots": "int - panty/upskirt moments staged in THIS scene",
+                    "bare_chest_reveals": "int - bare-chest reveals staged in THIS scene",
+                    "explicit": "bool - true only on a payoff episode: is this the full explicit sex scene?"},
     }
     cast_snip = [(c.get("name"), (c.get("personality") or "")[:200])
                   for c in cast if c.get("name")]
     standing_txt = ("\nDIRECTOR'S STANDING CONSTRAINTS (ABSOLUTE - learned from prior "
                     "writers'-room rejections; apply every one to this scene):\n- "
                     + "\n- ".join(director_constraints)) if director_constraints else ""
+    service_txt = mature_service_clause(bible)
     base = (
         "You are the writer's room. EXPAND ONE SCENE of an approved episode blueprint "
         "into a DETAILED SCENE TREATMENT that a shot-writer will use to write shots.\n\n"
@@ -1590,6 +1683,10 @@ def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
         f"{standing_txt}\n\n"
         "Write THIS scene only. Give it a full narrative, concrete story beats, and "
         "specific dialogue lines with intent.\n"
+        "PROSE RULE (critical): the narrative is PLAIN, DIRECT prose, 2-5 sentences - "
+        "no single run-on sentence, no clause chains, no restating the outline or other "
+        "scenes. It is the authoritative treatment the shot-writer follows, so it must "
+        "read cleanly.\n"
         "DIALOGUE RULE (critical): dialogue beats are SPOKEN lines and become synthetic "
         "audio, so each `line` MUST be a COMPLETE, natural sentence (or two short ones) "
         "that a person would actually say out loud, with a subject and a verb - typically "
@@ -1600,7 +1697,17 @@ def scene_detail_prompt(bible: dict[str, Any], blueprint: dict[str, Any],
         "and contractions are good; broken English is not. Stay consistent with the "
         "bible and the characters. Fictional characters only; no minors; no real "
         "persons.\n"
-        "Return ONLY valid JSON matching the scene schema."
+        + (f"\nSERVICE (mature show): stage this show's fan service IN THIS SCENE and "
+           f"report it in the `service` field - count panty/upskirt moments and "
+           f"bare-chest reveals, and set explicit=true only on the full payoff scene.\n"
+           + service_txt if service_txt else "")
+        + (f"\nDIALOGUE DEPTH (critical): write about {dialogue_beats_target} dialogue_beats "
+           f"for this scene (~{dialogue_beats_target * 12} spoken words) so the episode's "
+           f"dialogue fills its runtime at ~170 spoken words/min. This is the AUTHORED, "
+           f"canonical dialogue - real back-and-forth exchanges (people answer each other, "
+           f"interrupt, argue, joke), NOT one line per beat. Every speaker gets real lines.\n"
+           if dialogue_beats_target else "")
+        + "Return ONLY valid JSON matching the scene schema."
     )
     if feedback.strip() and current:
         return (
@@ -1640,7 +1747,7 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
     instructions = pass_cfg.get("instructions", "").format(
         target_s=target_seconds,
         n_shots=max(4, target_seconds // 10),
-        n_lines=max(2, target_seconds // 6))
+        n_lines=max(2, target_seconds // 4))
     cast_key = pass_cfg.get("cast_key", "appearance_canonical")
     if cast_key == "personality":
         cast_snip = [(c.get("name"), ((c.get("traits_for_llm") or "")[:260]
@@ -1652,14 +1759,14 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
     if draft is None:
         context = ("There is no draft yet. Break the scene treatment into a shot "
                    "skeleton and return it. Do NOT invent dialogue, camera, references, "
-                   "sound, or music — dedicated passes fill those in later.")
+                   "sound, or music â€” dedicated passes fill those in later.")
     else:
-        context = ("CURRENT SCENE SHOT DRAFT — every field already written by an earlier "
+        context = ("CURRENT SCENE SHOT DRAFT â€” every field already written by an earlier "
                    "pass is FINAL; preserve it exactly. Write ONLY your own field(s) and "
                    "return the FULL shot list.\n"
                    f"{json.dumps(draft, indent=2, ensure_ascii=False)}")
     if notes.strip():
-        context += ("\n\nDIRECTOR'S FEEDBACK ON THE CURRENT SHOTS (ABSOLUTE — apply every "
+        context += ("\n\nDIRECTOR'S FEEDBACK ON THE CURRENT SHOTS (ABSOLUTE â€” apply every "
                     f"point in this pass):\n{notes}")
     spoken_note = (
         "\nSPOKEN-AUDIO CONTEXT: these `line` strings become the character's synthesized "
@@ -1688,7 +1795,7 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
         f"Series bible: {json.dumps(bible)}\n"
         f"Tone: {json.dumps(bible.get('tone', []))} | Genre: {json.dumps(bible.get('genre', []))} "
         "- match these in your writing; avoid generic intense verbs like 'brutal', "
-        "'aggressive', 'violent', 'clash', 'fierce' — use specific, evocative language.\n"
+        "'aggressive', 'violent', 'clash', 'fierce' â€” use specific, evocative language.\n"
         f"Cast (name -> {cast_key}): {cast_snip}\n\n"
         f"SCENE TO WORK ON:\n{json.dumps(plan_scene, indent=2, ensure_ascii=False)}\n\n"
         f"{context}{spine_txt}\n\n"
@@ -1853,73 +1960,24 @@ def new_character_prompt(bible: dict[str, Any], cast: list[str], name: str,
     )
 
 
-def revision_prompt(script: dict[str, Any], review_results: dict[str, Any]) -> str:
-    """Ask the Showrunner to revise the script, applying every reviewer's separate notes.
+def revision_prompt(script: dict[str, Any], notes_text: str,
+                    outline: dict[str, Any] | None = None) -> str:
+    """Revise the script from the reviewers' free-form notes.
 
-    Uses the showrunner's CONFLICT RESOLUTION PROTOCOL (priority matrix + resolution
-    modes) and returns an arbitrated edit letter: log each conflict, state the
-    dominant tier, choose the resolution, then edit the script accordingly.
+    Gives the editor the OUTLINE (story context), the CURRENT SCRIPT (the thing being
+    edited), and the notes. Returns the full revised script as JSON.
     """
-    notes_block = []
-    for reviewer, r in review_results.items():
-        notes_block.append(f"--- {reviewer} reviewer (pass={r.get('pass')}) ---")
-        for note in r.get("notes", []):
-            if isinstance(note, dict):
-                text = note.get("note") or note.get("item") or str(note)
-                sc = note.get("scene") or note.get("char") or ""
-                prefix = f"[{sc}] " if sc else ""
-                sev = note.get("severity")
-                prefix = f"[{sc}][{sev}] " if sc and sev else prefix
-                notes_block.append(f"  - {prefix}{text}")
-            else:
-                notes_block.append(f"  - {str(note)}")
+    parts: list[str] = []
+    if outline:
+        parts.append("EPISODE OUTLINE:\n" + json.dumps(outline, ensure_ascii=False))
+    parts.append("CURRENT SCRIPT:\n" + json.dumps(script, ensure_ascii=False))
+    parts.append("REVIEW NOTES (apply these):\n" + (notes_text or "(none)"))
     return (
-        "Revise the script below applying the writers' room notes. Use the "
-        "CONFLICT RESOLUTION PROTOCOL from your system prompt: when two reviewers "
-        "disagree, resolve by the priority matrix and the resolution modes, and "
-        "ARBITRATE rather than arbitrarily dropping a note.\n"
-        "Return JSON: { \"edit_letter\": \"a short paragraph per major conflict: "
-        "which reviewers clashed, which tier won, and how you resolved it\", "
-        "\"script\": { <the full revised script, same schema, same shot ids, same cast> } }.\n\n"
-        "WRITERS' ROOM NOTES:\n" + "\n".join(notes_block) +
-        "\n\nCURRENT SCRIPT:\n" + json.dumps(script) +
-        "\n\nReturn ONLY valid JSON matching the edit-letter schema."
-    )
-
-
-def address_feedback_prompt(scene: dict[str, Any], notes: list[dict[str, Any]],
-                            cast: list[str]) -> str:
-    """Targeted fix: edit ONLY the shots flagged by reviewers in one scene.
-
-    Instead of regenerating the whole script, this takes the current scene's
-    shots and the specific reviewer notes, and returns the scene with only the
-    affected shots modified.
-    """
-    notes_block = []
-    for n in notes:
-        severity = n.get("severity", "")
-        item = n.get("item", "")
-        text = n.get("note", "")
-        prefix = f"[{severity}] " if severity else ""
-        if item:
-            prefix += f"({item}) "
-        notes_block.append(f"  - {prefix}{text}")
-    return (
-        "Fix the flagged issues in this scene's shots. Edit ONLY the shots that "
-        "have reviewer notes — leave all other shots exactly as they are.\n"
-        "Rules:\n"
-        "- Keep every shot's id unchanged.\n"
-        "- Preserve the shot's structure: id, type, importance, duration_s, camera, "
-        "action, dialogue, silence, soundscape, music, references.\n"
-        "- Make minimal, targeted edits to address each note.\n"
-        "- If a note says a character is missing, ADD them to action and references.\n"
-        "- If a note flags a dialogue issue, rewrite ONLY that line.\n"
-        "- If a note flags a visual/feasibility issue, fix the action/camera.\n"
-        f"- Cast (use these EXACT names): {cast}\n\n"
-        "REVIEWER NOTES FOR THIS SCENE:\n" + "\n".join(notes_block) +
-        "\n\nCURRENT SCENE SHOTS:\n" + json.dumps(scene.get("shots", []), indent=2) +
-        "\n\nReturn ONLY valid JSON: {\"shots\": [<the full shot list for this scene, "
-        "with edits applied to flagged shots only>]}."
+        "Revise the script below to address the review notes. Apply ONLY what the notes "
+        "ask for and keep everything else; preserve every shot id and the cast. Return the "
+        "FULL revised script with the same schema.\n\n"
+        + "\n\n".join(parts)
+        + '\n\nReturn ONLY JSON: {"script": { <the full revised script> }}'
     )
 
 
@@ -2290,7 +2348,8 @@ def episode_prose_prompt(bible: dict[str, Any],
                          continuity: dict[str, Any] | None = None,
                          target_s: int = DEFAULT_RUNTIME_TARGET_S,
                          dir_notes: list[str] | None = None,
-                         feedback: str = "") -> str:
+                         feedback: str = "",
+                         scene_details: list[dict[str, Any]] | None = None) -> str:
     """Write the WHOLE episode as free prose/screenplay — explicitly NOT JSON.
 
     The first creative call sees no schema, no shot ids, no durations. Output is
@@ -2318,6 +2377,24 @@ def episode_prose_prompt(bible: dict[str, Any],
     nick_txt = ("\nNICKNAMES (FIXED - address each person ONLY with the speaker's listed "
                 "terms or plain name; never invent a new one):\n"
                 + "\n".join(nick_lines)) if nick_lines else ""
+    details_txt = ""
+    if scene_details:
+        blocks = []
+        for sd in scene_details:
+            if not isinstance(sd, dict):
+                continue
+            dbs = sd.get("dialogue_beats") or []
+            dl = " | ".join(f"{b.get('char')}: {b.get('line')}"
+                            for b in dbs if isinstance(b, dict) and b.get("line"))
+            blocks.append(f"{sd.get('id')} — {sd.get('summary') or ''}\n"
+                          f"  NARRATIVE: {sd.get('narrative') or ''}\n"
+                          f"  DIALOGUE: {dl or '(none)'}")
+        details_txt = (
+            "\nAPPROVED SCENE TREATMENTS (the writers' room already wrote this — USE this "
+            "dialogue in your screenplay. COPY every DIALOGUE line EXACTLY, word for "
+            "word - never paraphrase, shorten, reorder or rewrite a spoken line; only "
+            "expand the narrative into present-tense prose around them):\n"
+            + "\n".join(blocks) + "\n")
     return (
         "You are the showrunner writing ONE complete episode as a free screenplay. "
         "NO JSON - plain text only. Write the whole arc in one go: hook, rising "
@@ -2340,8 +2417,12 @@ def episode_prose_prompt(bible: dict[str, Any],
         "- Action paragraphs are present-tense prose a director can shoot - concrete "
         "blocking, positions, props. No camera jargon, no shot ids, no durations.\n"
         "- Dialogue is SPOKEN lines only: `NAME: words`, one speech per line, exact "
-        "cast names. Contractions always. No narration in dialogue, no slogans, no "
-        "balanced quips. Numbers/abbreviations as spoken.\n"
+        "cast names. Every line is a COMPLETE, natural spoken sentence (or two short "
+        "ones), ~5-25 words, with a subject and a verb — how a real person talks out "
+        "loud. NEVER write a noun list, a label, or a clipped/telegraphic fragment "
+        "(NOT 'Arms up. Door. Thirty seconds.'), and NEVER end a line on a cut-off "
+        "em-dash ('...back to — ?'). Contractions always. No narration in dialogue, no "
+        "slogans, no balanced quips. Numbers/abbreviations as spoken.\n"
         "- Numbered sync spikes: there is exactly ONE canonical past-ninety spike "
         "per episode. Never open a line with filler + a number, and never invent "
         "a second numbered spike — say it plain.\n"
@@ -2358,6 +2439,7 @@ def episode_prose_prompt(bible: dict[str, Any],
         f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
         f"Cast (name -> traits): {cast}\n"
         f"Scene skeleton (expand these in order, or improve with reason):\n{skel_txt}\n"
+        f"{details_txt}"
         f"Episode continuity: {json.dumps(continuity or {}, ensure_ascii=False)}"
         f"{notes_txt}{feedback_txt}\n\n"
         f"Target runtime ~{target_s}s (~{target_s // 60} min) - pace the prose so a "
@@ -2366,32 +2448,17 @@ def episode_prose_prompt(bible: dict[str, Any],
     )
 
 
-def prose_revision_prompt(prose: str, review_results: dict[str, Any]) -> str:
-    """Revise a prose episode draft from writers'-room notes — prose in, prose out.
-
-    No JSON on either side: the model rewrites the screenplay applying every
-    note, keeping scene headers stable so the deterministic parser still splits
-    it. Shot ids never appear at this stage, so there is nothing to preserve.
-    """
-    notes_block: list[str] = []
-    for reviewer, r in (review_results or {}).items():
-        notes_block.append(f"--- {reviewer} reviewer (pass={r.get('pass')}) ---")
-        for note in r.get("notes", []) or []:
-            if isinstance(note, dict):
-                text = note.get("note") or note.get("item") or str(note)
-                sc = note.get("scene") or ""
-                sev = note.get("severity") or ""
-                prefix = f"[{sc}][{sev}] " if sc else ""
-                notes_block.append(f"  - {prefix}{text}")
-            else:
-                notes_block.append(f"  - {str(note)}")
+def prose_revision_prompt(prose: str, notes_text: str) -> str:
+    """Revise a prose episode draft from the reviewers' free-form notes — prose in,
+    prose out. Scene headers stay stable so the deterministic parser still splits it."""
     return (
-        "REVISE the episode screenplay below applying the writers' room notes. "
-        "Keep what the notes did not flag; change what they ask for. Keep every "
-        "scene header EXACTLY (=== sNN | location | cast ===) and in order; you may "
-        "merge or add a scene only if a note demands it. Return the FULL revised "
-        "screenplay as plain text - NO JSON, no commentary.\n\n"
-        "WRITERS' ROOM NOTES:\n" + "\n".join(notes_block) +
+        "REVISE the episode screenplay below to address the review notes. Keep what the "
+        "notes did not flag. Keep every scene header EXACTLY (=== sNN | location | cast ===) "
+        "and in order; merge or add a scene only if a note demands it. Dialogue MUST stay "
+        "COMPLETE, natural spoken sentences (subject + verb, ~5-25 words) — never compress "
+        "lines into clipped fragments or noun lists, even when a note asks to shorten or "
+        "cut. Return the FULL revised screenplay as plain text - NO JSON, no commentary.\n\n"
+        "REVIEW NOTES (apply these):\n" + (notes_text or "(none)") +
         "\n\nCURRENT SCREENPLAY:\n" + (prose or "") +
         "\n\nReturn ONLY the revised screenplay text."
     )

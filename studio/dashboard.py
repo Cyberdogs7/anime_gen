@@ -286,6 +286,89 @@ def _render_status(show_id: str) -> dict[str, Any]:
     return render_status(show_id)
 
 
+def _pickable_models() -> dict[str, list[str]]:
+    """Models offered for a manual one-off rewrite (never fails the payload)."""
+    try:
+        from .rewrite import pickable_models
+        return pickable_models()
+    except Exception:
+        return {"remote": [], "local": []}
+
+
+def episode_cast(show: Show, script: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Character-ref entries the episode "cast" card renders.
+
+    The script's own cast, PLUS every episode-supporting character whose base ref
+    is still pending (``storyboard._pending_ref_names``). Without the second set the
+    "action needed — approve reference images" banner names a ref with no card and
+    no approve control — which is exactly what happens when the episode has no
+    script yet (e.g. it was deleted and is regenerating at the outline stage), yet
+    an episode-supporting character sheet + ref survives.
+    """
+    from .storyboard import (_approved_costume_labels, _pending_ref_names,
+                             is_base_ref_approved)
+
+    char_by_name: dict[str, tuple[str, dict[str, Any]]] = {}
+    for cid in show.list_characters():
+        try:
+            c = show.read_character(cid)
+        except Exception:
+            continue
+        if c.get("name"):
+            char_by_name[c["name"]] = (cid, c)
+
+    def _entry(name: str) -> dict[str, Any] | None:
+        tgt = char_by_name.get(name)
+        if not tgt:
+            return None
+        cid, c = tgt
+        ref_img = ""
+        variants: list[dict[str, Any]] = []
+        rd = show.character_refs_dir(cid)
+        rj = rd / "refs.json"
+        if rj.exists():
+            try:
+                data = json.loads(rj.read_text(encoding="utf-8"))
+                approved = set(_approved_costume_labels(show, cid))
+                base_ok = is_base_ref_approved(show, cid)
+                prompts = data.get("prompts") or {}
+                for label, f in (data.get("variants") or {}).items():
+                    if (rd / f).exists():
+                        variants.append({"label": label, "image": f,
+                                         "prompt": prompts.get(label, ""),
+                                         "approved": label in approved
+                                                     or (label == "base" and base_ok)})
+                        if label == "base":
+                            ref_img = f
+            except Exception:
+                pass
+        return {"name": name, "id": cid, "role": c.get("role", ""),
+                "image": ref_img, "variants": variants}
+
+    cast: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name in ((script or {}).get("cast") or []):
+        e = _entry(name)
+        if e:
+            cast.append(e)
+            seen.add(name)
+
+    # Pending episode-supporting refs (not part of the bootstrap roster) stay
+    # approvable here regardless of the current script cast.
+    try:
+        bootstrap_names = {ch.get("name") for ch in show.bootstrap_state().get("characters", [])}
+        for name in _pending_ref_names(show):
+            if name in seen or name in bootstrap_names:
+                continue
+            e = _entry(name)
+            if e:
+                cast.append(e)
+                seen.add(name)
+    except Exception:
+        pass
+    return cast
+
+
 def show_payload(show_id: str) -> dict[str, Any]:
     show = Show(show_id)
     bs = show.bootstrap_state()
@@ -307,19 +390,36 @@ def show_payload(show_id: str) -> dict[str, Any]:
         costumes = []
         refs_dir = show.character_refs_dir(char_id)
         if refs_dir.exists():
-            ref_images = sorted(
-                p.name for p in refs_dir.iterdir()
-                if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"))
             rj = refs_dir / "refs.json"
+            blank_name = ""
             if rj.exists():
                 try:
                     data = json.loads(rj.read_text(encoding="utf-8"))
+                    # The garmentless construction ref is a build input, not a
+                    # viewable asset — keep it out of the image list.
+                    blank_name = str(data.get("blank") or "")
+                    from .storyboard import (_approved_costume_labels,
+                                             is_base_ref_approved)
+                    approved = (set(_approved_costume_labels(show, char_id))
+                                if char_id else set())
+                    base_ok = is_base_ref_approved(show, char_id) if char_id else False
+                    from .refs import rejected_labels as _rej_labels
+                    rejected = _rej_labels(show, char_id) if char_id else {}
                     vmap = data.get("variants") or {}
                     for label, f in vmap.items():
                         if (refs_dir / f).exists():
-                            variants.append({"label": label, "image": f})
+                            variants.append({
+                                "label": label, "image": f,
+                                "approved": (label in approved)
+                                            or (label == "base" and base_ok),
+                                "rejected": label in rejected,
+                                "rejected_notes": rejected.get(label, "")})
                 except Exception:
                     variants = []
+            ref_images = sorted(
+                p.name for p in refs_dir.iterdir()
+                if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+                and p.name != blank_name)
             from .storyboard import costume_variant_payload
             costumes = costume_variant_payload(show, char_id, content.get("name", ""))
         voice_file = ""
@@ -358,6 +458,7 @@ def show_payload(show_id: str) -> dict[str, Any]:
         "plotlines": _plotline_payload(show),
         "seasons": _seasons_payload(show),
         "next_episode": next_ep,
+        "models": _pickable_models(),
     }
 
 
@@ -450,7 +551,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
             data = _read_json(f)
             entry = reviews.setdefault(reviewer, {"rounds": []})
             entry["rounds"].append({"round": round_no, **{
-                k: data.get(k) for k in ("score", "pass", "summary", "notes", "maturity_score")
+                k: data.get(k) for k in ("grade", "pass", "review")
                 if k in data}, **({"prose": True} if is_prose else {})})
         # Sort each reviewer's rounds ascending and expose latest + best.
         for reviewer, entry in reviews.items():
@@ -623,14 +724,18 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
     od = d / "objects"
     if od.exists():
         from .storyboard import _approved_object_slugs
+        from .objects import rejected_notes as _obj_rejected
         from .vcheck import _object_vcheck_summary
         approved = _approved_object_slugs(show, ep_num)
+        rejected = _obj_rejected(show, ep_num)
         obj_vcheck = _object_vcheck_summary(show, ep_num)
         for f in sorted(od.glob("*.png")):
             vcheck_entry = obj_vcheck.get(f.stem, {})
             objects.append({"name": f.stem.replace("-", " ").title(),
                             "slug": f.stem, "image": f.name,
                             "approved": f.stem in approved,
+                            "rejected": f.stem in rejected,
+                            "rejected_notes": rejected.get(f.stem, ""),
                             "vcheck": vcheck_entry})
 
     videos: dict[str, str] = {}
@@ -639,42 +744,10 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         for f in sorted(vd.glob("*.mp4")):
             videos[f.stem] = f.name
 
-    # Episode cast: every character the script's cast lists, with their ref image.
-    cast: list[dict[str, Any]] = []
-    if script:
-        from .storyboard import _approved_costume_labels
-        char_by_name = {}
-        for cid in show.list_characters():
-            try:
-                c = show.read_character(cid)
-            except Exception:
-                continue
-            if c.get("name"):
-                char_by_name[c["name"]] = (cid, c)
-        for name in script.get("cast", []) or []:
-            if name not in char_by_name:
-                continue
-            cid, c = char_by_name[name]
-            ref_img = ""
-            variants: list[dict[str, Any]] = []
-            rd = show.character_refs_dir(cid)
-            rj = rd / "refs.json"
-            if rj.exists():
-                try:
-                    data = json.loads(rj.read_text(encoding="utf-8"))
-                    variants_map = data.get("variants") or {}
-                    approved = set(_approved_costume_labels(show, cid))
-                    for label, f in variants_map.items():
-                        if (rd / f).exists():
-                            variants.append({"label": label, "image": f,
-                                             "approved": label in approved})
-                            if label == "base":
-                                ref_img = f
-                except Exception:
-                    pass
-            cast.append({"name": name, "id": cid,
-                         "role": c.get("role", ""), "image": ref_img,
-                         "variants": variants})
+    # Episode cast: every character the script's cast lists, PLUS any pending
+    # episode-supporting ref (so the "action needed" banner always has a matching
+    # approve control, even when the episode has no script yet).
+    cast = episode_cast(show, script)
 
     from .storyboard import storyboard_status
     from .planner import read_episode_plan, read_scene_details
@@ -728,6 +801,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         "episode": ep,
         "script_file": latest.name if latest else None,
         "script": script,
+        "script_review_failed": bool(((script or {}).get("_review") or {}).get("passed") is False),
         "episode_prose": _read_txt("episode_prose.txt"),
         "dialogue_txt": _read_txt("dialogue.txt"),
         "files": _episode_files(),
@@ -837,7 +911,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             from .bootstrap import (ACTIVITY, reconcile_if_stalled,
                                     is_bootstrap_reconciling)
             from .episode_repair import (reconcile_episodes_if_stalled,
-                                         is_episode_reconciling)
+                                         is_episode_reconciling,
+                                         is_manual_rebuild_active)
             from .storyboard import storyboard_status
             from .render import render_status
             from .planner import read_episode_plan, read_scene_details
@@ -860,6 +935,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 or rd.get("state") == "running"
                 or is_bootstrap_reconciling(parts[2])
                 or is_episode_reconciling(parts[2])
+                or is_manual_rebuild_active(parts[2])
             )
             if job_alive:
                 detail = (a or {}).get("detail") or sb.get("detail") or rd.get("detail") or "Working…"
@@ -910,7 +986,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         # Script review gate: writers' room review failed and
                         # storyboard is blocked until a human overrides.
                         from .storyboard import _latest_script as _ls
-                        script = _ls(Show(parts[2]), ep)
+                        script, _ = _ls(Show(parts[2]), ep)
                         if script:
                             script_review = script.get("_review") or {}
                             if script_review.get("passed") is False:
@@ -1042,14 +1118,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "messages": msg})
                 return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "reject":
-                msg = approval.reject_step(parts[2], body.get("step", ""),
-                                           char=body.get("char", ""),
-                                           notes=body.get("notes", "no notes"),
-                                           costume=body.get("costume", ""),
-                                           mode=body.get("mode", "edit"),
-                                           slug=body.get("slug", ""),
-                                           episode=body.get("episode", ""))
-                self._send(200, {"ok": True, "messages": msg})
+                # Reject/regenerate can render (nude/base/costume) — run it in the
+                # BACKGROUND and return at once; the dashboard polls and reloads so
+                # the new image appears when it lands.
+                show_id = parts[2]
+                params = dict(step=body.get("step", ""),
+                              char=body.get("char", ""),
+                              notes=body.get("notes", "no notes"),
+                              costume=body.get("costume", ""),
+                              mode=body.get("mode", "edit"),
+                              slug=body.get("slug", ""),
+                              episode=body.get("episode", ""))
+                import threading
+
+                def _do_reject() -> None:
+                    try:
+                        approval.reject_step(show_id, **params)
+                    except Exception:
+                        log.exception("reject failed for %s", show_id)
+
+                threading.Thread(target=_do_reject, daemon=True, name="reject").start()
+                self._send(200, {"ok": True, "messages": [
+                    "regenerating in the background — the view updates as it lands"]})
                 return
             if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "shot":
                 # /api/show/<id>/shot/<action> — per-shot approve/reject (Gate 4).
@@ -1067,6 +1157,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         self._send(200, {"ok": True, "messages": msg})
                     else:
                         msg = approval.reject_shot(show_obj, ep, shot_id, notes)
+                        # Re-render the rejected shot in the BACKGROUND: the clip
+                        # was deleted, so render_episode re-renders ONLY the
+                        # missing shots. Build is guarded so it never collides
+                        # with a render already in flight.
+                        try:
+                            from .render import build_render
+                            build_render(show_obj, ep)
+                            msg = list(msg) + ["re-render started (background)"]
+                        except Exception:
+                            pass
                         self._send(200, {"ok": True, "messages": msg})
                     return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "generate":
@@ -1109,6 +1209,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self._send(200, {"ok": False, "error": str(exc)})
                 finally:
                     ACTIVITY.pop(show_id, None)
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "plan" \
+                    and parts[4] == "regenerate":
+                # One-off OUTLINE regeneration with a hand-picked model. The outline
+                # gate is where episodes most often stall, so a human can retry the
+                # outline itself (not just the script) with a stronger model.
+                from .bootstrap import ACTIVITY
+                from .episode_repair import hold_manual_rebuild, release_manual_rebuild
+                from .rewrite import regenerate_outline_once
+                ep = int(body.get("episode", 1) or 1)
+                model = str(body.get("model") or "").strip()
+                remote = bool(body.get("remote"))
+                show_id = parts[2]
+                show = Show(show_id)
+                if not model:
+                    self._send(400, {"ok": False, "error": "model required"})
+                    return
+                hold_manual_rebuild(show_id, ep)
+                self._send(200, {"ok": True, "messages": [
+                    f"regenerating the EP{ep} outline with {model} (background)…"]})
+                ACTIVITY.pop(show_id, None)
+
+                def _regen_outline():
+                    try:
+                        from .clients.lmstudio import LMStudioClient
+                        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=600)
+                        regenerate_outline_once(show, ep, model, remote=remote, llm=llm)
+                    except Exception as exc:
+                        ACTIVITY[show_id] = {"detail": f"Outline regen failed: {exc}",
+                                             "ts": time.time()}
+                    finally:
+                        release_manual_rebuild(show_id, ep)
+                        ACTIVITY.pop(show_id, None)
+                import threading
+                threading.Thread(target=_regen_outline, daemon=True).start()
                 return
             if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "plan" \
                     and parts[4] == "approve":
@@ -1216,6 +1351,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 import threading
                 threading.Thread(target=_rebuild, daemon=True).start()
                 return
+            if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "rewrite":
+                # One-off script rewrite with a hand-picked model (e.g. a pricier
+                # remote one) to try to clear a full-fail state. ONE call on the
+                # chosen model, then a normal re-review. Held against the reconciler.
+                from .bootstrap import ACTIVITY
+                from .episode_repair import hold_manual_rebuild, release_manual_rebuild
+                from .rewrite import rewrite_script_once
+                ep = int(body.get("episode", 1) or 1)
+                model = str(body.get("model") or "").strip()
+                remote = bool(body.get("remote"))
+                show_id = parts[2]
+                show = Show(show_id)
+                if not model:
+                    self._send(400, {"ok": False, "error": "model required"})
+                    return
+                hold_manual_rebuild(show_id, ep)
+                self._send(200, {"ok": True, "messages": [
+                    f"rewriting EP{ep} with {model} — one pass, then re-review (background)…"]})
+                ACTIVITY.pop(show_id, None)
+
+                def _rewrite():
+                    try:
+                        from .clients.lmstudio import LMStudioClient
+                        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=600)
+                        rewrite_script_once(show, ep, model, remote=remote, llm=llm)
+                    except Exception as exc:
+                        ACTIVITY[show_id] = {"detail": f"Rewrite failed: {exc}",
+                                             "ts": time.time()}
+                    finally:
+                        release_manual_rebuild(show_id, ep)
+                        ACTIVITY.pop(show_id, None)
+                import threading
+                threading.Thread(target=_rewrite, daemon=True).start()
+                return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "storyboard":
                 from .storyboard import build_storyboard, storyboard_blockers
                 ep = int(body.get("episode", 1) or 1)
@@ -1263,10 +1432,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 if action == "stop":
                     from .episode_repair import pause_episode
+                    from .render import stop_render
                     from .storyboard import stop_storyboard
                     pause_episode(show_id, int(ep.replace("EP", "")))
                     stop_storyboard(show_id)  # cooperative stop of running previews
-                    self._send(200, {"ok": True, "messages": [f"{ep} paused"]})
+                    stop_render(show_id)      # cooperative stop of running shot/scene videos
+                    self._send(200, {"ok": True, "messages": [f"{ep} stopped"]})
                     return
                 if action == "resume":
                     from .episode_repair import resume_episode
@@ -1342,6 +1513,121 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 delete_costume(show, c.get("id", ""), label)
                 self._send(200, {"ok": True, "messages": [f"costume '{label}' deleted"]})
                 return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "costume" \
+                    and parts[4] == "nude":
+                # Create/refresh a character's garmentless "nude" identity root.
+                # ``notes`` revise the BODY (identity_canonical) first.
+                from .clients.lmstudio import LMStudioClient
+                from .refs import NUDE_LABEL, generate_refs
+                show = Show(parts[2])
+                cname = (body.get("char") or "").strip()
+                c = next((show.read_character(cid) for cid in show.list_characters()
+                          if (show.read_character(cid).get("name") or "") == cname), None)
+                if not c:
+                    self._send(404, {"ok": False, "error": f"no character named {cname}"})
+                    return
+                notes = (body.get("notes") or "").strip()
+                cid = c.get("id", "")
+                import threading
+
+                def _gen() -> None:
+                    try:
+                        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=240)
+                    except Exception:
+                        llm = None
+                    try:
+                        from .refs import regenerate_nude
+                        regenerate_nude(show, cid, c, llm=llm, notes=notes)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_gen, daemon=True, name="nude-gen").start()
+                self._send(200, {"ok": True, "messages": [
+                    f"{cname} '{NUDE_LABEL}' ref generating in the background — approve it when it appears"]})
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "refs" \
+                    and parts[4] == "rebuild":
+                # Full ref rebuild through the ONE pipeline (nude-first for the
+                # recurring cast, plain for supporting/non-person). Resets the refs
+                # and reopens the stage gate first.
+                import json as _json
+                import shutil
+                from .clients.lmstudio import LMStudioClient
+                from .refs import generate_refs, wants_nude_first
+                show = Show(parts[2])
+                cname = (body.get("char") or "").strip()
+                reset = body.get("reset", True)
+                todo = []
+                for cid in show.list_characters():
+                    ch = show.read_character(cid)
+                    nm = ch.get("name") or cid
+                    if cname and nm != cname:
+                        continue
+                    todo.append((cid, ch, nm))
+                if not todo:
+                    self._send(404, {"ok": False, "error": "no matching character(s)"})
+                    return
+                if reset:
+                    try:
+                        state = show.bootstrap_state()
+                        names = {nm for _, _, nm in todo}
+                        for ch in state.get("characters", []):
+                            if ch.get("name") in names and (ch.get("refs") or "") == "approved":
+                                ch["refs"] = "pending"
+                        show.bootstrap_path.write_text(_json.dumps(state, indent=2),
+                                                       encoding="utf-8")
+                    except Exception:
+                        pass
+                # Render in the BACKGROUND so the click returns immediately; the
+                # dashboard's poll shows each ref as it lands.
+                import threading
+
+                def _run() -> None:
+                    try:
+                        llm = LMStudioClient(get_config().get("llm", "base_url"), timeout=240)
+                    except Exception:
+                        llm = None
+                    for cid, ch, nm in todo:
+                        if reset:
+                            shutil.rmtree(show.character_refs_dir(cid), ignore_errors=True)
+                        try:
+                            generate_refs(show, cid, ch, llm=llm, force=True)
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_run, daemon=True, name="refs-rebuild").start()
+                self._send(200, {"ok": True, "messages": [
+                    f"rebuilding refs for {len(todo)} character(s) in the background — "
+                    "the list updates as they land"]})
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "style" \
+                    and parts[4] == "revise":
+                # Iterate ONLY the house style guide (pure art direction).
+                from . import style
+                show = Show(parts[2])
+                notes = (body.get("notes") or "").strip()
+                if not style.revise(show, feedback=notes):
+                    self._send(500, {"ok": False, "error": "style-guide revise failed"})
+                    return
+                self._send(200, {"ok": True, "messages": [
+                    "style guide updated — regenerate the anchor to see it"]})
+                return
+            if len(parts) == 5 and parts[:2] == ["api", "show"] and parts[3] == "style" \
+                    and parts[4] == "anchor":
+                import threading
+                from . import style
+                show = Show(parts[2])
+
+                def _anchor() -> None:
+                    try:
+                        style.regenerate_anchor(show)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_anchor, daemon=True, name="style-anchor").start()
+                self._send(200, {"ok": True, "messages": [
+                    "regenerating the style anchor in the background"]})
+                return
             self._send(404, {"error": "not found"})
         except ValueError as exc:
             self._send(400, {"ok": False, "error": str(exc)})
@@ -1384,5 +1670,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def serve(port: int = 8125, bind: str = "127.0.0.1") -> ThreadingHTTPServer:
+    def _startup_refs() -> None:
+        # On startup, auto-build refs for any character missing a real one
+        # (nude-first for the recurring cast) — so a cleaned show rebuilds itself
+        # when the server restarts, no manual command needed.
+        import logging
+        import time
+        log = logging.getLogger("dashboard")
+        time.sleep(1.0)
+        try:
+            from .clients.lmstudio import LMStudioClient
+            from .config import get_config
+            from .refs import rebuild_missing
+            from .show import Show
+            cfg = get_config()
+            try:
+                llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
+            except Exception:
+                llm = None
+            from .bootstrap import run_show_locked
+            for sid in (cfg.list_shows() or []):
+                try:
+                    # Serialize with the bootstrap chain (same per-show lock) so the
+                    # startup refs pass can't race an approve-driven chain advance.
+                    done = run_show_locked(
+                        sid, lambda s=sid: rebuild_missing(Show(s), cfg=cfg, llm=llm))
+                    if done:
+                        log.info("[refs] startup-generated refs for %s: %s",
+                                 sid, ", ".join(done))
+                except Exception:
+                    log.exception("[refs] startup ref build failed for %s", sid)
+                # Then regenerate any stalled EPISODES (outline -> scenes -> shots)
+                # on start, so a cleared episode rebuilds automatically.
+                try:
+                    from .episode_repair import reconcile_episodes_if_stalled
+                    reconcile_episodes_if_stalled(sid)
+                except Exception:
+                    log.exception("[episodes] startup reconcile failed for %s", sid)
+        except Exception:
+            log.exception("[refs] startup ref build crashed")
+
+    import threading
+    threading.Thread(target=_startup_refs, daemon=True, name="startup-refs").start()
     httpd = ThreadingHTTPServer((bind, port), DashboardHandler)
     return httpd

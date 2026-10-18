@@ -169,6 +169,21 @@ def ensure_season(show: Show, episode: int, llm=None, cfg=None) -> tuple[int, di
     cfg = cfg or get_config()
     n = default_num_episodes(cfg)
     season_no = season_number_for_episode(episode, n)
+    # A REJECTED season must not be used as canon: regenerate it from the
+    # rejection notes before deriving any episode entry from it (this is the
+    # regeneration hook reject_season would otherwise lack).
+    existing = show.read_season(season_no)
+    if (existing.get("status") or "") == "rejected" and existing.get("episodes"):
+        start = (season_no - 1) * n + 1
+        try:
+            generate_season_plan(show, season_no, n, llm=llm, cfg=cfg,
+                                 feedback=(existing.get("rejected_notes") or ""),
+                                 start_episode=start)
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "rejected season regeneration failed for %s S%02d: %s",
+                show.show_id, season_no, exc)
     sno, entry = read_season_entry(show, episode, cfg)
     if entry:
         return sno, entry

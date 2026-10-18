@@ -1,13 +1,13 @@
 id: ren-tojo
 name: Ren Tojo
 role: broke hangar mechanic turned shared co-pilot
-appearance_canonical: 21-year-old lean, cable-muscled 5-foot-10 man with warm sun-tanned
-  skin and grease worked into his knuckles, messy black undercut with sun-bleached
-  copper tips flopping over his forehead, sharp amber-brown eyes with faint goggle-rings,
-  crooked grin with a tiny chip in his front tooth, thin pale burn line across his
-  left collarbone and a small round implant scar centered on his nape, usually in
-  an unzipped oversized navy plug suit sagging off his shoulders over a bare chest
-  with his spine cable port exposed
+appearance_canonical: man, 21 years old, muscular athletic build, 5-foot-10, warm
+  sun-tanned skin with grease worked into his knuckles, short cropped dark auburn
+  hair with textured top, sharp amber-brown eyes, thin pale burn line across left
+  collarbone, small round implant scar centered on nape, exposed spine cable port.
+  Wears Ren Tojo is dressed in a navy blue oversized plug suit top, which has been
+  unzipped to reveal his muscular chest. His matching navy blue plug suit pants feature
+  black side seams, and he wears heavy black work boots.
 appearance_notes: never change eye color from amber-brown; never remove nape implant
   scar or left collarbone burn line; hair always black with copper tips, messy and
   overgrown, never clean-cut or fully dyed; hands always work-rough with grease traces;
@@ -36,3 +36,11 @@ voice:
   mode: preset
   speaker: Ryan
   voice_description: ''
+identity_canonical: man, 21 years old, muscular athletic build, 5-foot-10, warm sun-tanned
+  skin with grease worked into his knuckles, short cropped dark auburn hair with textured
+  top, sharp amber-brown eyes, thin pale burn line across left collarbone, small round
+  implant scar centered on nape, exposed spine cable port.
+is_person: true
+wardrobe_canonical: Ren Tojo is dressed in a navy blue oversized plug suit top, which
+  has been unzipped to reveal his muscular chest. His matching navy blue plug suit
+  pants feature black side seams, and he wears heavy black work boots.

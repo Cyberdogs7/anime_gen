@@ -28,7 +28,7 @@ def test_character_ref_prompt_is_positive_only():
         "Sable Voss",
         "23-year-old woman, 175cm sprinter-duelist build, black barbell in her left ear.")
     _assert_clean(p)
-    assert p.startswith("Solo full-body portrait photo of one woman, Sable Voss,")
+    assert p.startswith("Solo full-body portrait of one woman, Sable Voss,")
     assert "23-year-old woman" in p  # canon kept verbatim
 
 

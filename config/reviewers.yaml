@@ -20,24 +20,26 @@ plan_max_revisions: 6
 plan_roles:
   - structure          # plot vs synopsis vs scenes coherence, episode-1 context
 
+# Writers'-room reviewers that ALSO run on the OUTLINE (before it locks the
+# script). The outline decides length, locations, fan-service placement and beat
+# shape, so these must be caught at the outline gate - a downstream writer cannot
+# fix them while the outline holds it rigid. Excludes voice/exposition (they judge
+# spoken lines, which do not exist yet; they still run on the prose/script).
+# Governed by the same per-reviewer '*_block' thresholds below.
+plan_room_roles:
+  - slop
+  - continuity
+  - fan_service
+  - pacing
+  - stakes
+  - visual
+  - agency
+  - serial
+  - repetition
+
 thresholds:
-  slop_block: 0.45         # per-scene slop score above this forces a revision note
-  continuity_block: true   # any HIGH-severity continuity note forces a revision
-  fanservice_quota_miss: true  # under-quota service scenes force a revision
-  # Gate sensitivity for the added reviewers. 'block_any_note' fails the script if
-  # the reviewer returns any note; 'block_high' fails only on HIGH-severity items.
-  # Deterministic repetition gate: N scenes sharing a location, or scene pairs whose
-  # content overlaps >= repetition_similarity, are a HIGH failure.
+  # Reviewers return ONE verdict now — {grade: Pass|Fail, review: <free-form>} — and
+  # the gate is simply grade == "Pass"; there is no score/severity to reconcile.
+  # Only the deterministic repetition gate is tunable here.
   repetition_similarity: 0.6
   repetition_min_cluster: 3
-  # Outline (structure) gate sensitivity: any | high | never.
-  # 'any' is the zero-issue default — ANY note blocks and forces another outline
-  # revision; 'high' restores HIGH-only blocking; 'never' is advisory only.
-  structure_block: any
-  voice_block: high          # any | high | never
-  exposition_block: high
-  pacing_block: high
-  stakes_block: high
-  visual_block: high
-  agency_block: high
-  serial_block: high

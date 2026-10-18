@@ -268,81 +268,13 @@ class BootstrapChain:
             self.show.write_scene(loc)
         return data
 
-    def bootstrap_refs(self, char: dict[str, Any]) -> str:
-        """Generate the character reference sheet (Krea 2 on the worker).
-
-        Renders a character portrait from appearance_canonical via the krea2
-        ComfyUI instance and drops it in characters/<id>/refs/. Returns 'real'
-        when an image landed (opens the CHAR_REFS_PENDING gate), else 'stub'
-        so the chain can't block on image infra.
-        """
-        refs_dir = self.show.character_refs_dir(char.get("id", ""))
-        refs_dir.mkdir(parents=True, exist_ok=True)
-        refs_json = refs_dir / "refs.json"
-        if refs_json.exists():
-            try:
-                prior = json.loads(refs_json.read_text(encoding="utf-8"))
-            except Exception:
-                prior = {}
-            if prior.get("status") == "real" and any(
-                    (refs_dir / f).exists() for f in prior.get("refs", [])):
-                return "real"
-        krea2 = self.cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
-        if not krea2.get("url"):
-            # No configured Krea 2 instance (tests/isolated config) -> stay a stub.
-            refs_json.write_text(
-                '{"status": "stub", "note": "no krea2 url configured (env.yaml comfyui.krea2.url)"}',
-                encoding="utf-8")
-            return "stub"
-        try:
-            from .consistency import render_until_single
-            from .remote import ServiceOps
-            name = char.get("name", "") or "character"
-            canon = (char.get("appearance_canonical") or "").strip()
-            self._report(f"Generating reference image for {name} (Krea 2)…")
-            style = ((self.show.read_bible() or {}).get("style_guide") or "").strip()
-            prompt = prompts.character_ref_prompt(name, canon, style)
-            out = refs_dir / f"{char.get('id', 'char')}_ref_01.png"
-            ops = ServiceOps(self.cfg)
-            seeds: list[int] = []
-
-            def _render() -> bool:
-                anchor = self.show.dir / "style_anchor.png"
-                use_anchor = self.cfg.get("comfy", "style_anchor", False)
-                res = ops.generate_image(prompt, seed=0, aspect_ratio="3:4",
-                                         out_path=str(out),
-                                         style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
-                seeds.append(int(res.get("seed", 0)))
-                return bool(res.get("ok") and out.exists())
-
-            # Fresh seed per attempt; a VLM figure-count retries doubles
-            # (front+back turnarounds read as two figures) automatically.
-            gate = render_until_single(_render, out, llm=self.llm,
-                                       model=self._role_model("describer"),
-                                       label=f"base ref {name}")
-            if gate["ok"]:
-                if not gate["single"]:
-                    log.warning("base ref %s still multi-figure after %d tries — "
-                                "accepting for human review", name, gate["tries"])
-                (refs_dir / "refs.json").write_text(json.dumps(
-                    {"status": "real", "refs": [out.name],
-                     "seed": seeds[-1] if seeds else 0},
-                    ensure_ascii=False), encoding="utf-8")
-                return "real"
-        except Exception as exc:
-            logging.getLogger(__name__).warning("character ref generation failed: %s", exc)
-        (refs_dir / "refs.json").write_text(
-            '{"status": "stub", "note": "Krea 2 ref generation unavailable"}',
-            encoding="utf-8")
-        return "stub"
-
     def revise_voice_description(self, char: dict[str, Any], feedback: str) -> str:
         """LLM rewrites ONLY the voice_description from rejection feedback."""
         name = char.get("name", "") or "character"
         self._report(f"Revising {name}'s voice description…")
         current = ((char.get("voice", {}) or {}).get("voice_description", "")) or ""
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_voice_prompt(current, feedback))
@@ -357,7 +289,7 @@ class BootstrapChain:
         self._report(f"Revising {name}'s appearance for image gen…")
         current = (char.get("appearance_canonical") or "").strip()
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_appearance_prompt(current, feedback))
@@ -370,7 +302,7 @@ class BootstrapChain:
         """LLM rewrites ONLY a costume-variant generation prompt from feedback."""
         self._report(f"Revising {name}'s costume from your notes…")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_costume_prompt(current, feedback))
@@ -380,11 +312,12 @@ class BootstrapChain:
                          personality: str = "", situation: str = "",
                          feedback: str = "") -> str:
         """LLM writes a concrete description of ONLY the costume, driven by the
-        character's personality + the use case — never their current look.
+        label (and the character's personality) — never their current look, and
+        never embellished beyond what the label implies.
         """
         self._report(f"Designing costume '{label}' for {char_name}…")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.costume_description_prompt(label, char_name,
@@ -400,7 +333,7 @@ class BootstrapChain:
         """
         self._report(f"Designing prop '{name}'.")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.object_description_prompt(name, context))
@@ -413,7 +346,7 @@ class BootstrapChain:
         self._report(f"Revising {name}'s setting prompt…")
         current = (scene.get("setting_prompt") or scene.get("description") or "").strip()
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, "mature",
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_scene_setting_prompt(current, feedback))
@@ -570,7 +503,9 @@ class BootstrapChain:
             # BEFORE the single human gate, so the approval is on the whole
             # character — not just the text.
             if char_state.get("refs") == "":
-                kind = self.bootstrap_refs(char)
+                from . import refs as _refs
+                kind = _refs.ensure_ref(self.show, char, cfg=self.cfg, llm=self.llm,
+                                        report=self._report)
                 char_state["refs"] = kind
                 self.show.set_bootstrap_state(st)   # write-through: refs result survives a crash
                 log_.append(f"character {name}: refs ({kind})")
@@ -675,50 +610,9 @@ class BootstrapChain:
         stops retrying). A stub refs.json prevents an infinite reconcile loop
         when no krea2 instance is configured or generation is unavailable.
         """
-        rd = self.show.scenes_dir / sid / "refs"
-        rd.mkdir(parents=True, exist_ok=True)
-        refs_json = rd / "refs.json"
-        if (rd / f"{sid}_ref_01.png").exists():
-            return True
-        try:
-            from .remote import ServiceOps
-            krea2 = self.cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
-            if not krea2.get("url"):
-                refs_json.write_text(
-                    '{"status": "stub", "note": "no krea2 url configured (env.yaml comfyui.krea2.url)"}',
-                    encoding="utf-8")
-                return False
-            name = scene.get("name", "") or sid
-            setting = (scene.get("setting_prompt") or scene.get("description") or "").strip()
-            self._report(f"Generating scene image: {name} (Krea 2)…")
-            style = ((self.show.read_bible() or {}).get("style_guide") or "").strip()
-            prompt = (f"Anime location concept art. {setting}".rstrip(" .")
-                      + ". Empty unpopulated establishing shot of the location itself, "
-                        "cinematic composition. "
-                      + prompts.ref_style_clause(style))
-            out = rd / f"{sid}_ref_01.png"
-            anchor = self.show.dir / "style_anchor.png"
-            use_anchor = self.cfg.get("comfy", "style_anchor", False)
-            res = ServiceOps(self.cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
-                                                      out_path=str(out),
-                                                      style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
-            if res.get("ok") and out.exists():
-                refs_json.write_text(json.dumps(
-                    {"status": "real", "refs": [out.name], "seed": res.get("seed", 0)},
-                    ensure_ascii=False), encoding="utf-8")
-                return True
-            refs_json.write_text(
-                '{"status": "stub", "note": "krea2 scene ref generation unavailable"}',
-                encoding="utf-8")
-        except Exception as exc:
-            log.warning("scene ref generation failed for %s: %s", sid, exc)
-            try:
-                refs_json.write_text(
-                    f'{{"status": "stub", "note": "scene ref failed: {exc}"}}',
-                    encoding="utf-8")
-            except Exception:
-                pass
-        return False
+        from . import scenes
+        return scenes.generate_ref(self.show, scene, sid, cfg=self.cfg,
+                                   report=self._report)
 
 
 def _slug(text: str) -> str:

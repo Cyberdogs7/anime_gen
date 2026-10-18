@@ -160,7 +160,7 @@ def test_voice_review_prompt_flags_nickname_drift():
     p = prompts.voice_review_prompt(
         {"scenes": []}, [{"name": "Mira Kaine", "personality": ["dry"]}],
         {"Mira Kaine": {"Ren Tojo": ["property"]}})
-    assert "NICKNAME CONSISTENCY" in p
+    assert "nickname" in p.lower()
     assert "Mira Kaine calls Ren Tojo: property" in p
 
 
@@ -196,7 +196,7 @@ def test_prose_review_loop_persists_ledger_and_dialogue_txt(tmp_path):
 
     class _PassLLM:
         def chat_json(self, messages, **kwargs):
-            return {"score": 0.0, "pass": True, "notes": []}
+            return {"grade": "Pass", "review": ""}
 
     _, reviews = write_prose_review_loop(show, 1, prose, llm=_PassLLM(),
                                          cfg=Config(tmp_path), max_revisions=1)

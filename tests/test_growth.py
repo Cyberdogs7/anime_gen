@@ -183,7 +183,7 @@ def test_development_prompt_cadence_rule(tmp_path):
 
 def test_character_episodes_exclude_battle_plotlines(tmp_path):
     """A character episode must deterministically exclude battle/combat plotlines
-    from what development can feature — no more re-indexing on Apex-734."""
+    from what development can feature — no more re-indexing on Test-734."""
     from studio.development import _plotline_state, develop_episode
 
     show = _make_show(tmp_path)
@@ -194,7 +194,7 @@ def test_character_episodes_exclude_battle_plotlines(tmp_path):
          "characters": ["Ryou"], "summary": "daily rivalry", "status": "active",
          "last_seen_episode": 0},
         {"id": "mech", "name": "Mech Rampage", "kind": "battle",
-         "characters": ["Apex-734"], "summary": "giant mech attack", "status": "active",
+         "characters": ["Test-734"], "summary": "giant mech attack", "status": "active",
          "last_seen_episode": 0},
     ]
     show.write_bible(b)
@@ -227,7 +227,7 @@ def test_battle_cadence_allows_battle_when_due(tmp_path):
          "characters": ["Ryou"], "summary": "daily rivalry", "status": "active",
          "last_seen_episode": 0},
         {"id": "mech", "name": "Mech Rampage", "kind": "battle",
-         "characters": ["Apex-734"], "summary": "giant mech attack", "status": "active",
+         "characters": ["Test-734"], "summary": "giant mech attack", "status": "active",
          "last_seen_episode": 0},
     ]
     show.write_bible(b)

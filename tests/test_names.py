@@ -9,7 +9,7 @@ from studio.names import looks_like_character_name as ok
 
 
 def test_real_names_pass():
-    for n in ["Mira Kaine", "Apex-734", "Bio-Mech Brute", "Ren Tojo",
+    for n in ["Mira Kaine", "Test-734", "Test Mech Brute", "Ren Tojo",
               "Chitinous Marauder Pods (x6)", "O'Brien", "Harrow Wing", "Harrow-Wing"]:
         assert ok(n), n
 

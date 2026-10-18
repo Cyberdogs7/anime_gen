@@ -66,6 +66,12 @@
   .scene { margin:4px 0 12px; }
   .shot-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:12px; margin-top:8px; }
   .shot { border:1px solid var(--line); border-radius:8px; padding:8px; }
+.shot.rejected { border:2px solid var(--bad); background:rgba(255,92,92,.07); }
+.badge.fail { background:rgba(255,92,92,.22); color:var(--bad); }
+.shot-banner { margin:0 0 6px; padding:6px 9px; border-radius:6px; font-weight:700; font-size:12px; }
+.shot-banner.rejected { background:var(--bad); color:#fff; }
+.shot-banner.working { background:rgba(90,200,250,.20); color:#5ac8fa; }
+.shot-banner.retake { background:rgba(52,199,123,.16); color:var(--ok); }
   .shot-img { width:100%; border-radius:6px; display:block; }
   .shot-video { width:100%; border-radius:6px; display:block; margin-top:4px; }
   .shot-empty { height:100px; display:flex; align-items:center; justify-content:center; border:1px dashed var(--line); border-radius:6px; }
@@ -635,17 +641,23 @@ function renderCostumeModal() {
   document.getElementById("costumeModalTitle").textContent = `${charName} — Costumes`;
   const costumes = (c.costumes || []).filter(v => v.label !== "base");
   const pending = COSTUME_PENDING[charName] || {};
+  // A variant that came back (regenerated) is no longer "pending".
+  for (const k of Object.keys(pending)) {
+    if (costumes.some(v => v.label === k)) delete pending[k];
+  }
   if (!costumes.length && !Object.keys(pending).length) {
     body.innerHTML = '<p class="muted">No costume variants generated yet.</p>';
   } else {
     body.innerHTML = `<div class="outfit-grid">` + costumes.map(v => {
       const eps = (v.episodes || []).map(e => `<span class="chip">${esc(e)}</span>`).join("") || '<span class="muted">unused yet</span>';
       const prompt = v.prompt ? `<details class="costume-prompt"><summary class="muted">generation prompt</summary><pre>${esc(v.prompt)}</pre></details>` : "";
-      const status = v.approved
-        ? `<span class="badge approved">Approved</span>`
-        : `<span class="badge">Awaiting approval</span>`;
+      const status = v.rejected
+        ? `<span class="badge fail">✖ REJECTED — awaiting rerender</span>`
+        : (v.approved
+          ? `<span class="badge approved">Approved</span>`
+          : `<span class="badge">Awaiting approval</span>`);
       return `<div class="outfit">
-        <img class="char-ref" alt="${esc(v.label)}" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(v.image)}?v=${Date.now()}">
+        <img class="char-ref" alt="${esc(v.label)}" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(v.image)}?v=${encodeURIComponent(v.image)}">
         <div class="outfit-meta">${esc(v.label)} ${status}</div>
         <div class="kv muted">Used in: <div class="chips">${eps}</div></div>
         ${prompt}
@@ -711,6 +723,33 @@ async function doRejectCharRef(charName) {
   const notes = askNotes(); if (notes === null) return;
   await act(`/api/show/${SHOW}/reject`, { step: "char_ref", char: charName, notes },
             "Rejected — revising the appearance & regenerating the base ref (1–3 min)…");
+}
+
+// Create/refresh a character's garmentless "nude" appearance ref.
+async function doNude(charName) {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/costume/nude`, { char: charName, notes },
+            "Generating nude ref (1–3 min)…");
+  await loadAll();
+}
+
+// Rebuild a character's refs (or the whole cast) through the one ref pipeline.
+async function doRebuildRefs(charName) {
+  const who = charName || "ALL characters";
+  if (!confirm(`Rebuild refs for ${who}? This deletes the current refs and regenerates ` +
+               `them (nude-first for the recurring cast) — several minutes.`)) return;
+  await act(`/api/show/${SHOW}/refs/rebuild`, { char: charName, reset: true },
+            `Rebuilding refs for ${who}…`);
+  await loadAll();
+}
+
+// Iterate ONLY the show's visual style guide (pure art direction).
+async function doStyleGuide() {
+  const notes = askNotes(); if (notes === null) return;
+  await act(`/api/show/${SHOW}/style/revise`, { notes }, "Revising the style guide…");
+}
+async function doStyleAnchor() {
+  await act(`/api/show/${SHOW}/style/anchor`, {}, "Regenerating the style anchor…");
 }
 
 // ---------------- Setup (Gate 0) ----------------
@@ -794,6 +833,12 @@ async function loadSetup() {
   html += card("Bible", badge(d.bootstrap.bible.status),
                (regenNote(d.bootstrap.bible) || "") + bibleBody,
                editBtn("bible.yaml", "Bible") + actRow("bible", "", "bible", d.bootstrap.bible.status));
+  const sg = (d.bible && d.bible.style_guide) ? d.bible.style_guide : "";
+  html += card("House style",
+    `<button class="btn ghost" style="font-size:11px;padding:2px 8px" onclick="doStyleGuide()">↻ Iterate style guide</button>` +
+    ` <button class="btn ghost" style="font-size:11px;padding:2px 8px" onclick="doStyleAnchor()">↻ Regenerate style anchor</button>`,
+    `<div class="kv"><b>Current style guide</b></div><pre class="muted" style="white-space:pre-wrap;margin:0 0 6px">${esc(sg || "(none)")}</pre>` +
+    `<div class="kv muted">Pure art direction only — appended to every ref/keyframe prompt. Iterate with notes so it never names mecha/locations (those leak into character refs).</div>`);
   html += plotlinesCard(d.plotlines || []);
   html += seasonCard(d.seasons || []);
   let charHtml = '<div class="char-grid">';
@@ -808,7 +853,12 @@ async function loadSetup() {
       (c.ref_images || []).find(f => f !== "refs.json" && !variantFiles.includes(f));
     let imgs = "";
     if (baseImg && (c.ref_images || []).length) {
-      imgs = `<img class="char-ref" alt="ref" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(baseImg)}?v=${Date.now()}">`;
+      const baseApproved = baseRef ? baseRef.approved !== false : true;
+      const baseRej = (baseRef && baseRef.rejected) || c.rejected_notes;
+      const rej = baseRej
+        ? `<div class="kv"><span class="badge fail">✖ REJECTED — awaiting rerender</span></div>`
+        : (baseApproved ? "" : `<div class="kv"><span class="badge">Awaiting approval</span></div>`);
+      imgs = rej + `<img class="char-ref" alt="ref" src="/api/show/${SHOW}/media/characters/${esc(cc.id)}/refs/${esc(baseImg)}?v=${encodeURIComponent(baseImg)}">`;
     } else if (c.refs !== "approved") {
       imgs = '<div class="kv muted">image generating…</div>';
     }
@@ -816,6 +866,9 @@ async function loadSetup() {
     const costumeBtn = nCostumes
       ? `<button class="btn ghost" onclick="openCostumes('${esc(c.name)}')">Costumes (${nCostumes})</button>`
       : "";
+    const nudeVar = (c.variants || []).find(v => v.label === "nude");
+    const nudeBtn = `<button class="btn ghost" onclick="doNude('${esc(c.name)}')">${nudeVar ? "↻ Regenerate nude ref" : "Create nude ref"}</button>`;
+    const rebuildBtn = `<button class="btn ghost" onclick="doRebuildRefs('${esc(c.name)}')">↻ Rebuild refs</button>`;
     // Character is approved when proposal + refs + voice all say so.
     const charApproved = c.proposal === "approved" && c.refs === "approved" && c.voice === "approved";
     const primaryActions = charApproved
@@ -824,7 +877,7 @@ async function loadSetup() {
         `<button class="btn reject" onclick="doReject('character','${esc(c.name)}')">Reject</button>`;
     const assetActions = (c.ref_images.length || c.voice_file)
       ? `<span class="muted" style="font-size:11px">or</span>` +
-        (c.ref_images.length ? ` <button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Reject base image</button>` : "") +
+        (c.ref_images.length ? ` <button class="btn ghost" onclick="doReject('refs','${esc(c.name)}')">Regenerate base image</button>` : "") +
         (c.voice_file ? ` <button class="btn ghost" onclick="doReject('voice','${esc(c.name)}')">Reject voice</button>` : "")
       : "";
     charHtml += `<div class="char"><h3>${esc(c.name)} ${editBtn(`characters/${esc(cc.id)}.yaml`, `${esc(c.name)} sheet`)}</h3>
@@ -832,26 +885,30 @@ async function loadSetup() {
       <div class="kv">Proposal: ${badge(c.proposal)} &nbsp; Refs: ${badge(c.refs || (c.ref_images.length ? "ready" : "stub"))} &nbsp; Voice: ${badge(c.voice)}</div>
       ${baseImg ? `<div class="kv muted">Base ref:</div>${imgs}` : imgs}
       ${c.voice_file
-        ? `<audio class="voice-sample" controls preload="none" src="/api/show/${SHOW}/media/assets/voice/${esc(c.voice_file)}?v=${Date.now()}"></audio>`
+        ? `<audio class="voice-sample" controls preload="none" src="/api/show/${SHOW}/media/assets/voice/${esc(c.voice_file)}?v=${encodeURIComponent(c.voice_file)}"></audio>`
         : (c.voice === "pending" ? '<div class="kv">voice sample generating…</div>' : "")}
       <div class="actions" style="border-top:0;padding:8px 0 2px">
         ${primaryActions} ${assetActions}
       </div>
-      ${costumeBtn ? `<div class="actions" style="border-top:0;padding:4px 0 0">${costumeBtn}</div>` : ""}
+      <div class="actions" style="border-top:0;padding:4px 0 0">${costumeBtn} ${nudeBtn} ${rebuildBtn}</div>
       ${c.rejected_notes ? `<div class="kv">Rejected: <b>${esc(c.rejected_notes)}</b></div>` : ""}
       <details><summary class="muted">proposal details</summary><div class="prop-body">${pretty(cc)}</div></details>
     </div>`;
   }
   charHtml += '</div>';
-  html += card("Characters", "", charHtml || '<p class="muted">no characters</p>');
+  html += card("Characters",
+    `<button class="btn ghost" style="font-size:11px;padding:2px 8px" onclick="doRebuildRefs('')">↻ Rebuild all refs</button>`,
+    charHtml || '<p class="muted">no characters</p>');
   let sceneHtml = '<div class="scenes">';
   for (const [k, v] of Object.entries(d.scenes || {})) {
     const imgs = (v.ref_images || []).map(f =>
-      `<img class="scene-ref" alt="${esc(k)}" src="/api/show/${SHOW}/media/scenes/${esc(k)}/refs/${esc(f)}?v=${Date.now()}">`).join("");
+      `<img class="scene-ref" alt="${esc(k)}" src="/api/show/${SHOW}/media/scenes/${esc(k)}/refs/${esc(f)}?v=${encodeURIComponent(f)}">`).join("");
     const rejectBtn = (v.ref_images || []).length
       ? `<button class="btn ghost" onclick="doRejectScene('${esc(k)}')">Reject image</button>`
       : "";
-    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")} ${editBtn(`scenes/${esc(k)}.yaml`, `scene ${esc(k)}`)}${imgs}` +
+    const rejBadge = v.rejected_notes
+      ? `<span class="badge fail">✖ REJECTED — awaiting rerender</span>` : "";
+    sceneHtml += `<div class="scene"><b>${esc(k)}</b> — ${esc(v.name || "")} ${editBtn(`scenes/${esc(k)}.yaml`, `scene ${esc(k)}`)}${rejBadge}${imgs}` +
       (rejectBtn ? `<div class="actions" style="border-top:0;padding:4px 0 0">${rejectBtn}</div>` : "") +
       `</div>`;
   }
@@ -891,6 +948,7 @@ async function pollActivity() {
       busy.classList.remove("blocked");
       busy.textContent = "● " + (a.detail || "Working…");
       busy.classList.remove("off");
+      busy.classList.remove("hide");
     }
     if (out) {
       out.textContent = a.output ? a.output.slice(-800) : "";
@@ -905,6 +963,7 @@ async function pollActivity() {
       busy.classList.add("blocked");
       busy.textContent = "⏸ " + (a.blocked_detail || "Waiting for your approval");
       busy.classList.remove("off");
+      busy.classList.remove("hide");
     }
     if (out) out.classList.add("hide");
   } else if (_pollActive) {
@@ -915,6 +974,26 @@ async function pollActivity() {
   }
 }
 setInterval(pollActivity, 2000);
+
+// Long renders (ref rebuilds, canonical generation) now run in the background, so
+// keep the view current: refresh periodically unless an action or modal is active.
+setInterval(async () => {
+  if (document.body.classList.contains("busy-active")) return;
+  const b = document.getElementById("busy");
+  if (b && b.dataset.busy === "1") return;
+  const m = document.getElementById("modal");
+  if (m && !m.classList.contains("hide")) return;   // inline editor is open
+  try {
+    window._showPayload = await api(`/api/show/${SHOW}`);
+    const cm = document.getElementById("costumeModal");
+    if (cm && !cm.classList.contains("hide")) {
+      renderCostumeModal();                          // keep the OPEN costume modal live
+    } else {
+      await loadSetup();
+      await loadStory();
+    }
+  } catch (e) { /* transient */ }
+}, 2500);
 
 function episodeStatus(d) {
   const st = d.story || {};
@@ -933,11 +1012,55 @@ function episodeStatus(d) {
   if (st.status === "pending") {
     const pr = (d.plan || {}).plan_review || {};
     if (pr.passed === false) {
-      return `Outline failed review (${pr.rounds || 1} rounds, ${(pr.notes || []).length} notes) — needs revision`;
+      const fails = Object.values(pr.reviews || {}).filter(v => String(v.grade || "").toLowerCase() !== "pass").length;
+      return `Outline failed review (${pr.rounds || 1} rounds, ${fails} reviewer${fails === 1 ? "" : "s"} failed) — needs revision`;
     }
     return "Awaiting your approval";
   }
   return "Draft — not yet approved";
+}
+
+function outlineRegenControl(ep) {
+  const m = window._models || {};
+  const opts = [];
+  for (const x of (m.remote || [])) opts.push(`<option value="remote|${esc(x)}">${esc(x)} · remote</option>`);
+  for (const x of (m.local || [])) opts.push(`<option value="local|${esc(x)}">${esc(x)} · local</option>`);
+  if (!opts.length) return "";
+  return `<select id="or-model-${esc(ep)}" class="rw-model" style="max-width:170px" title="Model for outline regeneration">${opts.join("")}</select>` +
+         `<button class="btn ghost" onclick="doRegenOutline('${esc(ep)}')">↻ Regenerate outline with model</button>`;
+}
+async function doRegenOutline(ep) {
+  const sel = document.getElementById(`or-model-${ep}`);
+  const val = sel ? sel.value : "";
+  const i = val.indexOf("|");
+  if (i < 0) return;
+  const kind = val.slice(0, i), model = val.slice(i + 1);
+  if (!confirm(`Regenerate the EP${ep} outline with "${model}" (${kind})?\n\nThe chosen model writes the outline; the writers' room re-reviews it.`)) return;
+  await act(`/api/show/${SHOW}/plan/regenerate`,
+            { episode: Number(ep), model: model, remote: kind === "remote" },
+            `regenerating EP${ep} outline with ${model}…`);
+}
+
+function rewriteControl(ep) {
+  if (!ep.script_review_failed) return "";
+  const m = window._models || {};
+  const opts = [];
+  for (const x of (m.remote || [])) opts.push(`<option value="remote|${esc(x)}">${esc(x)} · remote</option>`);
+  for (const x of (m.local || [])) opts.push(`<option value="local|${esc(x)}">${esc(x)} · local</option>`);
+  if (!opts.length) return "";
+  return `<select id="rw-model-${esc(ep.episode)}" class="rw-model" style="max-width:170px" title="Model for a single rewrite">${opts.join("")}</select>` +
+         `<button class="btn ghost" onclick="doRewrite('${esc(ep.episode)}')">↻ Rewrite (1 pass)</button>`;
+}
+async function doRewrite(ep) {
+  const sel = document.getElementById(`rw-model-${ep}`);
+  const val = sel ? sel.value : "";
+  const i = val.indexOf("|");
+  if (i < 0) return;
+  const kind = val.slice(0, i), model = val.slice(i + 1);
+  if (!confirm(`Run ONE rewrite of EP${ep} with "${model}" (${kind})?\n\nOne call on that model, then a normal re-review.`)) return;
+  await act(`/api/show/${SHOW}/rewrite`,
+            { episode: Number(ep), model: model, remote: kind === "remote" },
+            `rewriting EP${ep} with ${model}…`);
 }
 
 function reviewerFlags(d) {
@@ -990,6 +1113,7 @@ function reviewerFlags(d) {
 async function loadStory() {
   const el = document.getElementById("view-story");
   const show = window._showPayload || await api(`/api/show/${SHOW}`).catch(() => ({}));
+  window._models = (show && show.models) || {};
   const seasons = show.seasons || (window._showPayload || {}).seasons || [];
   const seasonHtml = seasons.length ? seasonCard(seasons) : "";
   const d = await api(`/api/show/${SHOW}/episodes`);
@@ -1022,6 +1146,7 @@ async function loadStory() {
       <span class="muted">${esc(ep.script_file || "no script")}</span>
       ${paused ? badge("paused") : badge(st.status || "pending")}
       ${reviewerFlags(ep)}
+      ${rewriteControl(ep)}
       <span class="spacer"></span>
       ${ctrl}
        <button class="btn approve" onclick="doStoryApprove('${ep.episode}')">Approve</button>
@@ -1078,7 +1203,7 @@ function startStoryLive() {
           if (!el) continue;
           if (_storyLiveKf[s.id] !== prev) {
             _storyLiveKf[s.id] = prev;
-            const url = `/api/show/${SHOW}/media/runs/${esc(d2.episode)}/storyboard/${esc(prev)}?v=${Date.now()}`;
+            const url = `/api/show/${SHOW}/media/runs/${esc(d2.episode)}/storyboard/${esc(prev)}?v=${encodeURIComponent(prev)}`;
             if (el.tagName === "VIDEO") el.src = url;
             else el.src = url;
           }
@@ -1258,9 +1383,15 @@ function episodeStoryboard(ep, d) {
   }
   function shotActions(d, s) {
     const ap = s.approval || {};
+    const retakeReady = !!(d.videos && d.videos[s.id]);
     if (ap.status === "approved") {
       return `<div class="shot-actions"><button class="btn ghost" onclick="doShotApprove('${esc(d.episode)}','${esc(s.id)}')">✓ Approve</button>` +
         `<button class="btn reject" onclick="doShotReject('${esc(d.episode)}','${esc(s.id)}')">↻ Reject</button></div>`;
+    }
+    if (ap.status === "rejected" && !retakeReady) {
+      // Rejected and still re-rendering: nothing to approve yet. De-emphasise —
+      // the card banner states the status; offer only more feedback.
+      return `<div class="shot-actions"><button class="btn ghost" onclick="doShotReject('${esc(d.episode)}','${esc(s.id)}')">✎ Add more feedback</button></div>`;
     }
     return `<div class="shot-actions"><button class="btn approve" onclick="doShotApprove('${esc(d.episode)}','${esc(s.id)}')">✓ Approve</button>` +
       `<button class="btn reject" onclick="doShotReject('${esc(d.episode)}','${esc(s.id)}')">↻ Reject with feedback</button></div>`;
@@ -1286,8 +1417,10 @@ function episodeStoryboard(ep, d) {
       if (vc.has_people) {
         vcDetail += `<div class="qc-detail" style="color:var(--bad)"><b>Humans detected in image</b></div>`;
       }
-      return `<div class="obj"><img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/objects/${esc(o.image)}?v=${Date.now()}">` +
-      `<div class="kv">${esc(o.name)} ${o.approved ? '<span class="badge approved">Approved</span>' : '<span class="badge">Awaiting approval</span>'}${vcBadge}</div>` +
+      return `<div class="obj"><img class="shot-img" src="/api/show/${SHOW}/media/runs/${esc(d.episode)}/objects/${esc(o.image)}?v=${encodeURIComponent(o.image)}">` +
+      `<div class="kv">${esc(o.name)} ${o.rejected
+        ? '<span class="badge fail">✖ REJECTED — awaiting rerender</span>'
+        : (o.approved ? '<span class="badge approved">Approved</span>' : '<span class="badge">Awaiting approval</span>')}${vcBadge}</div>` +
       vcDetail +
       `<div class="outfit-actions">` +
       (o.approved ? "" : `<button class="btn approve" onclick="doApproveObject('${esc(d.episode)}','${esc(o.slug)}')">✓ Approve</button>`) +
@@ -1302,24 +1435,28 @@ function episodeStoryboard(ep, d) {
       // variant is the character's canonical look — always editable.
       const baseVariant = (c.variants || []).find(v => v.label === "base");
       const baseRef = baseVariant && baseVariant.image
-        ? `<div class="obj"><div class="kv"><b>Base ref</b></div>` +
-          `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(baseVariant.image)}?v=${Date.now()}">` +
+        ? `<div class="obj"><div class="kv"><b>Base ref</b> ${baseVariant.rejected
+            ? '<span class="badge fail">✖ REJECTED — awaiting rerender</span>'
+            : (baseVariant.approved ? '<span class="badge approved">Approved</span>' : '<span class="badge">Awaiting approval</span>')}</div>` +
+          `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(baseVariant.image)}?v=${encodeURIComponent(baseVariant.image)}">` +
           `<div class="outfit-actions">` +
-          `<button class="btn approve" onclick="doApprove('refs','${esc(c.name)}')">✓ Approve</button>` +
+          (baseVariant.approved ? "" :
+            `<button class="btn approve" onclick="doApprove('refs','${esc(c.name)}')">✓ Approve</button>`) +
           `<button class="btn ghost" onclick="doRejectCharRef('${esc(c.name)}')">✎ Edit &amp; regenerate</button>` +
           `</div></div>` : "";
       const variants = (c.variants || []).filter(v => v.label !== "base").map(v =>
         `<div class="obj">${v.image
-          ? `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(v.image)}?v=${Date.now()}">`
+          ? `<img class="shot-img" src="/api/show/${SHOW}/media/characters/${esc(c.id)}/refs/${esc(v.image)}?v=${encodeURIComponent(v.image)}">`
           : '<div class="muted shot-empty">no ref</div>'}
-        <div class="kv"><b>${esc(v.label)}</b> ${v.approved
-          ? '<span class="badge approved">Approved</span>'
-          : '<span class="badge">Awaiting approval</span>'}</div>
-        ${v.approved ? "" : `<div class="outfit-actions">` +
-          `<button class="btn approve" onclick="doApproveCostume('${esc(c.name)}','${esc(v.label)}')">✓ Approve</button>` +
+        <div class="kv"><b>${esc(v.label)}</b> ${v.rejected
+          ? '<span class="badge fail">✖ REJECTED — awaiting rerender</span>'
+          : (v.approved ? '<span class="badge approved">Approved</span>' : '<span class="badge">Awaiting approval</span>')}</div>` +
+        (v.prompt ? `<details class="costume-prompt"><summary class="muted">generation prompt</summary><pre>${esc(v.prompt)}</pre></details>` : "") +
+        `<div class="outfit-actions">` +
+          (v.approved ? "" : `<button class="btn approve" onclick="doApproveCostume('${esc(c.name)}','${esc(v.label)}')">✓ Approve</button>`) +
           `<button class="btn ghost" onclick="doRejectCostume('${esc(c.name)}','${esc(v.label)}')">✎ Regenerate</button>` +
           `<button class="btn ghost" style="color:var(--bad);border-color:var(--bad)" onclick="doDeleteCostume('${esc(c.name)}','${esc(v.label)}')">🗑 Delete</button>` +
-          `</div>`}</div>`).join("");
+          `</div></div>`).join("");
       return `<div class="obj"><div class="kv"><b>${esc(c.name)}</b> <span class="muted">${esc(c.role || "")}</span></div>${baseRef}${variants}</div>`;
     }).join("");
     h += card("Episode cast (character refs)", "", `<div class="obj-grid">${cast}</div>`);
@@ -1334,14 +1471,19 @@ function episodeStoryboard(ep, d) {
   if (!busy && st.status !== "approved" && plan && plan.status === "pending") {
     const pr = plan.plan_review || {};
     if (pr.passed === false) {
-      const nNotes = (pr.notes || []).length;
+      const revs = pr.reviews || {};
+      const fails = Object.entries(revs).filter(([, v]) => String(v.grade || "").toLowerCase() !== "pass");
+      const failsHtml = fails.map(([r, v]) =>
+        `<div class="kv" style="color:var(--bad)">· <b>[${esc(r)}]</b> ${esc(v.review || "(no detail)")}</div>`).join("");
       h += `<div class="card" style="border:1px solid var(--bad)">
         <h2>Outline failed review ${badge("needs revision")}</h2>
         <div class="body">
-          <div class="kv" style="color:var(--bad)"><b>The structure reviewers rejected this outline after ${esc(String(pr.rounds || 1))} rounds (${nNotes} notes).</b> It is <b>not</b> simply awaiting approval. You can <b>✎ Edit</b> the outline to fix the flagged beats and re-run, <b>Approve outline</b> as an override, or <b>Reject outline</b> to regenerate from notes. See the review notes below.</div>
+          <div class="kv" style="color:var(--bad)"><b>The reviewers rejected this outline after ${esc(String(pr.rounds || 1))} rounds (${fails.length} failed).</b> It is <b>not</b> simply awaiting approval. You can <b>✎ Edit</b> the outline, <b>Approve outline</b> as an override, <b>Reject outline</b> to regenerate from notes, or regenerate it with a chosen model below.</div>
+          ${failsHtml}
           <div class="actions">${editBtn(`${epRel(d, "plan.json")}`, `EP${esc(d.episode)} plan`, loadStory)}` +
             `<button class="btn approve" onclick="doPlanApprove('${esc(d.episode)}', true)">Approve outline (override)</button>` +
-            `<button class="btn reject" onclick="doPlanReject('${esc(d.episode)}')">Reject outline</button></div>
+            `<button class="btn reject" onclick="doPlanReject('${esc(d.episode)}')">Reject outline</button>` +
+            `${outlineRegenControl(d.episode)}</div>
         </div></div>`;
     } else {
       h += `<div class="card" style="border:1px solid var(--warn)">
@@ -1420,20 +1562,15 @@ function episodeStoryboard(ep, d) {
   const scriptData = d.script || {};
   const scriptReview = scriptData._review || {};
   if (!busy && scriptReview.passed === false && st.status !== "approved") {
-    const nNotes = (scriptReview.notes || []).length;
-    const highs = (scriptReview.notes || []).filter(n => (n.severity || "").toUpperCase() === "HIGH");
-    const highsHtml = highs.map(n =>
-      `<div class="kv" style="color:var(--bad)">· <b>[${esc(n.reviewer || "review")}]</b> ${esc(n.note || n.item || JSON.stringify(n))}</div>`).join("");
-    const rest = (scriptReview.notes || []).filter(n => (n.severity || "").toUpperCase() !== "HIGH");
-    const restHtml = rest.length
-      ? `<details><summary class="muted">show ${rest.length} MEDIUM/LOW notes</summary>` +
-        rest.map(n => `<div class="muted">· <b>[${esc(n.reviewer || "review")}]</b> ${esc(n.note || n.item || JSON.stringify(n))}</div>`).join("") + `</details>`
-      : "";
+    const revs = scriptReview.reviews || {};
+    const fails = Object.entries(revs).filter(([, v]) => String(v.grade || "").toLowerCase() !== "pass");
+    const failsHtml = fails.map(([r, v]) =>
+      `<div class="kv" style="color:var(--bad)">· <b>[${esc(r)}]</b> ${esc(v.review || "(no detail)")}</div>`).join("");
     h += `<div class="card" style="border:1px solid var(--bad)">
       <h2>Script failed review ${badge("needs revision")}</h2>
       <div class="body">
-        <div class="kv" style="color:var(--bad)"><b>The writers' room reviewers rejected this script after ${esc(String(scriptReview.rounds || 1))} rounds (${nNotes} notes, ${highs.length} HIGH).</b> Storyboard is blocked until you override. You can <b>✎ Edit</b> the script to fix the flagged issues, <b>Approve script</b> as an override, or <b>Reject episode</b> to regenerate from scratch. Promote recurring HIGHs to standing constraints with <code>python -m studio.learn --show ${esc(SHOW)} --episode ${esc(String(d.episode).replace("EP",""))} --promote</code>.</div>
-        ${highsHtml}${restHtml}
+        <div class="kv" style="color:var(--bad)"><b>The writers' room rejected this script after ${esc(String(scriptReview.rounds || 1))} rounds (${fails.length} reviewer${fails.length === 1 ? "" : "s"} failed).</b> Storyboard is blocked until you override. You can <b>✎ Edit</b> the script, <b>Approve script</b> as an override, <b>Reject episode</b> to regenerate from scratch, or use the model dropdown on the episode row above to <b>rewrite with a chosen model</b>.</div>
+        ${failsHtml}
       </div></div>`;
   }
   h += card(d.episode + " · " + (d.script_file || ""), badge(st.status || "pending"),
@@ -1479,15 +1616,16 @@ function episodeStoryboard(ep, d) {
       const qcBadge = qcBadgeFor(s);
       const vcBadge = vcheckBadgeFor(s);
       const ap = s.approval || {};
-      const apBadge = ap.status === "approved"
-        ? ` <span class="badge pass" title="approved shot">approved</span>`
-        : (ap.status === "rejected"
-          ? ` <span class="badge fail" title="rejected (retake ${ap.retake_count || 0})">retaking</span>`
-          : "");
+      const renderRunning = d.render && d.render.state === "running";
+      const retakeReady = !!(d.videos && d.videos[s.id]);
+      const isRej = ap.status === "rejected";
+      const banner = !isRej ? "" : (retakeReady
+        ? `<div class="shot-banner retake">↻ RETAKE READY — review the new render, then approve or reject</div>`
+        : `<div class="shot-banner ${renderRunning ? "working" : "rejected"}">✖ REJECTED — ${renderRunning ? "REGENERATING…" : "awaiting rerender"}${ap.retake_count ? ` · retake ${ap.retake_count}` : ""}</div>`);
       const apNotes = ap.notes && ap.status === "rejected"
         ? `<div class="qc-detail muted"><b>Reject notes:</b> ${esc(ap.notes)}</div>` : "";
-      sh += `<div class="shot">${prev}${vid}
-        <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}${qcBadge}${vcBadge}${apBadge}</div>
+      sh += `<div class="shot${isRej ? " rejected" : ""}">${banner}${prev}${vid}
+        <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}${qcBadge}${vcBadge}</div>
         ${qcDetails(s)}
         ${vcheckDetails(s)}
         ${apNotes}
@@ -1511,25 +1649,15 @@ function episodeStoryboard(ep, d) {
       for (const rd of rounds) {
         const rp = rd.pass;
         const chipCls = rp === true ? "pass" : (rp === false ? "fail" : "");
-        const score = rd.score !== undefined && rd.score !== null ? ` score=${esc(String(rd.score))}` : "";
-        chips += `<span class="rev-chip ${chipCls}" title="round ${esc(String(rd.round ?? "?"))}${score}${rd.summary ? " — " + esc(rd.summary) : ""}">R${esc(String(rd.round ?? "?"))} ${rp === true ? "PASS" : (rp === false ? "FAIL" : "?")}${score}</span>`;
+        chips += `<span class="rev-chip ${chipCls}" title="round ${esc(String(rd.round ?? "?"))}">R${esc(String(rd.round ?? "?"))} ${rp === true ? "PASS" : (rp === false ? "FAIL" : "?")}</span>`;
       }
-      const latestNotes = (r.latest && r.latest.notes) || [];
-      const sevRank = n => ({HIGH: 0, MEDIUM: 1, LOW: 2}[(n.severity || "").toUpperCase()] ?? 3);
-      const sorted = [...latestNotes].sort((a, b) => sevRank(a) - sevRank(b));
-      const highHtml = sorted.filter(n => (n.severity || "").toUpperCase() === "HIGH")
-        .map(n => `<div class="muted">· <b>[HIGH]</b> ${esc(n.note || n.item || JSON.stringify(n))}</div>`).join("");
-      const restNotes = sorted.filter(n => (n.severity || "").toUpperCase() !== "HIGH");
-      const restHtml = restNotes.length
-        ? `<details><summary class="muted">show ${restNotes.length} MEDIUM/LOW</summary>` +
-          restNotes.map(n =>
-            `<div class="muted">· [${esc(n.severity || "?")}] ${esc(n.note || n.item || JSON.stringify(n))}</div>`).join("") + `</details>`
-        : "";
-      const notesHtml = highHtml + restHtml;
+      const latest = r.latest || {};
+      const latestHtml = (latest.grade && String(latest.grade).toLowerCase() !== "pass" && latest.review)
+        ? `<div class="muted">· ${esc(latest.review)}</div>` : "";
       const verdict = r.passed_any
         ? `<span class="ok">✓ passed at least one round</span>`
         : (r.passed_latest === false ? `<span class="bad">✗ never passed</span>` : "");
-      rh += `<div class="rev ${cls}"><b>${esc(k)}</b> ${verdict}<div class="rev-chips">${chips}</div>${notesHtml}</div>`;
+      rh += `<div class="rev ${cls}"><b>${esc(k)}</b> ${verdict}<div class="rev-chips">${chips}</div>${latestHtml}</div>`;
     }
     h += card("Writers' room — all review rounds", "", rh);
   }

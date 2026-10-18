@@ -358,6 +358,11 @@ class LMStudioClient:
         self._session_id = session_id or _ZEN_SESSION
         self._zen: dict[str, Any] | bool | None = None  # None=unresolved
         self.last_provider = "local"
+        # The model that ACTUALLY answered the last call: the remote model when
+        # Zen answered, or the requested local model on local/fallback. Logged by
+        # promptlog so a prompt file shows the truth, not the requested role name.
+        self.last_resolved_model: str | None = None
+        self._last_zen_model: str | None = None
 
     def _acquire(self) -> str:
         return self.router.acquire() if self.router else self.base_url
@@ -617,6 +622,7 @@ class LMStudioClient:
         retries the prompt locally.
         """
         remote_model = model_override or self._remote_model_for(zen, model, role)
+        self._last_zen_model = remote_model
         api = api or ("responses" if self._uses_responses_api(zen, remote_model) else "chat")
         # Identify honestly: GO monitors for abuse and asks clients to send
         # their own user agent rather than a generic HTTP-library name.
@@ -687,7 +693,7 @@ class LMStudioClient:
     def chat(self, messages: list[dict], model: str | None = None, temperature: float = 0.7,
              max_tokens: int | None = 4096, json_mode: bool = False, retries: int = 3,
              on_progress=None, prefer_local: bool = False,
-             role: str | None = None) -> str:
+             role: str | None = None, remote_model: str | None = None) -> str:
         """Send a chat completion; returns the message content string.
 
         Remote-first when Zen is configured: prompts go to OpenCode Zen
@@ -695,14 +701,16 @@ class LMStudioClient:
         content-policy refusals (explicit scenes remote models won't write).
         ``role=`` selects the remote model via ``zen.roles`` (e.g.
         role="script"); without it the client reverse-matches the requested
-        local model name to a uniquely configured role. Vision calls go to the
-        ``zen.vision`` model: responses-style models (Spark) take image + video
-        natively, chat-style models get video resampled to frames first.
-        Undecodable clips, disabled vision, and ``prefer_local=True`` stay
-        local. Each local attempt is routed (acquire/release); a failed
-        attempt cools the URL down so the next call falls back to the other
-        instance. JSON structure is enforced by prompt instruction + robust
-        extraction in chat_json().
+        local model name to a uniquely configured role. ``remote_model=`` forces
+        an EXACT remote model id for this call (bypassing the role/model_map
+        resolution) — used for a manual one-off rewrite with a chosen model.
+        Vision calls go to the ``zen.vision`` model: responses-style models
+        (Spark) take image + video natively, chat-style models get video
+        resampled to frames first. Undecodable clips, disabled vision, and
+        ``prefer_local=True`` stay local. Each local attempt is routed
+        (acquire/release); a failed attempt cools the URL down so the next call
+        falls back to the other instance. JSON structure is enforced by prompt
+        instruction + robust extraction in chat_json().
         """
         # A caller's small budget must never truncate the model: floor it.
         max_tokens = _effective_output_cap(max_tokens)
@@ -722,6 +730,7 @@ class LMStudioClient:
                                 zen, send, model, temperature, max_tokens,
                                 on_progress, model_override=vmodel, api=api)
                             self.last_provider = "zen"
+                            self.last_resolved_model = self._last_zen_model
                             return content
                         except RefusalError as exc:
                             log.info("zen vision refused prompt (%s); retrying locally", exc)
@@ -732,8 +741,10 @@ class LMStudioClient:
             else:
                 try:
                     content = self._chat_zen(zen, messages, model, temperature,
-                                             max_tokens, on_progress, role=role)
+                                             max_tokens, on_progress, role=role,
+                                             model_override=remote_model)
                     self.last_provider = "zen"
+                    self.last_resolved_model = self._last_zen_model
                     return content
                 except RefusalError as exc:
                     log.info("zen refused prompt (%s); retrying locally", exc)
@@ -742,7 +753,18 @@ class LMStudioClient:
         content = self._chat_local(messages, model, temperature, max_tokens,
                                    retries, on_progress)
         self.last_provider = "local"
+        self.last_resolved_model = model
         return content
+
+    def provider_info(self) -> dict[str, Any]:
+        """Which provider actually answered the LAST call, and the model used.
+
+        ``model`` is the RESOLVED model — the remote model when Zen answered, or
+        the requested local model on local/fallback. This lets a prompt log show
+        what really ran instead of the requested local role name.
+        """
+        return {"provider": self.last_provider,
+                "model": self.last_resolved_model or self.base_url}
 
     def _chat_local(self, messages: list[dict], model: str | None, temperature: float,
                     max_tokens: int | None, retries: int, on_progress=None) -> str:
@@ -803,7 +825,7 @@ class LMStudioClient:
     def chat_json(self, messages: list[dict], model: str | None = None,
                   temperature: float = 0.4, max_tokens: int | None = 4096, retries: int = 3,
                   on_progress=None, prefer_local: bool = False,
-                  role: str | None = None) -> dict:
+                  role: str | None = None, remote_model: str | None = None) -> dict:
         """Chat completion with a JSON-object response, parsed.
 
         Retries (fresh generations) when the model truncates or emits unparseable
@@ -815,7 +837,7 @@ class LMStudioClient:
                 content = self.chat(messages, model=model, temperature=temperature,
                                     max_tokens=max_tokens, json_mode=True, retries=1,
                                     on_progress=on_progress, prefer_local=prefer_local,
-                                    role=role)
+                                    role=role, remote_model=remote_model)
                 return _extract_json(content)
             except (LMStudioError, Exception) as exc:
                 last = exc

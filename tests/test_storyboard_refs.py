@@ -88,13 +88,13 @@ def test_create_missing_character_refs_fills_sheet_without_ref(tmp_path, monkeyp
     show = Show("demo", root=tmp_path)
     show.write_bible({"title": "Demo", "content_policy": "mature"})
     # Existing sheet, NO ref image.
-    show.write_character({"id": "apex-734", "name": "Apex-734",
-                          "appearance_canonical": "colossal bio-mech"})
+    show.write_character({"id": "test-734", "name": "Test-734",
+                          "appearance_canonical": "a synthetic test figure"})
     runs = tmp_path / "runs" / "EP01"
     runs.mkdir(parents=True)
     (runs / "script.r1.json").write_text(_json.dumps(
-        {"episode": 1, "cast": ["Blade", "Apex-734"], "scenes": []}), encoding="utf-8")
-    # Blade is approved (has a real ref); Apex-734 must be detected as missing.
+        {"episode": 1, "cast": ["Blade", "Test-734"], "scenes": []}), encoding="utf-8")
+    # Blade is approved (has a real ref); Test-734 must be detected as missing.
     show.write_character({"id": "blade", "name": "Blade", "appearance_canonical": "x"})
     br = show.character_refs_dir("blade")
     br.mkdir(parents=True, exist_ok=True)
@@ -103,18 +103,29 @@ def test_create_missing_character_refs_fills_sheet_without_ref(tmp_path, monkeyp
         {"status": "real", "refs": ["blade_ref_01.png"], "variants": {"base": "blade_ref_01.png"}}),
         encoding="utf-8")
 
-    monkeypatch.setattr(ops_mod.ServiceOps, "_krea2_client", lambda self: (None, None))
-    monkeypatch.setattr(cw, "load_workflow", lambda p: {})
+    import studio.refs as refs
+    import studio.consistency as cons
 
-    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None, **kwargs):
+    def fake_krea2(show_, name, prompt, label, out_path, cfg, seed=0):
         _Path(out_path).write_bytes(b"png")
+        return True
 
-    monkeypatch.setattr(cw, "generate_keyframe", fake_keyframe)
+    def fake_qwen(show_, base_ref, name, prompt, label, out_path, cfg, seed=0):
+        _Path(out_path).write_bytes(b"png")
+        return True
+
+    monkeypatch.setattr(refs, "_render_costume_via_krea2", fake_krea2)
+    monkeypatch.setattr(refs, "_render_costume_via_qwen_edit", fake_qwen)
+    # No LLM in tests: identity backfill must not call out.
+    monkeypatch.setattr(refs, "_backfill_identity", lambda *a, **k: "")
+    # No VLM server in tests: the nude-root figure-count gate must not call out.
+    monkeypatch.setattr(cons, "ref_figure_count",
+                        lambda llm, model, path: {"verdict": "single", "figures": 1, "detail": ""})
 
     created = casting.create_missing_character_refs(show, 1, cfg=Config(tmp_path))
-    assert "Apex-734" in created
-    apex = show.character_refs_dir("apex-734")
-    assert (apex / "apex-734_ref_01.png").exists()
+    assert "Test-734" in created
+    apex = show.character_refs_dir("test-734")
+    assert (apex / "test-734_ref_01.png").exists()
     assert (apex / "refs.json").exists()
 
 
@@ -126,8 +137,8 @@ def test_unit_name_depluralizes_group_characters():
     assert _unit_name("Blade") == "Blade"
     assert _unit_name("Dahlia") == "Dahlia"
     # A designation number is NOT a group count — it must survive.
-    assert _unit_name("Apex-734") == "Apex-734"
-    assert _unit_name("Apex-734 (The Apex Scrapper's Rampage)") == "Apex-734 (The Apex Scrapper's Rampage)"
+    assert _unit_name("Test-734") == "Test-734"
+    assert _unit_name("Test-734 (The Apex Scrapper's Rampage)") == "Test-734 (The Apex Scrapper's Rampage)"
     # The script's plural name matches the unit's ref.
     assert _unit_key("Chitinous Marauder Pods (x6)") == _unit_key("Chitinous Marauder Pod")
 
@@ -150,41 +161,53 @@ def test_char_ref_map_resolves_group_script_names(tmp_path):
 
 
 def test_regenerate_character_ref_from_feedback(tmp_path, monkeypatch):
-    """Feedback on a base ref revises the appearance and re-renders the image —
-    works for episode-supporting characters that aren't in the bootstrap state."""
+    """Notes on the BASE apply only to the base: revise the outfit and re-render the
+    base from the approved nude — the nude is left untouched."""
     from pathlib import Path as _Path
-    import studio.comfy_workflows as cw
-    import studio.remote.ops as ops_mod
+    import studio.refs as refs
+    import studio.consistency as cons
     from studio import casting
 
     show = Show("demo", root=tmp_path)
-    show.write_bible({"title": "Demo", "content_policy": "mature"})
-    show.write_character({"id": "apex-734", "name": "Apex-734",
-                          "appearance_canonical": "colossal bio-mech"})
-    rd = show.character_refs_dir("apex-734")
+    show.write_bible({"title": "Demo", "content_policy": "mature",
+                      "cast": [{"name": "Test-734"}]})
+    show.write_character({"id": "test-734", "name": "Test-734", "is_person": True,
+                          "identity_canonical": "a tall athletic woman",
+                          "wardrobe_canonical": "a grey tank and shorts",
+                          "appearance_canonical": "a tall athletic woman. Wears a grey tank and shorts."})
+    rd = show.character_refs_dir("test-734")
     rd.mkdir(parents=True, exist_ok=True)
-    (rd / "apex-734_ref_01.png").write_bytes(b"old")
+    (rd / "test-734_nude.png").write_bytes(b"nude")
+    (rd / "test-734_ref_01.png").write_bytes(b"old")
     (rd / "refs.json").write_text(json.dumps(
-        {"status": "real", "refs": ["apex-734_ref_01.png"], "variants": {"base": "apex-734_ref_01.png"}}),
-        encoding="utf-8")
+        {"status": "real", "refs": ["test-734_ref_01.png"],
+         "variants": {"nude": "test-734_nude.png", "base": "test-734_ref_01.png"},
+         "approved": ["nude"]}), encoding="utf-8")
 
-    monkeypatch.setattr(ops_mod.ServiceOps, "_krea2_client", lambda self: (None, None))
-    monkeypatch.setattr(cw, "load_workflow", lambda p: {})
-
-    def fake_keyframe(client, wf, prompt, seed, out_path, aspect_ratio=None, **kwargs):
+    def fake_krea2(show_, name, prompt, label, out_path, cfg, seed=0):
         _Path(out_path).write_bytes(b"new")
+        return True
 
-    monkeypatch.setattr(cw, "generate_keyframe", fake_keyframe)
+    def fake_qwen(show_, base_ref, name, prompt, label, out_path, cfg, seed=0):
+        _Path(out_path).write_bytes(b"new")
+        return True
+
+    monkeypatch.setattr(refs, "_render_costume_via_krea2", fake_krea2)
+    monkeypatch.setattr(refs, "_render_costume_via_qwen_edit", fake_qwen)
+    monkeypatch.setattr(cons, "ref_figure_count",
+                        lambda llm, model, path: {"verdict": "single", "figures": 1, "detail": ""})
 
     class FakeLLM:
         def chat(self, messages, **kwargs):
-            return '{"appearance_canonical": "revised look: sleeker chassis"}'
+            return '{"wardrobe_canonical": "a revised grey tank and shorts"}'
 
-    ok = casting.regenerate_character_ref(show, "Apex-734", "less bulk",
+    ok = casting.regenerate_character_ref(show, "Test-734", "shorter shorts",
                                           cfg=Config(tmp_path), llm=FakeLLM())
     assert ok
-    assert "revised look" in show.read_character("apex-734")["appearance_canonical"]
-    assert (rd / "apex-734_ref_01.png").read_bytes() == b"new"
+    assert "revised grey tank" in show.read_character("test-734")["wardrobe_canonical"]
+    assert (rd / "test-734_ref_01.png").read_bytes() == b"new"
+    # A base regen must NOT touch the nude.
+    assert (rd / "test-734_nude.png").read_bytes() == b"nude"
 
 
 def test_shot_object_refs_match_by_slug(tmp_path):

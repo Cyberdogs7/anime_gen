@@ -6,6 +6,7 @@ across shots. Images land in runs/EP##/storyboard/ and runs/EP##/objects/.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -17,9 +18,10 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-from . import fsutil, prompts
+from . import fsutil, objects, prompts, refs
 from .bootstrap import ACTIVITY
 from .config import get_config
+from .refs import NUDE_LABEL, ensure_nude_ref, identity_canonical as _identity_canonical
 from .show import Show
 
 # Background jobs: show_id -> {"state", "done", "total", "detail"}
@@ -39,8 +41,13 @@ def _shot_characters(shot: dict[str, Any]) -> list[str]:
     refs = shot.get("references", {}) or {}
     chars = list(refs.get("characters", []) or [])
     for dlg in shot.get("dialogue", []) or []:
-        if dlg.get("char") and dlg.get("char") not in chars:
-            chars.append(dlg.get("char"))
+        c = dlg.get("char")
+        # An OFF-SCREEN speaker (on_camera False) must NOT become a visual
+        # subject: H3 ref-mode couples <Subject N> to <Picture N> to <Audio N>,
+        # so attaching a ref RENDERS the character on screen. An off-screen line
+        # is emitted as dialogue with NO ref (no picture, no voice-timbre ref).
+        if c and c not in chars and dlg.get("on_camera") is not False:
+            chars.append(c)
     return chars
 
 
@@ -58,13 +65,7 @@ def _char_ref_map(show: Show) -> dict[str, dict[str, str]]:
         if not name:
             continue
         rd = show.character_refs_dir(cid)
-        rj = rd / "refs.json"
-        if not rj.exists():
-            continue
-        try:
-            prior = json.loads(rj.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        prior = refs.load_refs(show, cid)
         if prior.get("status") != "real":
             continue
         variants = prior.get("variants")
@@ -105,17 +106,17 @@ def _char_ref_map(show: Show) -> dict[str, dict[str, str]]:
 
 
 def _shot_refs(show: Show, shot: dict[str, Any]):
-    """Names + ref paths for EVERY character on screen, honouring the shot's
-    structured costume/variant declarations (references.costumes)."""
+    """Names + ref paths for the characters ON SCREEN in this shot.
+
+    On-screen membership comes from the shot's DECLARED cast
+    (``references.characters``) plus its speakers - never from scanning the prose.
+    A regex scan over action/camera/soundscape drags in off-screen names as
+    spurious subjects, which then get a BASE ref and a base-outfit description in
+    the render prompt, corrupting shots those characters are not even in.
+    """
     names = _shot_characters(shot)
     ref_map = _char_ref_map(show)
     costumes = ((shot.get("references") or {}).get("costumes") or {}) or {}
-    prose = " ".join([shot.get("action", ""), shot.get("camera", ""),
-                      shot.get("soundscape", "")])
-    for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", prose):
-        n = m.group(0).strip()
-        if n in ref_map and n not in names:
-            names.append(n)
     from .casting import _unit_key
     refs: list[str] = []
     for n in names:
@@ -252,11 +253,14 @@ def _keyframe_prompt(shot: dict[str, Any], scene: dict[str, Any], names: list[st
             desc = "\nCharacter appearance (draw the characters EXACTLY as described):\n" + \
                    "\n".join(parts)
     style = (style_guide or "").strip().rstrip(".")
-    return ("Anime cinematic keyframe: "
+    # NO "no ..." clauses here: this prompt feeds image_keyframe.json, whose
+    # negative conditioning is zeroed (ConditioningZeroOut), so every banned noun
+    # becomes a positive token and the model draws exactly what was forbidden —
+    # the same trap documented on prompts.character_ref_prompt (a "no duplication"
+    # tail made refs render front+back turnarounds). State framing positively.
+    return ("Cinematic anime keyframe: "
             f"{action} {camera}. Setting: {setting}. On screen: {chars}.{desc} "
-            "Cinematic composition, dynamic framing, consistent series art style, "
-            "high quality. ABSOLUTELY NO text, no letters, no words, no dialogue "
-            "bubbles, no captions, no subtitles, no watermark, no logos."
+            "Dynamic cinematic composition, consistent series art style"
             + (f" {style}." if style else "")).rstrip(" .") + "."
 
 
@@ -287,11 +291,13 @@ def _llm_recurring_objects(show: Show, episode: int, script: dict[str, Any],
 
 
 def _shot_object_refs(show: Show, episode: int, shot: dict[str, Any]) -> list[str]:
-    """Reference-image paths for recurring objects present in this shot.
+    """Reference-image paths for the recurring objects THIS shot actually shows.
 
     Objects are defined in the episode outline (plan.json ``objects`` list) and
-    generated during the ref pass. This function only resolves plan-defined
-    objects that have a ref image — it does NOT search shot text for new ones.
+    generated during the ref pass. A shot gets an object's ref only when the
+    shot's own text (action/camera/beat) mentions that object — so a prop is not
+    injected into shots that don't show it. Only plan-defined objects with a
+    generated ref image count; the shot text never invents a new object.
     """
     od = show.dir / "runs" / f"EP{episode:02d}" / "objects"
     if not od.exists():
@@ -302,17 +308,17 @@ def _shot_object_refs(show: Show, episode: int, shot: dict[str, Any]) -> list[st
     plan_objs = plan.get("objects") or []
     if not plan_objs:
         return []
-    # Map plan object names to their slugs.
-    obj_slugs = set()
-    for name in plan_objs:
-        slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
-        if slug:
-            obj_slugs.add(slug)
-    # Only return refs that exist on disk AND are in the plan.
+    text = " ".join(str(shot.get(k, "")) for k in
+                    ("action", "camera", "beat", "soundscape", "location")).lower()
     out: list[str] = []
-    for slug in obj_slugs:
+    for name in plan_objs:
+        slug = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")
+        if not slug:
+            continue
         p = od / f"{slug}.png"
-        if p.exists() and str(p) not in out:
+        # On screen only when the shot text names it (same plain-substring
+        # convention as _object_context) and the ref image exists.
+        if p.exists() and str(p) not in out and str(name).lower() in text:
             out.append(str(p))
     return out
 
@@ -408,6 +414,7 @@ def costume_variant_payload(show: Show, cid: str, name: str) -> list[dict[str, A
     prompts = data.get("prompts") or {}
     usage = costume_usage(show, cid)
     approved = _approved_costume_labels(show, cid)
+    rejected = refs.rejected_labels(show, cid)
     out: list[dict[str, Any]] = []
     for label, f in variants.items():
         if label == "base" or not (rd / f).exists():
@@ -418,6 +425,7 @@ def costume_variant_payload(show: Show, cid: str, name: str) -> list[dict[str, A
             "prompt": prompts.get(label, ""),
             "episodes": usage.get(label, []),
             "approved": label in approved,
+            "rejected": label in rejected,
         })
     return out
 
@@ -520,26 +528,33 @@ def generate_costume_variant(show: Show, cid: str, name: str, label: str,
     rd.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9-]+", "-", label.lower()).strip("-")
     out = rd / f"{cid}_{slug}_01.png"
-    # Resolve the base ref image (identity anchor for the edit).
-    base_ref = None
-    rj = rd / "refs.json"
-    if rj.exists():
-        try:
-            prior = json.loads(rj.read_text(encoding="utf-8"))
-            base_file = (prior.get("variants") or {}).get("base")
-            if base_file and (rd / base_file).exists():
-                base_ref = str(rd / base_file)
-        except Exception:
-            prior = None
+    # "nude" is an appearance state, not a designed costume: it is the Krea 2
+    # identity root (never describe_costume, which would invent a "nude outfit").
+    if label.strip().lower() == NUDE_LABEL:
+        return ensure_nude_ref(show, cid, name, cfg, force=True) is not None
+    # Edit source: the nude identity root when present (garmentless, so nothing
+    # carries over), else the clothed base. All refs.json access goes through refs.
+    prior = refs.load_refs(show, cid)
+    base_file = (prior.get("variants") or {}).get("base")
+    base_ref = str(rd / base_file) if base_file and (rd / base_file).exists() else None
+    # Nude-first: NO outfit is generated (in ANY mode, and before spending an LLM
+    # description) until the nude identity root is approved — every outfit is an
+    # edit of the nude.
+    variants = prior.get("variants") or {}
+    use_nude = refs.wants_nude_first(show, cid) or NUDE_LABEL in variants
+    if use_nude and NUDE_LABEL not in (prior.get("approved") or []):
+        ACTIVITY.setdefault(show.show_id, {})["detail"] = (
+            f"'{label}' for {name}: waiting for nude-ref approval")
+        return False
     if not prompt:
         if mode == "edit":
             # Build the edit prompt from an LLM costume DESCRIPTION (what changes
             # from the base ref), not the bare label — the label alone makes every
-            # costume come out identical. Driven by personality + use case, never
-            # the character's current look (which poisons the description).
+            # costume come out identical. Driven by personality + the label alone
+            # (never a fabricated use case, which biased every outfit into combat
+            # gear) and never the character's current look (which poisons it).
             from .bootstrap import BootstrapChain
             personality = ""
-            situation = f"{name} wears '{label}' in combat"
             try:
                 c = show.read_character(cid)
                 pers = c.get("personality") or []
@@ -550,29 +565,31 @@ def generate_costume_variant(show: Show, cid: str, name: str, label: str,
             except Exception:
                 pass
             description = BootstrapChain(show).describe_costume(
-                label, name, personality, situation)
-            if description:
-                prompt = f"Replace the character's clothes to: {description}"
-            else:
-                prompt = f"Replace the character's clothes to: {label}"
+                label, name, personality)
+            prompt = prompts.costume_edit_prompt(description or label)
         else:
-            prompt = prompts.costume_ref_prompt(name, label, canon, _show_style(show))
+            prompt = prompts.costume_ref_prompt(name, label, canon,
+                                                _show_style(show), show.ref_medium())
     if mode == "edit":
+        # Source the edit from the garmentless construction ref when available:
+        # with no garments in the source, the edit cannot carry over the base
+        # outfit's shoes/hats/belts. Falls back to the dressed base.
+        # Use the nude as the edit source only when the character is nude-first
+        # (recurring person) or already has a nude ref (an explicit nude scene);
+        # otherwise edit from their clothed base.
+        src = (ensure_nude_ref(show, cid, name, cfg) if use_nude else None) or base_ref
         if seed is None:
             seed = _fresh_costume_seed(rd, label)
-        ok = _render_costume_via_qwen_edit(show, base_ref, name, prompt, label,
-                                           str(out), cfg, seed=seed)
+        ok = refs._render_costume_via_qwen_edit(show, src, name, prompt, label,
+                                                str(out), cfg, seed=seed)
     else:
         if seed is None:
             seed = _fresh_costume_seed(rd, label)
-        ok = _render_costume_via_krea2(show, name, prompt, label, str(out), cfg,
-                                       seed=seed)
+        ok = refs._render_costume_via_krea2(show, name, prompt, label, str(out), cfg,
+                                            seed=seed)
     if not ok:
         return False
-    try:
-        prior = json.loads(rj.read_text(encoding="utf-8"))
-    except Exception:
-        prior = {"status": "real", "refs": [out.name]}
+    prior = refs.load_refs(show, cid) or {"status": "real", "refs": [out.name]}
     variants = prior.setdefault("variants", {})
     if "base" not in variants and prior.get("refs"):
         base = next((r for r in prior["refs"] if "mech" not in r),
@@ -588,127 +605,8 @@ def generate_costume_variant(show: Show, cid: str, name: str, label: str,
     # a regen after a reject re-opens the gate.
     prior["approved"] = [l for l in (prior.get("approved") or []) if l != label]
     prior["status"] = "real"
-    rj.write_text(json.dumps(prior), encoding="utf-8")
+    refs.save_refs(show, cid, prior)
     return True
-
-
-def _render_costume_via_krea2(show: Show, name: str, prompt: str, label: str,
-                              out_path: str, cfg, seed: int = 0) -> bool:
-    """Fresh krea2 text-to-image render (no identity anchor)."""
-    from .remote.ops import ServiceOps
-    from .comfy_workflows import generate_keyframe, load_workflow
-    from .gpu_manager import ServiceType, get_gpu_manager
-    ops = ServiceOps(cfg)
-    client, stop = ops._krea2_client()
-    try:
-        # krea2 runs on its own instance (no sage-attention); serialize with H3
-        # via the GPU manager's exclusive COMFYUI lock so they never share VRAM.
-        with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
-            generate_keyframe(client, load_workflow(cfg.workflows_dir / "image_keyframe.json"),
-                              prompt, seed, out_path, aspect_ratio="3:4",
-                              style_ref=_style_anchor_arg(show) or None)
-        return True
-    except Exception as exc:
-        ACTIVITY.setdefault(show.show_id, {})["detail"] = (
-            f"Costume regen {label} failed: {exc}")
-        return False
-    finally:
-        if stop is not None:
-            stop()
-
-
-def _render_costume_via_qwen_edit(show: Show, base_ref: str | None, name: str,
-                                  prompt: str, label: str, out_path: str,
-                                  cfg, seed: int = 0) -> bool:
-    """Render a costume via Qwen-Image-Edit (v16 safetensors API workflow).
-
-    The base ref is uploaded to the krea2 ComfyUI input dir and used as the edit
-    source; the model edits the costume while preserving identity. ``seed`` is
-    the Qwen-Image-Edit sampler seed (0 = randomize). Returns True when an image
-    lands at out_path.
-
-    The instance is picked per-render by :meth:`ServiceOps._krea2_client` — the
-    primary when it answers /system_stats, otherwise a transient local launch or
-    the Beast3 fallback. A wedged local instance (job stuck in queue_running,
-    executor hung) therefore degrades to the fallback instead of stalling the
-    whole costume pass; the hard wall-clock timeout in the wait bounds each
-    attempt so a wedged job fails fast and the next variant / reconcile pass
-    tries again on a healthy instance.
-
-    The whole render is gated on the shared instance's queue draining: Qwen-
-    Image-Edit (19 GB) cannot share the 16 GB GPU with an H3 render, and a job
-    submitted mid-render silently produces a black frame. Waiting for the queue
-    to empty first ensures H3's models are evicted before Qwen loads.
-    """
-    from .remote.ops import ServiceOps
-    from .qwen_edit import adapt_qwen_edit_workflow, load_qwen_edit_workflow
-    import time
-
-    cfg = cfg or get_config()
-    ops = ServiceOps(cfg)
-    client, stop = ops._krea2_client()
-    try:
-        ref_fn = None
-        if base_ref:
-            try:
-                ref_fn = client.upload_image(base_ref)
-            except Exception:
-                ref_fn = None
-        if not ref_fn:
-            # No base image: fall back to fresh krea2 generation.
-            return _render_costume_via_krea2(show, name, prompt, label, out_path, cfg)
-        # Qwen-Image-Edit runs on the krea2 instance (NO --use-sage-attention:
-        # that flag breaks Qwen's attention and yields a black frame). H3 runs on
-        # a SEPARATE instance that REQUIRES sage-attention. Both share one 16 GB
-        # GPU, so the GPU manager's exclusive COMFYUI lock serializes them —
-        # Qwen waits for any H3 render to finish, and vice versa.
-        from .gpu_manager import ServiceType, get_gpu_manager
-        with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
-            return _qwen_edit_render(show, client, cfg, prompt, ref_fn, label, out_path, seed)
-    finally:
-        if stop:
-            stop()
-
-
-def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: str,
-                      out_path: str, seed: int) -> bool:
-    """Run one Qwen-Image-Edit render (GPU already owned exclusively)."""
-    from .qwen_edit import adapt_qwen_edit_workflow, load_qwen_edit_workflow
-    sid = show.show_id
-    try:
-        wf = load_qwen_edit_workflow(cfg.root)
-        wf = adapt_qwen_edit_workflow(wf, prompt, ref_fn, seed=seed, steps=8, cfg=4.0)
-        pid = client.submit(wf)
-        # Hard wall-clock cap: a wedged Qwen-Image-Edit job (19 GB model on a
-        # shared 16 GB GPU) that hangs in queue_running must not block the whole
-        # storyboard forever. On expiry the wait interrupts the instance and
-        # raises; the variant is marked failed here and retried on the next
-        # reconcile pass.
-        entry = client.wait(pid, timeout_s=900, poll_interval=5, hard_timeout_s=1200)
-        status = (entry.get("status") or {}).get("status_str", "")
-        if status != "success":
-            ACTIVITY.setdefault(sid, {})["detail"] = (
-                f"Qwen costume edit {label} status: {status}")
-            return False
-        img = None
-        for _nid, output in (entry.get("outputs") or {}).items():
-            for i in output.get("images", []):
-                img = i
-                break
-            if img:
-                break
-        if not img:
-            ACTIVITY.setdefault(sid, {})["detail"] = (
-                f"Qwen costume edit {label}: no output image")
-            return False
-        client.download(img["filename"], img.get("subfolder", ""),
-                        img.get("type", "output"), out_path)
-        return True
-    except Exception as exc:
-        ACTIVITY.setdefault(sid, {})["detail"] = (
-            f"Qwen costume edit {label} failed: {exc}")
-        log.warning("qwen costume edit failed for %s: %s", label, exc, exc_info=True)
-        return False
 
 
 def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
@@ -764,11 +662,12 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
                             progress(done, total, sid)
                         continue
                     names, _ = _shot_refs(show, shot)
+                    costumes = ((shot.get("references") or {}).get("costumes") or {}) or {}
                     # Character refs first (identity anchors), then objects/
                     # keyframe refs \u2014 same ordering the final render uses.
                     image_filenames: list[str] = []
                     for name in names:
-                        ref = _shot_character_ref(show, name)
+                        ref = _shot_character_ref(show, name, costume=costumes.get(name, ""))
                         if not ref:
                             continue
                         try:
@@ -791,7 +690,10 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
                             if not name or len(audio_filenames) >= 3:
                                 break
                             vp = _voice_sample_path(show, name)
-                            if not vp or name not in names:
+                            # Off-screen speakers still get their VOICE ref (only
+                            # their PICTURE is withheld) - so do not require the
+                            # name to be a visual subject here.
+                            if not vp:
                                 continue
                             try:
                                 audio_filenames.append(client.upload_audio(vp))
@@ -867,12 +769,18 @@ def generate_object_refs(show: Show, episode: int, cfg=None, progress=None,
             prompt = _ensure_style(stored, _show_style(show))
         else:
             desc = _describe_object(show, episode, name, cfg)
-            prompt = _base_object_prompt(name, _show_style(show), desc)
+            prompt = _base_object_prompt(name, _show_style(show), desc, show.ref_medium())
         try:
             ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="1:1",
                                            out_path=str(out),
                                            style_ref=_style_anchor_arg(show))
             _save_object_prompt(show, episode, slug, prompt)
+            # A freshly (re)generated object image needs re-approval + re-review —
+            # otherwise a stale approvals.json / vcheck pass would clear the gate
+            # for an image the human never saw.
+            unapprove_object(show, episode, slug)
+            from .vcheck import clear_object_vcheck
+            clear_object_vcheck(show, episode, slug)
         except Exception as exc:
             ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Object ref {name} failed: {exc}"
         if progress:
@@ -908,7 +816,7 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
         current = _ensure_style(stored, style)
     else:
         desc = _describe_object(show, episode, name, cfg)
-        current = _base_object_prompt(name, style, desc)
+        current = _base_object_prompt(name, style, desc, show.ref_medium())
     prompt = current
     if notes.strip():
         from . import prompts
@@ -934,7 +842,9 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
                                        out_path=str(out),
                                        style_ref=_style_anchor_arg(show))
         _save_object_prompt(show, episode, slug, prompt)
-        # Clear any prior VL check result so the regenerated image is re-reviewed.
+        # A regenerated object image needs re-approval: drop it from the approved
+        # set and clear the VL check so it is re-reviewed.
+        unapprove_object(show, episode, slug)
         from .vcheck import clear_object_vcheck
         clear_object_vcheck(show, episode, slug)
     except Exception as exc:
@@ -944,15 +854,46 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
 
 
 def _pending_ref_names(show: Show) -> list[str]:
-    """Character names whose base reference image is not yet approved (pending
-    or not generated). The storyboard previews must wait for these — a preview
-    rendered without the approved ref would show the wrong character."""
+    """Character names whose base reference image is not yet approved.
+
+    Covers both bootstrap characters (approval stored in bootstrap.json; ``refs``
+    != "approved") and episode-supporting characters (enemy/group units that
+    never get a bootstrap roster entry — their approval lives in refs.json). The
+    storyboard previews must wait for these: a preview rendered without the
+    approved ref would show the wrong character.
+    """
     st = show.bootstrap_state()
+    cid_by_name: dict[str, str] = {}
+    for cid in show.list_characters():
+        c = show.read_character(cid)
+        if c.get("name"):
+            cid_by_name[c["name"]] = cid
     out: list[str] = []
+    in_bootstrap: set[str] = set()
     for ch in st.get("characters", []):
-        refs = (ch.get("refs") or "").strip()
-        if refs != "approved":
-            out.append(ch.get("name", "?"))
+        name = ch.get("name", "?")
+        in_bootstrap.add(name)
+        if (ch.get("refs") or "").strip() == "approved":
+            continue
+        # Approval is recorded in refs.json (base/nude/variants) — accept that, so a
+        # bootstrap entry left at "pending"/"" doesn't nag after the refs are approved.
+        cid = cid_by_name.get(name)
+        if cid and (is_base_ref_approved(show, cid)
+                    or refs.load_refs(show, cid).get("approved")):
+            continue
+        out.append(name)
+    # Episode-supporting characters that DO have a generated base ref must be
+    # gated too — otherwise H3 renders with an identity anchor the human never
+    # signed off on (the base-ref approval is recorded in refs.json for these).
+    ref_map = _char_ref_map(show)
+    for cid in show.list_characters():
+        c = show.read_character(cid)
+        name = c.get("name")
+        if not name or name in in_bootstrap or name not in ref_map:
+            continue
+        if is_base_ref_approved(show, cid):
+            continue
+        out.append(name)
     return out
 
 
@@ -974,29 +915,70 @@ def _pending_ref_names(show: Show) -> list[str]:
 
 
 def _objects_dir(show: Show, episode: int) -> Path:
-    return show.dir / "runs" / f"EP{episode:02d}" / "objects"
+    return objects.objects_dir(show, episode)
 
 
 def _approved_costume_labels(show: Show, cid: str) -> set[str]:
     """Costume-variant labels already approved for one character."""
-    rj = show.character_refs_dir(cid) / "refs.json"
-    if not rj.exists():
-        return set()
-    try:
-        data = json.loads(rj.read_text(encoding="utf-8"))
-    except Exception:
-        return set()
-    return set(data.get("approved") or [])
+    return set(refs.load_refs(show, cid).get("approved") or [])
+
+
+def mark_base_ref_approved(show: Show, cid: str) -> bool:
+    """Record a character's BASE reference as approved in refs.json.
+
+    The base ref is normally approved through the Gate-0 character/refs gate
+    (bootstrap.json ``characters[].refs``). Episode-supporting characters
+    (enemy/group units) never get a bootstrap roster entry, so their base
+    approval is recorded here — the same ``approved`` list costume variants use.
+    No-op (``False``) when the character has no refs.json.
+    """
+    data = refs.load_refs(show, cid)
+    if not data:
+        return False
+    approved = set(data.get("approved") or [])
+    approved.add("base")
+    data["approved"] = sorted(approved)
+    rej = dict(data.get("rejected") or {})
+    rej.pop("base", None)
+    if rej:
+        data["rejected"] = rej
+    else:
+        data.pop("rejected", None)
+    refs.save_refs(show, cid, data)
+    return True
+
+
+def unapprove_base_ref(show: Show, cid: str) -> None:
+    """Drop a character's base ref from the approved list (after regen/reject)."""
+    data = refs.load_refs(show, cid)
+    if not data:
+        return
+    data["approved"] = [a for a in (data.get("approved") or []) if a != "base"]
+    refs.save_refs(show, cid, data)
+
+
+def is_base_ref_approved(show: Show, cid: str) -> bool:
+    """True when a character's BASE reference is approved.
+
+    The decision can live in either store and they must never disagree:
+      * ``bootstrap.json`` ``characters[].refs == "approved"`` (the Gate-0 gate,
+        written by the character/refs approval), and
+      * ``refs.json["approved"]`` containing ``"base"`` (episode-supporting
+        characters that have no bootstrap roster entry).
+    """
+    if "base" in _approved_costume_labels(show, cid):
+        return True
+    name = show.read_character(cid).get("name", "")
+    if not name:
+        return False
+    for ch in show.bootstrap_state().get("characters", []):
+        if ch.get("name") == name:
+            return (ch.get("refs") or "").strip() == "approved"
+    return False
 
 
 def _approved_object_slugs(show: Show, episode: int) -> set[str]:
-    ap = _objects_dir(show, episode) / "approvals.json"
-    if not ap.exists():
-        return set()
-    try:
-        return set((json.loads(ap.read_text(encoding="utf-8")) or {}).get("approved") or [])
-    except Exception:
-        return set()
+    return objects.approved_slugs(show, episode)
 
 
 def _object_prompts(show: Show, episode: int) -> dict[str, str]:
@@ -1006,22 +988,11 @@ def _object_prompts(show: Show, episode: int) -> dict[str, str]:
     loop keeps the last (LLM-revised) prompt so successive rejects FURTHER refine
     it instead of starting over from the base template every time.
     """
-    p = _objects_dir(show, episode) / "prompts.json"
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
+    return objects.prompts(show, episode)
 
 
 def _save_object_prompt(show: Show, episode: int, slug: str, prompt: str) -> None:
-    od = _objects_dir(show, episode)
-    od.mkdir(parents=True, exist_ok=True)
-    prompts = _object_prompts(show, episode)
-    prompts[slug] = prompt
-    (od / "prompts.json").write_text(json.dumps(prompts, ensure_ascii=False),
-                                     encoding="utf-8")
+    objects.save_prompt(show, episode, slug, prompt)
 
 
 def _is_stale_object_prompt(prompt: str) -> bool:
@@ -1071,7 +1042,7 @@ def _describe_object(show: Show, episode: int, name: str, cfg=None) -> str:
 
 
 def _base_object_prompt(name: str, style_guide: str = "",
-                        description: str = "") -> str:
+                        description: str = "", medium: str = "") -> str:
     """Positive-only Krea 2 prompt for ONE recurring object.
 
     The krea2 turbo workflow has NO negation handling (its negative conditioning
@@ -1087,19 +1058,24 @@ def _base_object_prompt(name: str, style_guide: str = "",
     return (
         f"{lead}. The prop is the sole subject, centered and fully in frame, "
         "alone on a seamless plain studio backdrop. "
-        + prompts.ref_style_clause(style_guide))
+        + prompts.ref_style_clause(style_guide, medium))
 
 
 def mark_costume_approved(show: Show, cid: str, label: str) -> None:
     """Record one costume variant as approved (refs.json). Idempotent."""
-    rj = show.character_refs_dir(cid) / "refs.json"
-    if not rj.exists():
+    data = refs.load_refs(show, cid)
+    if not data:
         raise ValueError(f"character {cid} has no refs.json")
-    data = json.loads(rj.read_text(encoding="utf-8"))
     approved = set(data.get("approved") or [])
     approved.add(label)
     data["approved"] = sorted(approved)
-    rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    rej = dict(data.get("rejected") or {})
+    rej.pop(label, None)
+    if rej:
+        data["rejected"] = rej
+    else:
+        data.pop("rejected", None)
+    refs.save_refs(show, cid, data)
 
 
 def delete_costume(show: Show, cid: str, label: str) -> None:
@@ -1111,10 +1087,9 @@ def delete_costume(show: Show, cid: str, label: str) -> None:
     variant that doesn't exist is a no-op.
     """
     rd = show.character_refs_dir(cid)
-    rj = rd / "refs.json"
-    if not rj.exists():
+    data = refs.load_refs(show, cid)
+    if not data:
         return
-    data = json.loads(rj.read_text(encoding="utf-8"))
     variants = data.get("variants") or {}
     if label == "base" or label not in variants:
         if label == "base":
@@ -1123,7 +1098,7 @@ def delete_costume(show: Show, cid: str, label: str) -> None:
     img = variants.pop(label, None)
     (data.get("prompts") or {}).pop(label, None)
     data["approved"] = [a for a in (data.get("approved") or []) if a != label]
-    rj.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    refs.save_refs(show, cid, data)
     if img:
         f = rd / img
         if f.exists():
@@ -1135,27 +1110,12 @@ def delete_costume(show: Show, cid: str, label: str) -> None:
 
 def mark_object_approved(show: Show, episode: int, slug: str) -> None:
     """Record one recurring-object ref as approved. Idempotent."""
-    od = _objects_dir(show, episode)
-    od.mkdir(parents=True, exist_ok=True)
-    ap = od / "approvals.json"
-    approved = _approved_object_slugs(show, episode)
-    approved.add(slug)
-    ap.write_text(json.dumps({"approved": sorted(approved)}, ensure_ascii=False),
-                  encoding="utf-8")
+    objects.approve(show, episode, slug)
 
 
 def unapprove_object(show: Show, episode: int, slug: str) -> None:
     """Remove an object ref from the approved set (after a regen/reject)."""
-    od = _objects_dir(show, episode)
-    ap = od / "approvals.json"
-    if not ap.exists():
-        return
-    try:
-        data = json.loads(ap.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    data["approved"] = [s for s in (data.get("approved") or []) if s != slug]
-    ap.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    objects.unapprove(show, episode, slug)
 
 
 def _pending_costume_refs(show: Show, script: dict[str, Any]) -> list[str]:
@@ -1247,6 +1207,21 @@ def auto_approve_refs(show: Show, episode: int,
                         mark_costume_approved(show, cid, label)
                     except Exception:
                         pass
+    # Episode-supporting base refs (no bootstrap roster entry) are gated by
+    # _pending_ref_names but approved by neither the bootstrap chain nor the
+    # costume loop — approve them here in auto mode so a hands-free run does not
+    # stall on the base-ref gate.
+    if master or cfg.get("approval", "gates", {}).get("character") == "auto":
+        bootstrap_names = {ch.get("name") for ch in show.bootstrap_state().get("characters", [])}
+        for cid in show.list_characters():
+            c = show.read_character(cid)
+            name = c.get("name")
+            if not name or name in bootstrap_names:
+                continue
+            try:
+                mark_base_ref_approved(show, cid)
+            except Exception:
+                pass
     # Objects: master switch OR the object gate is auto.
     if master or cfg.get("approval", "gates", {}).get("object") == "auto":
         for slug in _pending_object_slugs(show, episode):
@@ -1281,6 +1256,13 @@ def storyboard_blockers(show: Show, episode: int) -> list[str]:
     script, _ = _latest_script(show, episode)
     if not script:
         blockers.append("no script")
+    else:
+        # The writers'-room review gate is enforced by the reconciler; the manual
+        # storyboard/render path must honour it too, else a rejected script can be
+        # turned into finished video.
+        review = script.get("_review") or {}
+        if review.get("passed") is False:
+            blockers.append("script failed review (approve as override or revise it)")
     return blockers
 
 

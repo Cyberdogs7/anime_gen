@@ -26,6 +26,7 @@ config/remotes.yaml
 .trash/
 *.egg-info/
 runs/
+/evals/
 .gpu-manager.lock
 *.log
 /*.txt

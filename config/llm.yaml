@@ -85,6 +85,12 @@ zen:
   # Calls carrying role= use it directly; other calls reverse-match their
   # local model name to a uniquely configured role. Empty = model/model_map.
   roles: {}
+  # Models offered for a manual ONE-OFF script rewrite (dashboard dropdown / CLI
+  # --model). Any id is accepted; these are just the offered ones. Higher-tier GO
+  # models cost more per call — a rewrite is ONE call on the chosen model, then a
+  # normal re-review with the cheap role models.
+  pickable_models: ["kimi-k3", "kimi-k2.6", "deepseek-v4-pro", "minimax-m3",
+                    "deepseek-v4-flash", "mimo-v2.6-flash"]
   # Remote vision. Responses-style models (Spark) take image + video natively;
   # chat-style vision models (e.g. deepseek-v4-flash-vision-exp) get video
   # resampled to still frames first. Undecodable clips or disabled vision

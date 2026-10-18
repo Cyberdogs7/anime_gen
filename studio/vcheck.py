@@ -564,8 +564,8 @@ def run_object_vcheck_batch(show: Show, episode: int, cfg=None, llm=None,
     Returns a log of actions. Objects that fail (humans detected) are
     auto-rejected with the VL issues as rejection notes.
     """
-    from .storyboard import _objects_dir, _approved_object_slugs, regenerate_object_ref
-    from .approval import unapprove_object
+    from .storyboard import (_objects_dir, _approved_object_slugs,
+                             regenerate_object_ref, unapprove_object)
     cfg = cfg or get_config()
     vck = cfg.get("qc", "vcheck", {})
     if not vck.get("enabled", True):
@@ -685,7 +685,6 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
     vd = show.dir / "runs" / f"EP{episode:02d}" / "video"
     stored = _vcheck_summary(show, episode)
     clips = sorted(vd.glob("*.mp4"))
-    approvals = shot_approvals(show, episode)
     actions: list[str] = []
     pending_fails: list[tuple[str, dict]] = []
 
@@ -732,7 +731,10 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
         if not auto_feed:
             actions.append(f"{sid}: vcheck FAIL (auto-feed off) — {report['issues']}")
             continue
-        ap = approvals.get(sid, {})
+        # Re-read the LIVE approval: the VLM pass can take minutes, so a human may
+        # have approved this shot while it ran. Using the pre-pass snapshot would
+        # clobber that decision.
+        ap = shot_approvals(show, episode).get(sid, {})
         if ap.get("status") == "approved":
             actions.append(f"{sid}: vcheck FAIL but shot is approved — leaving it")
             continue
@@ -748,7 +750,6 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
         msgs = reject_shot(show, episode, sid, notes=notes,
                            llm=None if use_vllm else llm)
         clear_shot_vcheck(show, episode, sid)   # re-checked after the retake
-        approvals[sid] = shot_approvals(show, episode).get(sid, approvals.get(sid, {}))
         actions.extend(msgs)
 
     if on_progress:

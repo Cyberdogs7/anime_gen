@@ -23,10 +23,11 @@ from . import approval, fsutil
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .planner import (
-    address_review_feedback, approve_plan, approve_scene_details,
+    approve_plan, approve_scene_details,
     assemble_episode_script, clear_script_rejection, generate_episode_plan,
     generate_scene_details, read_episode_plan, read_scene_details,
-    read_script_rejection, reject_script_review, _MAX_SCRIPT_REGENS,
+    read_script_rejection, reject_script_review, revise_script,
+    _MAX_SCRIPT_REGENS,
 )
 from .render import RENDER_JOBS
 from .show import Show
@@ -59,6 +60,14 @@ def hold_manual_rebuild(show_id: str, episode: int) -> None:
 def release_manual_rebuild(show_id: str, episode: int) -> None:
     with _manual_holds_lock:
         _manual_holds.discard((show_id, episode))
+
+
+def is_manual_rebuild_active(show_id: str) -> bool:
+    """True while a manual dashboard rebuild/regen thread holds any episode of this
+    show. Lets the dashboard's activity poll show progress for a hand-triggered
+    outline/script rewrite (which is a plain thread, not a tracked reconcile job)."""
+    with _manual_holds_lock:
+        return any(sid == show_id for (sid, _ep) in _manual_holds)
 
 
 def _paused_path(show: Show) -> Any:
@@ -659,10 +668,10 @@ def _advance_episode(show: Show, episode: int) -> list[str]:
                                  f"feedback (attempt {attempts + 1}/{_MAX_SCRIPT_REGENS})…",
                                  "ts": time.time()}
             try:
-                # 1. Surgically edit only the flagged shots (one LLM call per scene).
-                from .planner import _writer_review
-                edited = address_review_feedback(show, episode, script_latest,
-                                                 review)
+                # 1. One full revision of the script from the failing reviewers'
+                # free-form notes (outline + current script + notes).
+                from .planner import _writer_review, revise_script
+                edited = revise_script(show, episode, script_latest, review)
                 # 2. Record the attempt and re-run review on the edited script.
                 reject_script_review(show, episode, review)
                 edited = _writer_review(show, episode, edited)

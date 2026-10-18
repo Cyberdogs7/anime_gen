@@ -1,12 +1,10 @@
 id: sable-voss
 name: Sable Voss
 role: hot-headed duelist who claimed first towel-off
-appearance_canonical: 23-year-old woman, 5'10" with a lean welterweight boxer build
-  and sun-warmed tan skin, amber-gold eyes under a cocky half-lidded glare, long red
-  hair worn in a high ponytail with a shaved strip on the left side, thin pale scar
-  splitting her left eyebrow, small gold hoop in her right nostril, wearing a black
-  Vixen plug suit with burnt-orange accents cut high on the thigh and scuffed orange
-  plating on the left shoulder
+appearance_canonical: woman, 23 years old, lean welterweight boxer build, 5'10" tall,
+  clean clear fair skin, long clean red hair in a high ponytail, amber-gold half-lidded
+  eyes. Wears pristine black Vixen plug suit with bright orange accents with full-length
+  coverage and orange plating on the left shoulder.
 appearance_notes: Never change eye color from amber-gold or hair color/style from
   jet-black high ponytail with left-side undercut; always keep left eyebrow scar and
   right nostril hoop; keep tall lean-muscled build and sun-warmed tan skin, never
@@ -35,3 +33,9 @@ voice:
   voice_description: Adult woman mid-20s, low smoky alto with a teasing rasp; fast
     and clipped when hyped for a duel, drops to a slow deliberate drawl when claiming
     Ren; laughs mid-sentence, only goes quiet when sincere
+is_person: true
+identity_canonical: woman, 23 years old, lean welterweight boxer build, 5'10" tall,
+  clean clear fair skin, long clean red hair in a high ponytail, amber-gold half-lidded
+  eyes
+wardrobe_canonical: pristine black Vixen plug suit with bright orange accents with
+  full-length coverage and orange plating on the left shoulder

@@ -231,6 +231,13 @@ DEFAULTS: dict[str, dict[str, Any]] = {
                   "pacing", "stakes", "visual", "agency", "serial"],
         "plan_max_revisions": 6,       # plan-level (outline) review loop cap
         "plan_roles": ["structure"],    # outline reviewers: structure (plot/scene coherence)
+        # Writers'-room reviewers that also run on the OUTLINE (before it locks the
+        # script): length/pacing, location variety, fan-service delivery, stakes,
+        # agency, serial progression, continuity, slop, and deterministic repetition.
+        # voice/exposition are EXCLUDED - they judge spoken lines that do not exist
+        # at outline stage; they still run on the prose/script.
+        "plan_room_roles": ["slop", "continuity", "fan_service", "pacing",
+                            "stakes", "visual", "agency", "serial", "repetition"],
         "thresholds": {
             "slop_block": 0.45,
             "continuity_block": True,

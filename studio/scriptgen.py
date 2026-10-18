@@ -33,8 +33,17 @@ def _runtime_review(script: dict[str, Any], target: int) -> dict[str, Any] | Non
                 for s in sc.get("shots", [])
                 for d in (s.get("dialogue", []) or [])
                 if _has_spoken_text(d.get("line") or ""))
-    min_lines = max(1, target // 6)   # ~67% spoken (~220 lines for a 22-min episode)
-    if total >= target * 0.8 and lines >= min_lines:
+    words = sum(len(re.findall(r"[A-Za-z0-9']+", d.get("line") or ""))
+                for sc in script.get("scenes", [])
+                for s in sc.get("shots", [])
+                for d in (s.get("dialogue", []) or [])
+                if _has_spoken_text(d.get("line") or ""))
+    # Dialogue must FILL the runtime: ~170 spoken words/min (3000-4500 for a 22-min
+    # episode). The gate clears at ~90% of that — undershooting is the bug, never length.
+    words_target = int((target / 60) * 170)
+    min_words = max(1, int(words_target * 0.9))
+    min_lines = max(1, int(words_target / 14))
+    if total >= target * 0.8 and lines >= min_lines and words >= min_words:
         return None
     notes: list[str] = []
     if total < target * 0.8:
@@ -47,9 +56,12 @@ def _runtime_review(script: dict[str, Any], target: int) -> dict[str, Any] | Non
                       f"{min_lines} for a {target // 60}-minute episode. Characters must "
                       f"speak in most shots — dialogue drives the story, not silent action. "
                       f"Add lines to shots that have characters on screen.")
-    return {"pass": False, "score": 0,
-            "summary": f"structural failure (runtime {int(total)}s, {lines} lines)",
-            "notes": notes}
+    if words < min_words:
+        notes.append(f"The script has only ~{words} spoken words but needs ~{min_words} to "
+                      f"fill {target // 60} minutes (~180 words/min). Write MORE dialogue: "
+                      f"real exchanges back and forth, not one line per beat — characters "
+                      f"talk through the action, argue and react aloud.")
+    return {"grade": "Fail", "pass": False, "review": " ".join(notes)}
 
 
 def _normalize(script: dict[str, Any], cast_names: list[str]) -> dict[str, Any]:

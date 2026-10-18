@@ -1,14 +1,13 @@
 id: tessa-rook
 name: Tessa Rook
 role: soft-spoken heavy gunner and sync tech
-appearance_canonical: 24-year-old woman, 5'9" with a thin slender build, very large
-  breasts, pale skin with dense freckles across nose, cheeks, collarbones and shoulders,
-  long wavy blonde hair in a thick low braid over her left shoulder with loose bangs,
-  large soft moss-green eyes behind round gold-rimmed glasses, full lower lip, small
-  dark mole just under her right ear, fingertips marked with faint cable-burn scars,
-  wearing a tight low-cut white cropped tank top straining over her chest under an
-  open unbuttoned flannel shirt slipping off her shoulders, high-waisted short denim
-  shorts with thigh-high socks
+appearance_canonical: 24-year-old woman, 5'9" tall with a thin slender build, very
+  large breasts, pale skin with dense freckles across nose, cheeks, collarbones and
+  shoulders, long wavy blonde hair in a thick low braid over her left shoulder with
+  loose bangs, large soft moss-green eyes, full lower lip, small dark mole just under
+  her right ear, fingertips marked with faint cable-burn scars. Wears tight low-cut
+  white cropped tank top layered under an open unbuttoned flannel shirt, high-waisted
+  short denim shorts, thigh-high socks, round gold-rimmed glasses.
 appearance_notes: never change eye color from moss-green, never remove freckles or
   mole under right ear, hair always copper-auburn in thick low left braid, glasses
   always round gold-rimmed except swapped for sync visor in cockpit, build always
@@ -35,3 +34,12 @@ voice:
   voice_description: Adult female mid-20s, soft low-mid register with breathy texture,
     slow deliberate delivery that mumbles then lands clear, warm throaty murmur when
     flustered or in sync, quiet deadpan comic timing
+is_person: true
+identity_canonical: 24-year-old woman, 5'9" tall with a thin slender build, very large
+  breasts, pale skin with dense freckles across nose, cheeks, collarbones and shoulders,
+  long wavy blonde hair in a thick low braid over her left shoulder with loose bangs,
+  large soft moss-green eyes, full lower lip, small dark mole just under her right
+  ear, fingertips marked with faint cable-burn scars
+wardrobe_canonical: tight low-cut white cropped tank top layered under an open unbuttoned
+  flannel shirt, high-waisted short denim shorts, thigh-high socks, round gold-rimmed
+  glasses

@@ -75,17 +75,49 @@ def log_prompt(show, episode: int, step: str,
         return None
 
 
+def _annotate_provider(path: Path | None, llm) -> None:
+    """Patch the just-written log with the provider/model that ACTUALLY answered.
+
+    ``log_prompt`` runs BEFORE the call and only knows the requested local role
+    model, which is misleading when the call went remote (or fell back local).
+    Afterwards the client exposes ``provider_info()``; merge it in so the prompt
+    file records the truth. Never raises.
+    """
+    if path is None:
+        return
+    try:
+        info = getattr(llm, "provider_info", None)
+        detail = info() if callable(info) else None
+        if not isinstance(detail, dict):
+            return
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data["provider"] = detail.get("provider")
+        data["resolved_model"] = detail.get("model")
+        Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                              encoding="utf-8")
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("prompt provider annotate failed",
+                                             exc_info=True)
+
+
 def logged_chat(llm, show, episode: int, step: str,
                 messages: list[dict[str, Any]], **kwargs) -> str:
     """llm.chat + prompt capture. kwargs (model, temperature, role, …) pass through."""
-    log_prompt(show, episode, step, messages,
-               model=kwargs.get("model"), temperature=kwargs.get("temperature"))
-    return llm.chat(messages, **kwargs)
+    path = log_prompt(show, episode, step, messages,
+                      model=kwargs.get("model"), temperature=kwargs.get("temperature"))
+    try:
+        return llm.chat(messages, **kwargs)
+    finally:
+        _annotate_provider(path, llm)
 
 
 def logged_chat_json(llm, show, episode: int, step: str,
                      messages: list[dict[str, Any]], **kwargs) -> dict:
     """llm.chat_json + prompt capture. kwargs pass through unchanged."""
-    log_prompt(show, episode, step, messages,
-               model=kwargs.get("model"), temperature=kwargs.get("temperature"))
-    return llm.chat_json(messages, **kwargs)
+    path = log_prompt(show, episode, step, messages,
+                      model=kwargs.get("model"), temperature=kwargs.get("temperature"))
+    try:
+        return llm.chat_json(messages, **kwargs)
+    finally:
+        _annotate_provider(path, llm)

@@ -20,8 +20,7 @@ def test_flags_same_location_cluster():
               for i in range(1, 9)]
     v = repetition_review(scenes)
     assert v["pass"] is False
-    assert any("share the location" in n["note"] for n in v["notes"])
-    assert all(n["severity"] == "HIGH" for n in v["notes"])
+    assert "share the location" in v["review"]
 
 
 def test_passes_varied_scenes():

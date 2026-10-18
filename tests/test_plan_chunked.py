@@ -60,8 +60,10 @@ class ChunkLLM:
             return {"episode": 1, "episode_type": "character",
                     "featured_plotlines": [{"id": "op", "role": "advanced"}],
                     "new_plotline": None, "synopsis": "A day in the life."}
-        if "narrative and structural coherence" in user:   # structure reviewer
-            return {"score": 0.2, "notes": [], "pass": True}
+        if "EPISODE OUTLINE for narrative" in user:        # structure reviewer
+            return {"grade": "Pass", "review": ""}
+        if "This is an EPISODE OUTLINE" in user:           # outline writers'-room reviewer
+            return {"grade": "Pass", "review": ""}
         if "REVISE the EPISODE OUTLINE" in user:           # review revision
             return {"episode": 1, "title": "Test", "episode_type": "character",
                     "threat_of_the_week": "none", "plot": "fixed",
@@ -73,8 +75,8 @@ class ChunkLLM:
                                 "characters": ["Ryou"],
                                 "beats": ["Setup: a", "Change: b", "Consequence: c"]}
                                for i in range(1, 13)]}
-        self.calls.append("skeleton" if "OUTLINE SKELETON" in user else "beats")
-        if "OUTLINE SKELETON" in user:
+        self.calls.append("skeleton" if "Write ONE episode's" in user else "beats")
+        if "Write ONE episode's" in user:
             return {"episode": 1, "title": "Test", "episode_type": "character",
                     "threat_of_the_week": "none", "plot": "A day in the life.",
                     "characters": ["Ryou"],
@@ -83,8 +85,8 @@ class ChunkLLM:
                     "scenes": [{"id": f"s{i:02d}", "location": f"loc{i}",
                                 "time_of_day": "Day", "summary": f"scene {i}",
                                 "characters": ["Ryou"]} for i in range(1, 13)]}
-        scenes = json.loads(
-            user.split("SCENES TO EXPAND (this batch):\n")[1].split("\n\nReturn")[0])
+        after = user.split("SCENES TO EXPAND (this batch):\n")[1]
+        scenes = json.JSONDecoder().raw_decode(after)[0]
         return {"scenes": [{**s, "beats": [f"Setup: {s['id']} a",
                                           f"Change: {s['id']} b",
                                           f"Consequence: {s['id']} c"]} for s in scenes]}

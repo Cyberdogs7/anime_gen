@@ -314,6 +314,7 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
                 ACTIVITY[show.show_id] = {"detail": f"Rewriting prompt for {sid} + regenerate…",
                                           "ts": __import__("time").time()}
                 enames, _ = _shot_refs(show, f["shot"])
+                costumes = ((f["shot"].get("references") or {}).get("costumes") or {}) or {}
                 base = _keyframe_prompt(f["shot"], f["scene"], enames,
                                         _char_appearances(show),
                                         _show_style(show))
@@ -322,7 +323,7 @@ def run_consistency_check(show: Show, episode: int, cfg=None, llm=None,
                 out = runs / "storyboard" / f"{sid}.mp4"
                 image_filenames: list[str] = []
                 for name in enames:
-                    ref = _shot_character_ref(show, name)
+                    ref = _shot_character_ref(show, name, costume=costumes.get(name, ""))
                     if not ref:
                         continue
                     try:

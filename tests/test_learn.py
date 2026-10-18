@@ -28,28 +28,24 @@ def _write_reviews(show: Show):
     rdir = show.dir / "runs" / "EP01" / "reviews"
     rdir.mkdir(parents=True, exist_ok=True)
     (rdir / "continuity.r2.json").write_text(json.dumps({
-        "round": 2, "score": 0.0, "pass": False, "notes": [
-            {"severity": "HIGH", "scene": "s05", "item": "second spike",
-             "note": "s05_sh18 creates a second numbered past-ninety sync; keep single-spike canon"},
-            {"severity": "LOW", "scene": "s01", "item": "label",
-             "note": "gantry label varies; unify names"}]}), encoding="utf-8")
+        "round": 2, "grade": "Fail", "pass": False,
+        "review": "s05_sh18 creates a second numbered past-ninety sync; keep single-spike canon"}),
+        encoding="utf-8")
     (rdir / "slop.r2.json").write_text(json.dumps({
-        "round": 2, "score": 0.9, "pass": False, "notes": [
-            {"severity": "HIGH", "scene": "s02",
-             "note": "[Scene s02] Tessa opens every line with Mm... + number; rewrite with full sentences"}]}),
+        "round": 2, "grade": "Fail", "pass": False,
+        "review": "Tessa opens every line with Mm... + number; rewrite with full sentences"}),
         encoding="utf-8")
 
 
-def test_learn_aggregates_high_first(tmp_path):
+def test_learn_aggregates_failing_reviews(tmp_path):
     show = _make_show(tmp_path)
     _write_reviews(show)
     notes = aggregate_reviews(show.dir, 1)
-    assert len(notes) == 3
-    # HIGH severity sorts before LOW regardless of reviewer name.
-    assert [n["severity"] for n in notes] == ["HIGH", "HIGH", "LOW"]
+    assert len(notes) == 2
+    assert all(n["grade"] == "Fail" for n in notes)
     s = summarize(notes)
-    assert s["total"] == 3 and s["high"] == 2
-    assert s["by_reviewer"]["continuity"]["HIGH"] == 1
+    assert s["total"] == 2 and s["fail"] == 2
+    assert s["by_reviewer"]["continuity"]["Fail"] == 1
 
 
 def test_learn_distills_deduped_rules(tmp_path):
@@ -87,27 +83,20 @@ def test_effective_shot_notes_merges_standing_and_feedback(tmp_path):
     assert "STANDING DIRECTOR CONSTRAINTS" in merged
 
 
-def test_writer_review_stores_full_notes_with_reviewer(tmp_path):
+def test_writer_review_stores_verdict_for_every_reviewer(tmp_path):
     from studio.planner import _writer_review
     show = _make_show(tmp_path)
 
     class FailingLLM:
         def chat_json(self, messages, **kwargs):
-            return {"score": 0.9,
-                    "notes": [{"severity": "HIGH", "scene": "s01", "note": "a"},
-                              {"severity": "HIGH", "scene": "s02", "note": "b"},
-                              {"severity": "HIGH", "scene": "s03", "note": "c"},
-                              {"severity": "HIGH", "scene": "s04", "note": "d"}],
-                    "pass": False}
+            return {"grade": "Fail", "review": "fix the thing"}
 
     _writer_review(show, 1, {"episode": 1, "summary": "x", "cast": ["Ryou"], "scenes": []},
                    llm=FailingLLM(), cfg=Config(tmp_path), max_revisions=1)
     saved = json.loads((show.dir / "runs" / "EP01" / "script.r1.json").read_text(encoding="utf-8"))
-    # All 11 reviewers run; each returns 4 notes -> full set stored, not [:3].
-    assert len(saved["_review"]["notes"]) > 3
-    assert all("reviewer" in n for n in saved["_review"]["notes"])
-    # HIGHs sort first.
-    assert saved["_review"]["notes"][0]["severity"] == "HIGH"
+    # All 11 reviewers run; each verdict (grade + review) is stored.
+    assert len(saved["_review"]["reviews"]) == 11
+    assert saved["_review"]["reviews"]["slop"]["grade"] == "Fail"
 
 
 def test_prose_prompt_does_not_teach_numbered_spike():

@@ -32,14 +32,14 @@ class FakeChunkLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
-        if "WRITERS' ROOM NOTES" in user:      # revision prompt
+        if "REVIEW NOTES" in user:             # revision prompt
             return {"episode": 1, "scenes": [{"id": "s01", "shots": [
                 {"id": "s01_sh01", "duration_s": 10.125, "action": "revised",
                  "dialogue": [], "references": {"characters": ["Ryou"]}}]}]}
         self.review_calls += 1                 # reviewers
         passed = self.review_calls > 3         # round 1 fails, round 2 passes
-        return {"score": 0.1 if passed else 0.9,
-                "notes": [{"scene": "s01", "note": "fix this"}], "pass": passed}
+        return {"grade": "Pass" if passed else "Fail",
+                "review": "" if passed else "fix this"}
 
 
 def test_chunked_writers_room_revises_and_writes_rounds(tmp_path):
@@ -70,8 +70,7 @@ def test_writer_review_persists_failed_verdict_for_gate(tmp_path):
 
     class FailingLLM:
         def chat_json(self, messages, **kwargs):
-            return {"score": 0.93, "notes": [{"scene": "s01", "note": "slop"}],
-                    "pass": False}
+            return {"grade": "Fail", "review": "slop"}
 
     _writer_review(show, 1, script, llm=FailingLLM(), cfg=Config(tmp_path),
                    max_revisions=1)
@@ -86,7 +85,7 @@ def test_chunked_review_passes_on_round_one(tmp_path):
 
     class PassingLLM:
         def chat_json(self, messages, **kwargs):
-            return {"score": 0.1, "notes": [], "pass": True}
+            return {"grade": "Pass", "review": ""}
 
     final = _writer_review(show, 1, script, llm=PassingLLM(), cfg=Config(tmp_path),
                            max_revisions=2)
@@ -226,14 +225,13 @@ class FakePlanReviewLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
-        if "Review this EPISODE OUTLINE for narrative and structural coherence" in user:
+        if "EPISODE OUTLINE for narrative" in user:   # structure reviewer
             self.review_calls += 1
             passed = self.review_calls > 1
-            return {"score": 0.1 if passed else 0.9,
-                    "notes": [] if passed else [{"scene": "overall", "item": "episode 1",
-                                                 "severity": "HIGH",
-                                                 "note": "cold open, zero context"}],
-                    "pass": passed}
+            return {"grade": "Pass" if passed else "Fail",
+                    "review": "" if passed else "cold open, zero context"}
+        if "This is an EPISODE OUTLINE" in user:      # outline room reviewers
+            return {"grade": "Pass", "review": ""}
         if "REVISE the EPISODE OUTLINE" in user:      # review-driven revision
             self.revision_calls += 1
             return {"episode": 1, "title": "Fixed", "plot": "fixed plot",
@@ -282,9 +280,9 @@ def test_plan_review_loop_marks_failure_after_max_revisions(tmp_path):
             user = messages[-1]["content"]
             if "Review this EPISODE OUTLINE" in user:
                 self.review_calls += 1
-                return {"score": 0.9, "notes": [{"scene": "overall", "item": "x",
-                                                 "severity": "HIGH",
-                                                 "note": "still broken"}], "pass": False}
+                return {"grade": "Fail", "review": "still broken"}
+            if "This is an EPISODE OUTLINE" in user:
+                return {"grade": "Pass", "review": ""}
             return {"episode": 1, "plot": "still broken", "characters": ["Ryou"], "scenes": [
                 {"id": "s01", "location": "dojo", "time_of_day": "dawn",
                  "summary": "x", "characters": ["Ryou"], "beats": ["a", "b", "c"]}]}
@@ -296,8 +294,11 @@ def test_plan_review_loop_marks_failure_after_max_revisions(tmp_path):
     final = _plan_review_loop(show, 1, plan, llm, cfg, "m", "system",
                               show.read_bible(), "synopsis", {}, ["Ryou"], {}, [])
     assert final["plan_review"]["passed"] is False
-    assert final["plan_review"]["rounds"] == cfg.get("reviewers", "plan_max_revisions", 4)
-    assert final["plan_review"]["notes"]               # reviewer notes preserved
+    # The outline loop is capped at ONE auto-revision (2 rounds), regardless of the
+    # configured plan_max_revisions.
+    assert final["plan_review"]["rounds"] == min(
+        cfg.get("reviewers", "plan_max_revisions", 4), 2)
+    assert final["plan_review"]["reviews"]              # reviewer verdicts preserved
 
 
 def test_approve_plan_refuses_failed_review(tmp_path):
@@ -309,8 +310,8 @@ def test_approve_plan_refuses_failed_review(tmp_path):
     runs.mkdir(parents=True, exist_ok=True)
     plan = {"episode": 1, "status": "pending", "plot": "broken",
             "plan_review": {"rounds": 2, "passed": False,
-                            "notes": [{"scene": "overall", "item": "x",
-                                       "note": "cold open zero context"}]}}
+                            "reviews": {"structure": {"grade": "Fail",
+                                                      "review": "cold open zero context"}}}}
     (runs / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
     with pytest.raises(ValueError, match="failed structural review"):
         approve_plan(show, 1)
@@ -372,8 +373,9 @@ def test_reconciler_does_not_approve_failed_review_plan(tmp_path, monkeypatch):
     (runs / "plan.json").write_text(json.dumps({
         "episode": 1, "status": "pending", "plot": "broken",
         "plan_review": {"rounds": 2, "passed": False,
-                        "notes": [{"scene": "overall", "item": "x",
-                                   "note": "cold open zero context"}]}}), encoding="utf-8")
+                        "reviews": {"structure": {"grade": "Fail",
+                                                  "review": "cold open zero context"}}}}),
+        encoding="utf-8")
 
     _advance_episode(show, 1)
     plan = json.loads((runs / "plan.json").read_text(encoding="utf-8"))

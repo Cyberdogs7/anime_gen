@@ -39,7 +39,7 @@ def test_picture_tags_align_with_ref_order():
 
 def test_compile_shot_prompt_includes_action_subjects_dialogue():
     script = {"summary": "The crew defends the city."}
-    scene = {"summary": "They fight the bio-mech.", "location": "slums"}
+    scene = {"summary": "They fight the test mech.", "location": "slums"}
     shot = {"id": "s01_sh01", "action": "Blade draws his sword", "camera": "medium shot",
             "duration_s": 10.125,
             "dialogue": [{"char": "Blade", "line": "Hold it.", "on_camera": True}],

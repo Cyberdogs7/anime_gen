@@ -60,7 +60,7 @@ def test_episode_prose_prompt_is_not_json():
     assert "NO JSON" in p or "No JSON" in p
     assert "=== s01" in p
     assert "Return ONLY valid JSON" not in p
-    r = prose_revision_prompt("=== s01 | Dojo | Ryou ===\nHi.", {"slop": {"pass": False, "notes": []}})
+    r = prose_revision_prompt("=== s01 | Dojo | Ryou ===\nHi.", "[slop] fix it")
     assert "NO JSON" in r or "No JSON" in r
 
 
@@ -103,9 +103,10 @@ def test_prose_dialogue_spine_is_cast_resolved(tmp_path):
     assert "s02" in spine  # silent scene kept with []
 
 
-def test_assemble_runs_the_single_prose_path(tmp_path, monkeypatch):
-    """Assemble drafts whole-episode prose (no JSON outline dialogue writer)
-    and cuts shots from it; checkpoints still resume."""
+def test_assemble_runs_the_scene_details_path(tmp_path, monkeypatch):
+    """Assemble builds shots from the APPROVED scene details (narrative + dialogue)
+    — no prose pass, and the approved dialogue is carried verbatim into the spine.
+    Checkpoints still resume."""
     import json as _json
     import studio.config as _cfg
     from studio.config import Config
@@ -128,7 +129,14 @@ def test_assemble_runs_the_single_prose_path(tmp_path, monkeypatch):
         {"episode": 1, "status": "approved", "plot": "demo",
          "characters": ["Ryou"], "scenes": []}), encoding="utf-8")
     (d / "scene_details.json").write_text(_json.dumps(
-        {"status": "approved", "scenes": []}), encoding="utf-8")
+        {"status": "approved", "scenes": [
+            {"id": "s01", "location": "Dojo", "summary": "x",
+             "narrative": "They spar.", "characters": ["Ryou"],
+             "dialogue_beats": [{"char": "Ryou", "line": "Spar now."}]},
+            {"id": "s02", "location": "Dojo", "summary": "y",
+             "narrative": "They rest.", "characters": ["Ryou"],
+             "dialogue_beats": [{"char": "Ryou", "line": "Rest."}]}]}),
+        encoding="utf-8")
     # Shot checkpoints so no shot-pass LLM is needed.
     for sid in ("s01", "s02"):
         (d / "scenes" / f"{sid}_shots.json").write_text(_json.dumps(
@@ -141,14 +149,17 @@ def test_assemble_runs_the_single_prose_path(tmp_path, monkeypatch):
 
     class FakeLLM:
         def chat(self, messages, **kwargs):
-            return PROSE  # whole-episode prose draft
+            return PROSE
         def chat_json(self, messages, **kwargs):
             return {"score": 0.0, "pass": True, "notes": []}
 
     from studio.planner import assemble_episode_script
     script = assemble_episode_script(show, 1, llm=FakeLLM(), cfg=cfg)
-    # Prose path ran (legacy path never writes episode_prose.txt) ...
-    assert (d / "episode_prose.txt").exists()
-    # ... and the script was cut from the prose scenes, not the empty outline.
+    # No prose pass anymore.
+    assert not (d / "episode_prose.txt").exists()
+    # Scenes come from the scene details.
     assert [s["id"] for s in script["scenes"]] == ["s01", "s02"]
+    # The approved dialogue was carried verbatim into the spine.
+    dlg = (d / "dialogue.txt").read_text(encoding="utf-8")
+    assert "Ryou: Spar now." in dlg and "Ryou: Rest." in dlg
     assert (d / "script.r1.json").exists()

@@ -33,9 +33,9 @@ def _runs_dir(show_dir: Path, episode: int) -> Path:
 
 def aggregate_reviews(show_dir: Path, episode: int,
                       round_no: int | None = None) -> list[dict[str, Any]]:
-    """Flatten every reviewer notes file into [{reviewer, round, severity, scene, item, note}].
+    """Flatten each reviewer's verdict into [{reviewer, round, grade, review}].
 
-    When round_no is None, uses the latest round per reviewer. HIGH severity sorts first.
+    When round_no is None, uses the latest round per reviewer. Fails sort first.
     """
     rdir = _runs_dir(show_dir, episode) / "reviews"
     if not rdir.exists():
@@ -57,22 +57,13 @@ def aggregate_reviews(show_dir: Path, episode: int,
                 data = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            rnd = 0
             m = re.match(r"^(.*)\.r(\d+)$", f.stem)
-            if m:
-                rnd = int(m.group(2))
-            for n in data.get("notes", []) or []:
-                if not isinstance(n, dict):
-                    out.append({"reviewer": reviewer, "round": rnd, "severity": "",
-                                "scene": "", "item": "", "note": str(n)})
-                    continue
-                out.append({"reviewer": reviewer, "round": rnd,
-                            "severity": str(n.get("severity", "")).upper(),
-                            "scene": n.get("scene", "") or "",
-                            "item": n.get("item", "") or "",
-                            "note": n.get("note", "") or n.get("item", "") or ""})
-    sev_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "": 3}
-    out.sort(key=lambda n: (sev_rank.get(n["severity"], 3), n["reviewer"], n["scene"]))
+            rnd = int(m.group(2)) if m else 0
+            passed = data.get("pass")
+            grade = str(data.get("grade") or ("Pass" if passed else "Fail"))
+            out.append({"reviewer": reviewer, "round": rnd, "grade": grade,
+                        "review": str(data.get("review") or "").strip()})
+    out.sort(key=lambda n: (str(n["grade"]).lower() == "pass", n["reviewer"]))
     return out
 
 
@@ -82,23 +73,20 @@ def _normalize(text: str) -> str:
 
 def distill_rules(notes: list[dict[str, Any]],
                   high_only: bool = True) -> list[str]:
-    """Turn raw reviewer notes into short durable constraint candidates (deduped).
+    """Turn failing reviewers' free-form reviews into durable constraint candidates.
 
-    Keeps the reviewer's concrete fix directive, strips scene-specific prefixes so
-    the rule generalizes to future episodes. Returns human-readable strings ready
-    for review before promoting to director_notes.json.
+    Keeps the reviewer's concrete directive (strips any scene prefix). Returns
+    human-readable strings ready for review before promoting to director_notes.json.
     """
     seen: set[str] = set()
     rules: list[str] = []
     for n in notes:
-        if high_only and n.get("severity") != "HIGH":
+        if high_only and str(n.get("grade", "")).lower() == "pass":
             continue
-        text = (n.get("note") or "").strip()
+        text = (n.get("review") or "").strip()
         if not text:
             continue
-        # Strip leading "[Scene s0X] Location - " prefixes; keep the directive.
         text = re.sub(r"^\[Scene\s+s\d+\][^-]*-\s*", "", text).strip()
-        text = re.sub(r"^\[Muse Spark\]\s*", "", text).strip()
         candidate = f"[{n.get('reviewer')}] {text}"
         key = _normalize(candidate)
         if key in seen:
@@ -109,18 +97,15 @@ def distill_rules(notes: list[dict[str, Any]],
 
 
 def summarize(notes: list[dict[str, Any]]) -> dict[str, Any]:
-    """Count notes by reviewer/severity for dashboard/CLI display."""
+    """Count reviewers by grade for dashboard/CLI display."""
     by_reviewer: dict[str, dict[str, int]] = {}
     for n in notes:
-        bucket = by_reviewer.setdefault(n["reviewer"], {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "total": 0})
-        sev = n.get("severity") or "LOW"
-        if sev not in bucket:
-            bucket[sev] = 0
-        bucket[sev] += 1
+        bucket = by_reviewer.setdefault(n["reviewer"], {"Pass": 0, "Fail": 0, "total": 0})
+        g = "Pass" if str(n.get("grade", "")).lower() == "pass" else "Fail"
+        bucket[g] += 1
         bucket["total"] += 1
-    return {"total": len(notes),
-            "high": sum(1 for n in notes if n.get("severity") == "HIGH"),
-            "by_reviewer": by_reviewer}
+    fails = sum(1 for n in notes if str(n.get("grade", "")).lower() != "pass")
+    return {"total": len(notes), "fail": fails, "by_reviewer": by_reviewer}
 
 
 def promote_rules(show_dir: Path, rules: list[str]) -> list[str]:
@@ -154,16 +139,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no review notes for {args.show} EP{args.episode:02d}")
         return 1
     s = summarize(notes)
-    print(f"{args.show} EP{args.episode:02d}: {s['total']} notes ({s['high']} HIGH)")
+    print(f"{args.show} EP{args.episode:02d}: {s['total']} reviewers ({s['fail']} Fail)")
     for reviewer, counts in sorted(s["by_reviewer"].items()):
-        print(f"  {reviewer:12s} HIGH={counts.get('HIGH',0)} MED={counts.get('MEDIUM',0)} "
-              f"LOW={counts.get('LOW',0)} total={counts.get('total',0)}")
+        print(f"  {reviewer:14s} Pass={counts.get('Pass', 0)} Fail={counts.get('Fail', 0)}")
     print()
     for n in notes:
-        if args.all or n.get("severity") == "HIGH":
-            print(f"[{n['severity'] or '?':6s}] ({n['reviewer']}) {n['note']}")
+        if args.all or str(n.get("grade", "")).lower() != "pass":
+            print(f"[{n['grade']:4s}] ({n['reviewer']}) {n['review']}")
     rules = distill_rules(notes, high_only=not args.all)
-    print(f"\n{len(rules)} candidate durable rules (HIGH-derived):")
+    print(f"\n{len(rules)} candidate durable rules (Fail-derived):")
     for r in rules:
         print(f"  - {r}")
     if args.promote:

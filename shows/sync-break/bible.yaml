@@ -1,4 +1,5 @@
 title: Sync Break
+content_policy: explicit
 logline: A 21-year-old hangar mechanic with freak co-pilot compatibility gets claimed
   as shared property by a disgraced all-women ace flight after he hot-wires their
   dead Frames mid-duel.
@@ -111,23 +112,43 @@ style_guide: Crisp 90s cel-anime line art with glossy hand-drawn mecha, painterl
   close-ups for sync and seduction.
 runtime_target_s: 1320
 mature_spec:
-  quotient: explicit_ecchi
+  quotient: explicit
   quotas:
     service_scenes_per_episode:
     - 3
     - 5
     reward_scenes_per_arc: 2
+  per_episode_floor:
+    panty_shots:
+    - 5
+    - 10
+    bare_chest_reveals:
+    - 5
+    - 10
+    service_scenes:
+    - 5
+    - 10
+  explicit_sex_scenes:
+    per_arc:
+    - 2
+    - 4
+    enabled: true
+    conditions: Earned by a duel win, a debt called in, a confession, or a claimed
+      stake; the episode is varied per season, never a fixed slot.
+    characters:
+    - Mira Kaine
+    - Sable Voss
+    - Juno Hale
+    - Tessa Rook
   escalation:
     schedule: Early episodes tease with plug-suit swaps and towel fights; mid-arc
       escalates to full calibration straddles and bathhouse claims; late-arc pays
       off with afterparty bed-sharing wins earned by duels and confessions.
   tone_boundaries:
-  - All cast 21+ consenting adults, teasing is reciprocal and rowdy, never shaming.
-  - Service grows from duel stakes, debts, jealousy, or celebration, never as random
-    inserts.
-  - Contract ownership played for witty push-pull comedy, Ren talks back and negotiates
-    his own price.
-  - Confident and unashamed, comedic and sincere by turns, no coercion played straight.
+  - All cast 18+ adults, teasing is reciprocal and rowdy, never shaming.
+  - Service grows from duel stakes, debts, jealousy, or celebration
+  - Contract ownership played for witty push-pull comedy
+  - Confident and unashamed, comedic and sincere by turns
   characters:
     Ren Tojo: primary
     Mira Kaine: primary

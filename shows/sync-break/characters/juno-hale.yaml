@@ -1,13 +1,13 @@
 id: juno-hale
 name: Juno Hale
 role: teasing scout and poach-bait spotter
-appearance_canonical: A 23-year-old tall, rangy woman with light-tanned skin and freckles
-  across her nose and shoulders, bright hazel-green eyes, and short choppy honey-blonde
-  pixie hair with a shaved left undercut and a single thin braid hanging behind her
-  right ear. Long legs, lean runner's build, small scar nick on her lower left lip.
-  Wears a cropped Vixen scout plug suit in faded teal with orange trim, left sleeve
-  torn off to show a taped-up shoulder sensor, short bomber jacket tied around her
-  waist, and a scout visor pushed up on her forehead.
+appearance_canonical: A woman, 23 years old, tall with lean rangy runner's build and
+  long legs, deep warm brown skin with freckles across nose and shoulders, bright
+  hazel-green eyes, short sexy honey-blonde pixie cut with tapered sides and tousled
+  textured top, small scar nick on lower left lip. Wears scout visor in pushed-up
+  wear position, cropped faded teal Vixen scout plugsuit with orange trim with left
+  sleeve torn off and taped-up shoulder sensor, short bomber jacket tied around waist,
+  black fitted scout boots.
 appearance_notes: Never change eye color from hazel-green. Pixie cut stays short and
   choppy; undercut always left, braid always right. Freckles and lower-lip nick never
   disappear. Visor lives on forehead off-duty, never around neck.
@@ -28,3 +28,11 @@ voice:
   voice_description: Adult woman in her early 20s, bright teasing alto with a slight
     rasp, quick radio-operator cadence, stretches vowels when flirting and snaps short
     and flat when calling targets
+is_person: true
+identity_canonical: A woman, 23 years old, tall with lean rangy runner's build and
+  long legs, deep warm brown skin with freckles across nose and shoulders, bright
+  hazel-green eyes, short sexy honey-blonde pixie cut with tapered sides and tousled
+  textured top, small scar nick on lower left lip.
+wardrobe_canonical: scout visor in pushed-up wear position, cropped faded teal Vixen
+  scout plugsuit with orange trim with left sleeve torn off and taped-up shoulder
+  sensor, short bomber jacket tied around waist, black fitted scout boots

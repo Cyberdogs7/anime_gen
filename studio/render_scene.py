@@ -25,8 +25,9 @@ from .clients.comfy import ComfyClient
 from .config import get_config
 from .show import Show
 
-# Background jobs: show_id -> {"state", "done", "total", "detail"}
-SCENE_RENDER_JOBS: dict[str, dict[str, Any]] = {}
+# Background jobs are tracked in the single render job store
+# (``render.RENDER_JOBS``) so the dashboard, stop_render and the reconciler all
+# see an in-flight master render instead of a separate, unread store.
 
 
 def _latest_script(show: Show, episode: int) -> dict[str, Any] | None:
@@ -188,15 +189,19 @@ def render_scene_master(
     # Collect unique character refs for Auto Refs (9 slots across characters)
     # Pack's Auto Refs splits nine photo slots across up to nine characters
     all_names: list[str] = []
+    name_costume: dict[str, str] = {}
     for sh in scene.get("shots", []):
         names, _ = _shot_refs(show, sh)
+        costumes = ((sh.get("references") or {}).get("costumes") or {}) or {}
         for n in names:
             if n not in all_names:
                 all_names.append(n)
+            if n not in name_costume and costumes.get(n):
+                name_costume[n] = costumes[n]
 
     image_filenames: list[str] = []
     for name in all_names[:9]:  # pack max 9 picture slots
-        ref = _shot_character_ref(show, name)
+        ref = _shot_character_ref(show, name, costume=name_costume.get(name, ""))
         if not ref:
             continue
         try:
@@ -294,8 +299,16 @@ def render_episode_masters(
     client = _render_client(cfg)
     done = 0
     total = len(scenes)
+    from .render import RENDER_JOBS
+
+    def _stopped() -> bool:
+        return (RENDER_JOBS.get(show.show_id) or {}).get("state") == "stopped"
+
     with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
         for idx, scene in enumerate(scenes):
+            if _stopped():
+                ACTIVITY.setdefault(show.show_id, {})["detail"] = "Stopped by user"
+                break
             sid = scene.get("id", f"s{idx+1:02d}")
             out = _masters_dir(show, episode) / f"{sid}_master.mp4"
             if out.exists():
@@ -321,8 +334,19 @@ def render_episode_masters(
 
 def build_scene_masters(show: Show, episode: int, cfg=None) -> None:
     """Background-thread entrypoint mirroring render.build_render."""
+    from .render import RENDER_JOBS
+    # Defence in depth: build_render already gates on this, but the multishot
+    # entrypoint is public too — never render masters over unapproved refs.
+    from .storyboard import pending_ref_approvals
+    pending = pending_ref_approvals(show, episode)
+    if pending:
+        RENDER_JOBS[show.show_id] = {
+            "state": "waiting", "done": 0, "total": 0, "ts": time.time(),
+            "detail": "Waiting for ref approval: " + ", ".join(pending),
+        }
+        return
     job: dict[str, Any] = {"state": "running", "done": 0, "total": 0, "detail": "Preparing scene masters…", "ts": time.time()}
-    SCENE_RENDER_JOBS[show.show_id] = job
+    RENDER_JOBS[show.show_id] = job
 
     cfg = cfg or get_config()
     script = _latest_script(show, episode)
@@ -350,13 +374,3 @@ def build_scene_masters(show: Show, episode: int, cfg=None) -> None:
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     job["_thread"] = t
-
-
-def scene_render_status(show_id: str) -> dict[str, Any]:
-    job = SCENE_RENDER_JOBS.get(show_id)
-    if not job:
-        return {"state": "idle", "done": 0, "total": 0, "detail": ""}
-    out = dict(job)
-    thread = out.pop("_thread", None)
-    out["alive"] = bool(thread and thread.is_alive())
-    return out

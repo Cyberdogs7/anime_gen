@@ -14,10 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from . import promptlog
+from . import epstate
 from . import prompts
 from .bootstrap import ACTIVITY
 from .config import DEFAULT_RUNTIME_TARGET_S, get_config
-from .review import all_pass, repetition_review, run_plan_reviewers, run_reviewers
+from .review import (all_pass, failing_reviews, plan_passes, review_notes_text,
+                     repetition_review, run_plan_reviewers,
+                     run_plan_room_reviewers, run_reviewers)
 from .scriptgen import _normalize, _runtime_review
 from .show import Show
 
@@ -223,9 +226,73 @@ def add_director_note(show: Show, note: str) -> list[str]:
     notes = read_director_notes(show)
     if note and not any(note.lower() in n.lower() or n.lower() in note.lower() for n in notes):
         notes.append(note)
-        _director_notes_path(show).write_text(json.dumps(notes, indent=2, ensure_ascii=False),
-                                              encoding="utf-8")
+        epstate.write_json(_director_notes_path(show), notes)
     return notes
+
+
+class _ModelOverride:
+    """Wrap an LLM client so outline-WRITING calls use a chosen model, while
+    reviewer calls keep their own cheap role models.
+
+    A one-off outline regeneration picks a model; every non-reviewer call (season,
+    development, skeleton, beats) is forced onto it. Reviewer calls (role ending
+    ``_reviewer``) pass through untouched, so a regeneration never bills the
+    chosen model for the whole writers' room.
+    """
+
+    def __init__(self, client, model: str | None = None,
+                 remote_model: str | None = None, prefer_local: bool = False):
+        self._client = client
+        self._model = model
+        self._remote_model = remote_model
+        self._prefer_local = prefer_local
+
+    def _apply(self, kw: dict[str, Any]) -> dict[str, Any]:
+        if str(kw.get("role") or "").endswith("_reviewer"):
+            return kw
+        if self._model:
+            kw["model"] = self._model
+        if self._remote_model:
+            kw["remote_model"] = self._remote_model
+        if self._prefer_local:
+            kw["prefer_local"] = True
+        return kw
+
+    def chat(self, messages, **kw):
+        return self._client.chat(messages, **self._apply(kw))
+
+    def chat_json(self, messages, **kw):
+        return self._client.chat_json(messages, **self._apply(kw))
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def _cast_flaws_block(show: Show) -> str:
+    """Each character's role + FLAW/MOTIVATION, as a prompt block.
+
+    The stakes/agency reviewers fail outlines by citing these sheets, but the
+    outline generator only saw the bible — so it invented generic, out-of-character
+    beats. Shared by the draft AND the revision so neither path loses the people.
+    """
+    try:
+        lines = []
+        for cid in show.list_characters():
+            c = show.read_character(cid)
+            nm = c.get("name")
+            if not nm:
+                continue
+            pers = c.get("personality") or []
+            pers = (", ".join(str(x) for x in pers) if isinstance(pers, list)
+                    else str(pers))
+            lines.append(f"- {nm} ({c.get('role', '')}): {pers[:220]}")
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    return ("\n\nCAST FLAWS/MOTIVATIONS (who they are; every beat MUST respect "
+            "these, and each action must come from the character who wants it):\n"
+            + "\n".join(lines))
 
 
 def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
@@ -328,8 +395,15 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         # call per batch). This lets a scene-count-driven outline fit the model's
         # output budget where a single huge JSON would truncate.
         beats_batch = max(1, int(cfg.get("pipeline", "plan_beats_batch", 2) or 2))
+        from . import service as _service
+        _reward = _service.is_reward_episode(show, episode, cfg)
         skeleton_prompt = prompts.plan_skeleton_prompt(
-            bible, state, dev, dir_notes, _target(show))
+            bible, state, dev, dir_notes, _target(show), continuity=continuity,
+            reward=_reward)
+        # Feed each character's FLAW/MOTIVATION so the outline's beats honour them —
+        # the stakes/agency reviewers cite these sheets, but the generator (which only
+        # saw the bible) did not, producing interchangeable beats.
+        skeleton_prompt += _cast_flaws_block(show)
         if season_mandate:
             skeleton_prompt += season_mandate
         ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: outlining scenes (skeleton)…",
@@ -419,8 +493,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
     # Season canon carried on the plan so approval can enforce it.
     if season_entry:
         plan["_season"] = {"season": season_no, "entry": season_entry}
-    _plan_path(show, episode).write_text(json.dumps(plan, indent=2, ensure_ascii=False),
-                                         encoding="utf-8")
+    epstate.save_plan(show, episode, plan)
     return plan
 
 
@@ -435,17 +508,8 @@ def read_episode_plan(show: Show, episode: int) -> dict[str, Any]:
 
 
 def _plan_review_feedback(reviews: dict[str, dict[str, Any]]) -> str:
-    """Flatten every reviewer's notes into an ABSOLUTE feedback block for revision."""
-    lines = []
-    for reviewer, r in reviews.items():
-        lines.append(f"--- {reviewer} reviewer (pass={r.get('pass')}) ---")
-        for note in r.get("notes", []):
-            if isinstance(note, dict):
-                text = note.get("note") or note.get("item") or str(note)
-            else:
-                text = str(note)
-            lines.append(f"  - {text}")
-    return "\n".join(lines)
+    """The failing outline reviewers' free-form reviews, as revision feedback."""
+    return review_notes_text(reviews)
 
 
 def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
@@ -476,7 +540,9 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
     Season canon is also carried into every review revision so the loop cannot
     drift off the season entry.
     """
-    max_revisions = int(cfg.get("reviewers", "plan_max_revisions", 2) or 2)
+    # Convergence: at most ONE auto-revision, then stop and surface to the human.
+    # And only the 3 blocking reviewers gate the outline (advisory ones recorded).
+    max_revisions = min(int(cfg.get("reviewers", "plan_max_revisions", 2) or 2), 2)
     notes_dir = show.dir / "runs" / f"EP{episode:02d}" / "reviews"
     try:
         from .season import read_season_entry as _read_entry
@@ -488,8 +554,24 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
         _season_mandate = ""
 
     def _review(plan: dict[str, Any], round_no: int) -> dict[str, dict[str, Any]]:
-        return run_plan_reviewers(plan, show=show, cfg=cfg, llm=llm, episode=episode,
-                                  round_no=round_no, notes_dir=notes_dir)
+        # 1) the plan-specific structure reviewer (coherence, episode-1 context),
+        # then 2) the WRITERS' ROOM on the outline itself. The outline decides
+        # length, locations, fan-service placement and beat shape before any
+        # downstream writer sees it, so the room that guards those must review the
+        # OUTLINE - not only the finished script, where the outline is already locked.
+        reviews = run_plan_reviewers(plan, show=show, cfg=cfg, llm=llm, episode=episode,
+                                     round_no=round_no, notes_dir=notes_dir)
+        try:
+            room = run_plan_room_reviewers(plan, show=show, cfg=cfg, llm=llm,
+                                           episode=episode, round_no=round_no,
+                                           notes_dir=notes_dir)
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "plan room review failed EP%02d r%d: %s", episode, round_no, exc)
+            room = {}
+        reviews.update(room)
+        return reviews
 
     def _finalize(p: dict[str, Any]) -> dict[str, Any]:
         """Re-apply the deterministic plan cleanup on a revised outline."""
@@ -521,7 +603,7 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
 
     round_no = 1
     reviews = _review(plan, round_no)
-    passed = all_pass(reviews)
+    passed = plan_passes(reviews)
     while not passed and round_no < max_revisions:
         round_no += 1
         feedback = _plan_review_feedback(reviews)
@@ -533,9 +615,12 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
         ACTIVITY[show.show_id] = {
             "detail": f"Episode {episode}: revising outline from plan review (round {round_no})…",
             "ts": time.time()}
+        from . import service as _service
         _rev_prompt = prompts.episode_plan_prompt(
             bible, synopsis, continuity, names, _target(show), plan, feedback,
-            dir_notes, state, fixed_episode_type=fixed_episode_type)
+            dir_notes, state, fixed_episode_type=fixed_episode_type,
+            cast_brief=_cast_flaws_block(show),
+            reward=_service.is_reward_episode(show, episode, cfg))
         if _season_mandate:
             _rev_prompt += _season_mandate
         revised = promptlog.logged_chat_json(
@@ -554,8 +639,8 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
     plan["plan_review"] = {
         "rounds": round_no,
         "passed": passed,
-        "notes": [n for r in reviews.values()
-                  for n in (r.get("notes") or []) if isinstance(n, dict)],
+        "reviews": {r: {"grade": v.get("grade"), "review": v.get("review", "")}
+                    for r, v in reviews.items()},
     }
     return plan
 
@@ -568,9 +653,11 @@ def approve_plan(show: Show, episode: int, llm=None, cfg=None, override: bool = 
     # outline; it records the override reason so the approval is auditable.
     review = (plan or {}).get("plan_review") or {}
     if review.get("passed") is False and not override:
-        all_notes = [n for n in (review.get("notes") or [])]
-        notes = "; ".join(str(n.get("note") or n.get("item") or n)
-                          for n in all_notes) or "failed structural review"
+        reviews = review.get("reviews") or {}
+        notes = "; ".join(str(v.get("review") or "").strip()
+                          for v in reviews.values()
+                          if str(v.get("grade", "")).lower() != "pass").strip() \
+            or "failed structural review"
         raise ValueError(
             f"plan EP{episode:02d} failed structural review ({review.get('rounds', 1)} "
             f"rounds): {notes} — reject it with notes to regenerate, or approve with "
@@ -605,8 +692,7 @@ def approve_plan(show: Show, episode: int, llm=None, cfg=None, override: bool = 
     # The plan payload is downstream data; don't persist the internal dev marker.
     plan.pop("_plan_dev", None)
     plan.pop("_season", None)
-    _plan_path(show, episode).write_text(json.dumps(plan, indent=2, ensure_ascii=False),
-                                         encoding="utf-8")
+    epstate.save_plan(show, episode, plan)
     return plan
 
 
@@ -649,8 +735,7 @@ def reject_plan(show: Show, episode: int, notes: str = "") -> dict[str, Any]:
     plan = read_episode_plan(show, episode)
     plan["status"] = "rejected"
     plan["rejected_notes"] = notes
-    _plan_path(show, episode).write_text(json.dumps(plan, indent=2, ensure_ascii=False),
-                                         encoding="utf-8")
+    epstate.save_plan(show, episode, plan)
     # A rejected outline invalidates everything below it: stop any running render
     # and drop the stale script/storyboard/video/dialogue built from the old plan.
     _clear_scenes_downstream(show, episode)
@@ -743,6 +828,12 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
                     existing[sid] = d
             except Exception:
                 continue
+    # Dialogue DEPTH target for the AUTHORED spine: aim the whole episode at
+    # 3000-4500 spoken words (~170 wpm), split evenly across its scenes.
+    _target_s = _target(show)
+    _ep_words = int((_target_s / 60) * 170)
+    _dbt = max(6, round(_ep_words / max(1, len(scenes)) / 12))
+
     details: list[dict[str, Any]] = []
     for i, ps in enumerate(scenes, start=1):
         sid = ps.get("id", f"s{i:02d}")
@@ -762,8 +853,15 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
                 show.style_profile(cfg), bible.get("content_policy", "mature"),
                 show.style_profile(cfg).get("baseline", ""))},
              {"role": "user", "content": prompts.scene_detail_prompt(
-                 bible, outline, cast, current, notes,
-                 director_constraints=dir_notes)}],
+                 bible,
+                 # Only THIS scene's slice + a one-line episode context — not the whole
+                 # episode blueprint (overloading the scene call made it re-narrate).
+                 {"title": outline.get("title", ""),
+                  "plot": outline.get("plot", ""),
+                  "scene": ps},
+                 cast, current, notes,
+                 director_constraints=dir_notes,
+                 dialogue_beats_target=_dbt)}],
             model=model, role="showrunner", temperature=0.8, max_tokens=8192,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: scene detail {sid} ({n} tokens…)",
@@ -774,8 +872,7 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
         detail.setdefault("time_of_day", ps.get("time_of_day", ""))
         detail.setdefault("summary", ps.get("summary", ""))
         detail.setdefault("characters", ps.get("characters", []))
-        (sc_dir / f"{sid}.json").write_text(json.dumps(detail, indent=2, ensure_ascii=False),
-                                            encoding="utf-8")
+        epstate.write_json(sc_dir / f"{sid}.json", detail)
         details.append(detail)
     # Deterministic repetition gate: an episode that replays the same scene again
     # and again gives the dialogue writer nothing to do but invent filler quips.
@@ -790,15 +887,33 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
     payload: dict[str, Any] = {"status": "pending", "scenes": details,
                                **({"rejected_notes": notes} if notes.strip() else {})}
     payload["_review"] = rep
+    reasons: list[str] = []
     if not rep["pass"]:
         attempts += 1
         payload["rep_attempts"] = attempts
         if attempts <= _MAX_DETAILS_REGENS:
-            payload["status"] = "rejected"
-            payload["rejected_notes"] = "REPETITION: " + "; ".join(
-                n.get("note", "") for n in (rep.get("notes") or [])[:4])
-    _details_path(show, episode).write_text(json.dumps(payload, indent=2, ensure_ascii=False),
-                                            encoding="utf-8")
+            reasons.append("REPETITION: " + "; ".join(
+                n.get("note", "") for n in (rep.get("notes") or [])[:4]))
+    # Mature-service ledger: the countable FLOOR (panty shots, bare-chest
+    # reveals, service scenes) plus the payoff CEILING on a scheduled reward
+    # episode. A shortfall is a required element MISSING -> reject and
+    # regenerate, bounded, exactly like the repetition gate.
+    from . import service as _service
+    led = _service.service_ledger(details)
+    srv_short = _service.ledger_shortfalls(
+        bible, led, reward=_service.is_reward_episode(show, episode, cfg))
+    payload["_service"] = {"ledger": led, "shortfalls": srv_short}
+    if srv_short:
+        serv_attempts = int(
+            read_scene_details(show, episode).get("serv_attempts", 0) or 0) + 1
+        payload["serv_attempts"] = serv_attempts
+        if serv_attempts <= _MAX_DETAILS_REGENS:
+            reasons.append("SERVICE FLOOR NOT MET (stage these ON-PAGE): "
+                           + "; ".join(srv_short))
+    if reasons:
+        payload["status"] = "rejected"
+        payload["rejected_notes"] = " | ".join(reasons)
+    epstate.save_details(show, episode, payload)
     return details
 
 
@@ -815,8 +930,7 @@ def read_scene_details(show: Show, episode: int) -> dict[str, Any]:
 def approve_scene_details(show: Show, episode: int) -> dict[str, Any]:
     data = read_scene_details(show, episode)
     data["status"] = "approved"
-    _details_path(show, episode).write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                                            encoding="utf-8")
+    epstate.save_details(show, episode, data)
     return data
 
 
@@ -854,6 +968,17 @@ def _clear_scenes_downstream(show: Show, episode: int) -> None:
             r.unlink()
         except Exception:
             pass
+    # Per-shot DECISIONS + derived reports are keyed by shot id (deterministic and
+    # reused), so they must go too — otherwise a rebuilt shot inherits a stale
+    # approved/rejected status, a stale revised_prompt/retake_count, and a stale
+    # VL/STT verdict for an image the human never saw.
+    for name in ("shots.approval.json", "prompts.json", "consistency.json"):
+        fp = runs / name
+        if fp.exists():
+            try:
+                fp.unlink()
+            except Exception:
+                pass
     # The episode dialogue is authored from the scene treatments too — a rejected
     # episode must regenerate it, not silently reuse the old lines.
     for name in (DIALOGUE_FILE, DIALOGUE_TXT):
@@ -863,7 +988,7 @@ def _clear_scenes_downstream(show: Show, episode: int) -> None:
                 fp.unlink()
             except Exception:
                 pass
-    for sub in ("reviews", "storyboard", "objects", "video"):
+    for sub in ("reviews", "storyboard", "objects", "video", "qc", "vcheck"):
         p = runs / sub
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)
@@ -883,8 +1008,7 @@ def reject_scene_details(show: Show, episode: int, notes: str = "") -> dict[str,
     data = read_scene_details(show, episode)
     data["status"] = "rejected"
     data["rejected_notes"] = notes
-    _details_path(show, episode).write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                                            encoding="utf-8")
+    epstate.save_details(show, episode, data)
     _clear_scenes_downstream(show, episode)
     return data
 
@@ -1137,13 +1261,18 @@ _SCENE_PASSES: list[dict[str, Any]] = [
         "schema": {"shots": [{
             "id": "shot id (verbatim)",
             "references": {"characters": ["EXACT cast names on screen"],
+                           "via_display": ["of those, the names visible ONLY through a screen/TV/monitor/hologram/broadcast (NOT physically present)"],
                            "scene": "location name"},
         }]},
         "instructions": (
             "For every shot, list the EXACT cast names visible on screen in "
             "references.characters (empty array if no characters are visible) and the "
-            "scene's location in references.scene. Names must match the cast exactly."),
-        "nested": [("references", ["characters", "scene"])],
+            "scene's location in references.scene. Separately, list in "
+            "references.via_display any of those names that are visible ONLY through a "
+            "screen/monitor/broadcast/hologram (e.g. a rival laughing on a jumbotron) - "
+            "they are NOT physically present, so the render must show them INSIDE the "
+            "display, never standing in the scene. Names must match the cast exactly."),
+        "nested": [("references", ["characters", "via_display", "scene"])],
     },
     {
         "name": "costumes",
@@ -1200,7 +1329,7 @@ _SCENE_PASSES: list[dict[str, Any]] = [
             "stage direction as a line ('Borrowed suit, live wire, bad plan. Scoot up.' is "
             "WRONG - a noun list plus a fragment). Keep natural spoken rhythm (contractions "
             "are fine) and rewrite anything that reads awkwardly aloud. A ~10s shot carries "
-            "at most 2-3 short lines (~20-35 words total). Write numbers and abbreviations "
+            "up to 4-5 lines (~40-70 words total) when the beat is dialogue-heavy. Write numbers and abbreviations "
             "as they should be spoken (e.g. 'twenty-one', 'five-g'). EVERY shot must "
             "explicitly be either SPEAKING or "
             "SILENT. SPEAKING: `silence: false` (or omit) with real spoken lines in the "
@@ -1249,7 +1378,10 @@ def _blocking_pass(with_dialogue_spine: bool) -> dict[str, Any]:
         "shots (lines: []) for action beats that need no speech. You only PLACE the "
         "given lines - never write, reword, add or drop dialogue. Mark the scene's 1-2 "
         "hero money shots. Size each shot to what it holds: about 2 lines ~10s, a "
-        "single short line or a silent insert ~5s.")
+        "single short line or a silent insert ~5s. Write each shot's `beat` as PLAIN, "
+        "DIRECT screen action (what we SEE happen) - no run-on sentences. Do NOT "
+        "describe costumes, looks, props or UI/scoreboards here; those are owned by the "
+        "scene details and referenced by later passes. Do NOT restate the narrative.")
     return p
 
 
@@ -1305,6 +1437,51 @@ def _inject_dialogue(draft: list[dict[str, Any]],
         last["silence"] = False
 
 
+def _restore_dialogue(script: dict[str, Any], sc_dir: Path,
+                      spine: dict[str, list[dict[str, Any]]] | None = None) -> None:
+    """Force every shot's dialogue to the APPROVED lines, deterministically.
+
+    1. Prefer the per-scene shot checkpoint's own distribution (exact when the
+       reviewed script kept the same shot ids).
+    2. Otherwise distribute the scene's approved spine lines across the scene's
+       shots, in order — so no revision can leave a rewritten line behind.
+    """
+    for scene in script.get("scenes", []):
+        sid = scene.get("id", "")
+        shots = scene.get("shots", [])
+        if not shots:
+            continue
+        # The AUTHORED spine is canonical: distribute its approved lines across
+        # the scene's shots, in order, so no downstream rewrite can leave a line
+        # the spine never had. Spine and shot script can never diverge.
+        lines = (spine or {}).get(sid)
+        if lines is not None:
+            n, m = len(lines), len(shots)
+            base, extra, idx = n // m, n % m, 0
+            for j, sh in enumerate(shots):
+                take = base + (1 if j < extra else 0)
+                sh["dialogue"] = list(lines[idx:idx + take])
+                sh["silence"] = not sh["dialogue"]
+                idx += take
+            continue
+        # No spine for this scene: keep the checkpoint's own distribution.
+        ck = sc_dir / f"{sid}_shots.json"
+        ck_map: dict[str, Any] = {}
+        if ck.exists():
+            try:
+                data = json.loads(ck.read_text(encoding="utf-8"))
+                ck_map = {sh.get("id"): sh.get("dialogue")
+                          for sh in (data.get("shots") or []) if sh.get("id")}
+            except Exception:
+                ck_map = {}
+        if ck_map and all(sh.get("id") in ck_map for sh in shots):
+            for sh in shots:
+                dlg = ck_map.get(sh.get("id")) or []
+                sh["dialogue"] = dlg
+                sh["silence"] = not dlg
+            continue
+
+
 def _finalize_on_camera(draft: list[dict[str, Any]]) -> None:
     """Set on_camera from actual on-screen presence (after the references pass).
 
@@ -1320,6 +1497,18 @@ def _finalize_on_camera(draft: list[dict[str, Any]]) -> None:
                 d["on_camera"] = False
             elif d.get("on_camera") is None:
                 d["on_camera"] = True
+
+
+def _finalize_on_camera_script(script: dict[str, Any]) -> None:
+    """Apply :func:`_finalize_on_camera` to every scene of an assembled script.
+
+    Run on the FINAL script (after review/rewrite/restore) so ``on_camera`` always
+    reflects the shot's declared on-screen cast (``references.characters``). A
+    speaker who is not on screen becomes OFF-SCREEN (voiceover): they keep a VOICE
+    reference but get no picture, so H3 voices them without rendering them.
+    """
+    for sc in script.get("scenes", []):
+        _finalize_on_camera(sc.get("shots") or [])
 
 
 def _apply_pass(draft: list[dict[str, Any]], out: dict[str, Any],
@@ -1475,6 +1664,22 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
     return scene
 
 
+def attach_review_verdict(script: dict[str, Any], reviews: dict[str, dict[str, Any]],
+                          passed: bool, round_no: int) -> dict[str, Any]:
+    """Attach the writers'-room verdict to a script (in place) and return it.
+
+    Each reviewer contributes its grade and free-form review (no structured notes).
+    """
+    script["_review"] = {
+        "passed": passed,
+        "rounds": round_no,
+        "reviews": {k: {"grade": v.get("grade"), "pass": v.get("pass"),
+                        "review": v.get("review", "")}
+                    for k, v in reviews.items()},
+    }
+    return script
+
+
 def _writer_review(show: Show, episode: int, script: dict[str, Any],
                    llm=None, cfg=None, max_revisions: int | None = None) -> dict[str, Any]:
     """Writers'-room review + revise loop for an assembled script.
@@ -1518,7 +1723,9 @@ def _writer_review(show: Show, episode: int, script: dict[str, Any],
         revised = promptlog.logged_chat_json(
             llm, show, episode, f"script-revise-r{round_no}",
             [{"role": "system", "content": system},
-             {"role": "user", "content": prompts.revision_prompt(script, reviews)}],
+             {"role": "user", "content": prompts.revision_prompt(
+                 script, review_notes_text(reviews),
+                 outline=read_episode_plan(show, episode))}],
             model=model, role="showrunner", temperature=0.6, max_tokens=65536,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: writers' room revision ({n} tokens…)",
@@ -1539,30 +1746,9 @@ def _writer_review(show: Show, episode: int, script: dict[str, Any],
     # verdict that only lives in memory is invisible: the gate silently never fired
     # and slop/failed scripts shipped anyway. Write the verdict back to the latest
     # revision so the reject/regenerate path can actually see it.
-    # Store ALL notes (HIGH first) with reviewer attribution — truncating to 3 per
-    # reviewer hid the blocking HIGHs from the dashboard banner (learn loop needs
-    # the full set; see studio/learn.py).
-    def _note_sort_key(n: dict[str, Any]) -> tuple[int, str]:
-        rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-        return (rank.get(str(n.get("severity", "")).upper(), 3),
-                str(n.get("reviewer", "")))
-    flat: list[dict[str, Any]] = []
-    for reviewer, r in reviews.items():
-        for n in (r.get("notes") or []):
-            if isinstance(n, dict):
-                entry = dict(n)
-                entry.setdefault("reviewer", reviewer)
-                flat.append(entry)
-            else:
-                flat.append({"reviewer": reviewer, "note": str(n)})
-    flat.sort(key=_note_sort_key)
-    script["_review"] = {"passed": passed, "rounds": round_no, "notes": flat,
-                         "by_reviewer": {k: {"pass": v.get("pass"),
-                                             "score": v.get("score", v.get("maturity_score")),
-                                             "count": len(v.get("notes") or [])}
-                                         for k, v in reviews.items()}}
-    last_path.write_text(json.dumps(script, indent=2, ensure_ascii=False),
-                         encoding="utf-8")
+    attach_review_verdict(script, reviews, passed, round_no)
+    from . import epstate
+    epstate.save_script(last_path, script)
     return script
 
 
@@ -1570,13 +1756,14 @@ _MAX_SCRIPT_REGENS = 2  # auto-regeneration attempts before holding for human
 _MAX_DETAILS_REGENS = 2  # reps of scene details rewrites before accepting them as-is
 
 
-def address_review_feedback(show: Show, episode: int, script: dict[str, Any],
-                            reviews: dict, llm=None, cfg=None) -> dict[str, Any]:
-    """Targeted fix: edit only the shots flagged by reviewers, one scene at a time.
+def revise_script(show: Show, episode: int, script: dict[str, Any],
+                  reviews: dict, llm=None, cfg=None) -> dict[str, Any]:
+    """One full revision of the script from the failing reviewers' free-form notes.
 
-    Instead of regenerating the entire script, groups reviewer notes by scene
-    and makes ONE LLM call per affected scene to surgically edit the flagged
-    shots. Returns the updated script (and writes it to disk).
+    Gives the editor the OUTLINE (story context), the CURRENT SCRIPT (what it edits),
+    and the notes, then writes the result as the next script revision. Returns the
+    revised (still UNREVIEWED) script. ``reviews`` may be a raw reviewer map or the
+    persisted ``_review`` verdict (whose ``reviews`` key is unwrapped).
     """
     from .clients.lmstudio import LMStudioClient
     cfg = cfg or get_config()
@@ -1588,52 +1775,33 @@ def address_review_feedback(show: Show, episode: int, script: dict[str, Any],
         show.style_profile(cfg), show.read_bible().get("content_policy", "mature"),
         show.style_profile(cfg).get("baseline", ""))
     runs = show.dir / "runs" / f"EP{episode:02d}"
-    notes_dir = runs / "reviews"
-
-    # Group notes by scene id.
-    scene_notes: dict[str, list[dict[str, Any]]] = {}
-    for reviewer, data in reviews.items():
-        for note in (data.get("notes") or []):
-            if not isinstance(note, dict):
-                continue
-            sc = note.get("scene", "")
-            if sc:
-                scene_notes.setdefault(sc, []).append(note)
-
-    if not scene_notes:
+    if isinstance(reviews, dict) and isinstance(reviews.get("reviews"), dict):
+        reviews = reviews["reviews"]
+    notes_text = review_notes_text(reviews)
+    if not notes_text:
         return script
-
-    # Edit each affected scene with one LLM call.
-    scenes_by_id = {s.get("id"): s for s in script.get("scenes", []) if isinstance(s, dict)}
-    for sid, notes in scene_notes.items():
-        scene = scenes_by_id.get(sid)
-        if not scene or not scene.get("shots"):
-            continue
-        ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: fixing {sid} "
-                                 f"({len(notes)} notes)…", "ts": time.time()}
-        out = promptlog.logged_chat_json(
-            llm, show, episode, f"script-fix-{sid}",
-            [{"role": "system", "content": system},
-             {"role": "user", "content": prompts.address_feedback_prompt(
-                 scene, notes, cast_names)}],
-            model=model, role="showrunner", temperature=0.5, max_tokens=32768,
-            on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
-                "detail": f"Episode {episode}: fixing {sid} ({n} tokens…)",
-                "output": t[-500:], "ts": time.time()}}))
-        new_shots = (out or {}).get("shots") or []
-        if new_shots:
-            scene["shots"] = new_shots
-
-    # Rebuild and normalize the script.
-    script["scenes"] = [scenes_by_id[s.get("id")] for s in script.get("scenes", [])
-                        if isinstance(s, dict) and s.get("id") in scenes_by_id]
-    script = _normalize(script, cast_names)
-
-    # Write the revised script as a new round.
+    ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: revising script from review notes…",
+                              "ts": time.time()}
+    out = promptlog.logged_chat_json(
+        llm, show, episode, "script-revise-from-review",
+        [{"role": "system", "content": system},
+         {"role": "user", "content": prompts.revision_prompt(
+             script, notes_text, outline=read_episode_plan(show, episode))}],
+        model=model, role="showrunner", temperature=0.6, max_tokens=65536,
+        on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+            "detail": f"Episode {episode}: revising script ({n} tokens…)",
+            "output": t[-500:], "ts": time.time()}}))
+    if isinstance(out, dict) and isinstance(out.get("script"), dict):
+        out = out["script"]
+    if not isinstance(out, dict) or not out.get("scenes"):
+        return script
+    script = _normalize(out, cast_names)
     rounds = (script.get("_review") or {}).get("rounds", 0)
-    script_path = runs / f"script.r{rounds + 1}.json"
-    script_path.write_text(json.dumps(script, indent=2, ensure_ascii=False), encoding="utf-8")
-
+    # The revision is UNREVIEWED — drop the prior verdict so a stale fail cannot
+    # survive onto the fixed script (it must be re-reviewed).
+    script.pop("_review", None)
+    (runs / f"script.r{rounds + 1}.json").write_text(
+        json.dumps(script, indent=2, ensure_ascii=False), encoding="utf-8")
     return script
 
 
@@ -1830,17 +1998,23 @@ def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=300)
     plan = read_episode_plan(show, episode)
-    # Single script path (prose-first): the whole episode is written as free
-    # prose, reviewed as story, and the shot blocker cuts shots from the
-    # reviewed prose by need. There is no legacy branch — one way to build a
-    # script. Raises when prose yields nothing usable (the reconciler cools
-    # down and retries; the failure is visible, never silently downgraded).
-    from .prose import prose_assembly_scenes
-    scenes = prose_assembly_scenes(show, episode, llm=llm, cfg=cfg, notes=notes)
-    if not scenes:
+    # Scene-details-first: the writers' room already wrote each scene's narrative
+    # AND its approved dialogue (dialogue_beats). Build the plan scenes from the
+    # scene details and write the dialogue spine from them — there is NO separate
+    # prose pass and NO second dialogue writer that could rewrite the approved lines.
+    # Raises when there are no scene details (the reconciler cools down and retries).
+    from .prose import write_prose_dialogue_spine
+    details = (read_scene_details(show, episode) or {}).get("scenes") or []
+    if not details:
         raise RuntimeError(
-            f"episode {episode}: prose assembly produced no scenes — "
-            "not writing a script from an empty story")
+            f"episode {episode}: no scene details — approve the scenes first")
+    scenes = [{"id": sd.get("id", f"s{i:02d}"),
+               "location": sd.get("location", ""),
+               "summary": sd.get("summary", ""),
+               "narrative": sd.get("narrative", ""),
+               "characters": sd.get("characters", [])}
+              for i, sd in enumerate(details, start=1)]
+    write_prose_dialogue_spine(show, episode, scenes)
     ep_summary = plan.get("plot") or plan.get("summary", "")
     episodes: list[dict[str, Any]] = []
     cast_names = [c.get("name") for c in (show.read_character(cid) for cid in show.list_characters())
@@ -1878,16 +2052,24 @@ def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
                                      dialogue_spine=spine)
         for pf in sc_dir.glob(f"{sid}.p*.json"):
             pf.unlink(missing_ok=True)
-        ck.write_text(json.dumps(scene, indent=2, ensure_ascii=False), encoding="utf-8")
+        epstate.write_json(ck, scene)
         episodes.append(scene)
     script = {"episode": episode, "summary": ep_summary,
               "cast": plan.get("characters") or plan.get("cast") or cast_names,
               "scenes": episodes}
     script = _normalize(script, cast_names)
-    (runs / "script.r1.json").write_text(json.dumps(script, indent=2, ensure_ascii=False),
-                                         encoding="utf-8")
+    epstate.save_script(runs / "script.r1.json", script)
     script = _writer_review(show, episode, script, llm=llm, cfg=cfg,
                             max_revisions=max_revisions)
+    # The approved dialogue is IMMUTABLE: the review/revise pass may touch action
+    # and prose, but never the lines. Restore them from the shot checkpoints (the
+    # spine distribution) and re-save the final revision.
+    _restore_dialogue(script, sc_dir, spine=dialogue_scenes)
+    _finalize_on_camera_script(script)
+    _scripts = sorted(runs.glob("script.r*.json"),
+                      key=lambda p: int(p.stem.rsplit("r", 1)[-1]))
+    if _scripts:
+        epstate.save_script(_scripts[-1], script)
     # Distill this episode's durable facts into continuity (idempotent). Best
     # effort: a failure here must never break script assembly.
     try:
@@ -1943,7 +2125,10 @@ def reconcile_costume_labels(show: Show, episode: int, script: dict[str, Any],
                 if len(entry["example_shots"]) < 2 and ctx:
                     entry["example_shots"].append(ctx[:220])
 
-    # Known canonical wardrobe per character = existing refs.json variants.
+    # Known canonical wardrobe per character = existing refs.json variants, plus
+    # the "nude" appearance state (a selectable state, not a costume) — so the
+    # reconciler reuses it verbatim rather than inventing one.
+    from .refs import NUDE_LABEL
     known: dict[str, list[str]] = {}
     for cid in show.list_characters():
         c = show.read_character(cid)
@@ -1958,6 +2143,8 @@ def reconcile_costume_labels(show: Show, episode: int, script: dict[str, Any],
                             .get("variants") or {}).keys() if k != "base"]
             except Exception:
                 variants = []
+        if NUDE_LABEL not in variants:
+            variants.append(NUDE_LABEL)
         known[name] = variants
 
     mapping: dict[tuple[str, str], tuple[str, str | None]] = {}
@@ -2039,6 +2226,35 @@ def reconcile_costume_labels(show: Show, episode: int, script: dict[str, Any],
                     new_costs[name] = label
             if refs.get("costumes"):
                 refs["costumes"] = new_costs
+
+    # Scene wardrobe propagation: the shot writer labels only a FEW shots, so most
+    # shots default to BASE even though the whole scene shares one outfit. Fill each
+    # shot's costumes from the SCENE's dominant label per character, for every shot
+    # where that character is on screen and has no label of their own.
+    from collections import Counter as _Counter
+    for _sc in script.get("scenes", []):
+        _shots = _sc.get("shots", [])
+        _counts: dict[str, Any] = {}
+        for _sh in _shots:
+            for _nm, _lb in (((_sh.get("references") or {}).get("costumes") or {}) or {}).items():
+                _lb = str(_lb).strip()
+                if _lb and _lb.lower() != "base" and not is_transient_costume_label(_lb):
+                    _counts.setdefault(_nm, _Counter())[_lb] += 1
+        _dom = {nm: c.most_common(1)[0][0] for nm, c in _counts.items() if c}
+        for _sh in _shots:
+            _refs = _sh.setdefault("references", {})
+            _costs = _refs.get("costumes") or {}
+            _onscreen = list(_refs.get("characters") or [])
+            for _d in (_sh.get("dialogue") or []):
+                if isinstance(_d, dict) and _d.get("char") and _d["char"] not in _onscreen:
+                    _onscreen.append(_d["char"])
+            for _nm in _onscreen:
+                if _costs.get(_nm):
+                    continue
+                if _nm in _dom:
+                    _costs[_nm] = _dom[_nm]
+            _refs["costumes"] = _costs
+
     if not failed:
         script["_costume_reconciled"] = True
         runs = show.dir / "runs" / f"EP{episode:02d}"

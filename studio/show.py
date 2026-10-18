@@ -121,6 +121,11 @@ class Show:
         self._style_cache = (cfg, prof)
         return dict(prof)
 
+    def ref_medium(self) -> str:
+        """Per-show art medium for reference images (bible.yaml ``medium``), or ''
+        to use the house default (``prompts.REF_MEDIUM``)."""
+        return str((self.read_bible() or {}).get("medium") or "").strip()
+
     # ---- concept ----
     @property
     def concept_path(self) -> Path:

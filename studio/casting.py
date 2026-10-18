@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any
 
-from . import fsutil, prompts
+from . import fsutil, prompts, refs
 from .bootstrap import ACTIVITY
 from .config import get_config
 from .names import looks_like_character_name  # noqa: F401  (re-exported)
@@ -111,15 +111,23 @@ def _unit_key(name: str) -> str:
     return _unit_name(name).lower()
 
 
-def _revise_appearance(llm, model: str, name: str, current: str, notes: str) -> str:
+def _revise_appearance(llm, model: str, name: str, current: str, notes: str,
+                       bible: dict[str, Any] | None = None, style: str = "") -> str:
     """LLM rewrites ONLY the appearance_canonical from rejection feedback."""
+    world = (f"Series bible (world, tone, style): {json.dumps(bible, ensure_ascii=False)}\n"
+             if bible else "")
     text = llm.chat([
         {"role": "user", "content":
-         f"Revise this anime character's canonical appearance description to address "
+         f"Revise this anime entity's canonical appearance description to address "
          f"the director's feedback. Keep everything the feedback did not ask to change.\n"
-         f"Character: {name}\n"
-         f"CURRENT APPEARANCE:\n{current}\n"
+         f"Subject: {name}\n"
+         f"{world}"
+         + (f"Visual style guide: {style}\n" if style else "")
+         + f"CURRENT APPEARANCE:\n{current}\n"
          f"DIRECTOR'S FEEDBACK:\n{notes}\n"
+         "If the feedback indicates the subject is NOT what it was (e.g. it is a "
+         "group or squadron rather than one person, or a machine rather than a human), "
+         "correct the subject itself, not just its details.\n"
          + prompts.appearance_canonical_rules() + "\n"
          'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
     ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
@@ -132,97 +140,56 @@ def _revise_appearance(llm, model: str, name: str, current: str, notes: str) -> 
 
 def regenerate_character_ref(show: Show, name: str, notes: str = "",
                              cfg=None, llm=None) -> bool:
-    """Feedback-driven regeneration of a character's BASE reference image.
+    """Feedback-driven regeneration of a character's REFERENCE.
 
-    Works for bootstrap AND episode-supporting characters (enemy units, group
-    units): finds the sheet by unit name, revises the appearance from the notes
-    (LLM), re-renders the ref via Krea 2, and rewrites refs.json. Returns True
-    when a fresh ref image landed.
+    Same split as the "refs" reject: if the character has an APPROVED nude, notes
+    revise the OUTFIT and the clothed canonical (base) is re-rendered from that nude
+    (the nude is kept); otherwise there is no base yet, so the nude identity root is
+    re-rolled. Notes never silently re-roll the nude when a base exists.
     """
-    from .clients.lmstudio import LMStudioClient
-    from .comfy_workflows import generate_keyframe, load_workflow
-    from .consistency import render_until_single
-    from .remote.ops import ServiceOps
-
     cfg = cfg or get_config()
-    target = None
-    for cid in show.list_characters():
-        c = show.read_character(cid)
-        if c.get("name") and _unit_key(c.get("name")) == _unit_key(name):
-            target = (cid, c)
-            break
-    if not target:
+    cid = next((c for c in show.list_characters()
+                if _unit_key((show.read_character(c).get("name") or "")) == _unit_key(name)),
+               None)
+    if not cid:
         return False
-    cid, c = target
-    llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
-    model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
-    vmodel = cfg.get("llm", "roles", {}).get("describer") or model
-    canon = (c.get("appearance_canonical") or "").strip()
-    if notes.strip():
-        revised = _revise_appearance(llm, model, c.get("name", ""), canon, notes)
-        if revised:
-            canon = revised
-            c["appearance_canonical"] = canon
-            show.write_character(c)
-    if not canon:
-        return False
-    refs_dir = show.character_refs_dir(cid)
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    out = refs_dir / f"{cid}_ref_01.png"
-    try:
-        if out.exists():
-            out.unlink()
-    except Exception:
-        pass
-    style = ((show.read_bible() or {}).get("style_guide") or "").strip()
-    prompt = prompts.character_ref_prompt(c.get('name', ''), canon, style)
-    ops = ServiceOps(cfg)
-    wf_path = cfg.workflows_dir / "image_keyframe.json"
-    wf = load_workflow(wf_path)
-    client, stop = ops._krea2_client()
-    try:
-        def _render() -> bool:
-            generate_keyframe(client, wf, prompt, 0, str(out),
-                              aspect_ratio="3:4", style_ref=_style_ref(show))
-            return out.exists()
-
-        gate = render_until_single(_render, out, llm=llm, model=vmodel,
-                                   label=f"base ref {c.get('name', '')}")
-        if not gate["ok"]:
-            return False
-        # Preserve any existing costume variants / prompts / approvals — a base-ref
-        # regen must NOT wipe the character's other registered refs.
-        rj = refs_dir / "refs.json"
-        prior: dict[str, Any] = {}
-        if rj.exists():
-            try:
-                prior = json.loads(rj.read_text(encoding="utf-8")) or {}
-            except Exception:
-                prior = {}
-        variants = dict(prior.get("variants") or {})
-        variants["base"] = out.name
-        prior.update({"status": "real", "refs": [out.name], "variants": variants})
-        rj.write_text(json.dumps(prior, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        return False
-    finally:
-        if stop:
-            stop()
-    return out.exists()
+    c = show.read_character(cid)
+    # Notes on the character's BASE apply ONLY to the base (its outfit). Never
+    # re-roll the nude from here — that has its own Regenerate.
+    return refs.regenerate_base(show, cid, c, cfg=cfg, llm=llm, notes=notes)
 
 
-def _ask_appearance(llm, model: str, name: str, context: str) -> str:
+def _ask_appearance(llm, model: str, name: str, context: str,
+                    bible: dict[str, Any] | None = None, style: str = "",
+                    role: str = "") -> str:
     """Write a rich, image-prompt-style appearance_canonical for a supporting
-    character — the SAME discipline the main cast uses (appearance_canonical_rules),
-    not the old terse '1-3 sentences' ask, so the ref renders in one fixed look."""
+    entity — a person, or a non-human subject (a machine/mech, a creature, or a
+    group/squadron of units).
+
+    The writer is given the series bible (world, tone, style), the entity's role,
+    and how the episode depicts it, and must infer what the entity actually IS
+    BEFORE describing it — so the reference image shows the correct subject for ANY
+    show, with no human default. Same appearance discipline the main cast uses.
+    """
+    world = json.dumps(bible, ensure_ascii=False) if bible else "(no bible provided)"
     text = llm.chat([
         {"role": "user", "content":
-         f"Write the canonical appearance for the anime character '{name}'.\n"
-         f"How the episode depicts them: {context or 'a supporting character in this episode'}\n\n"
-         + prompts.appearance_canonical_rules() + "\n\n"
-         "MANDATORY: name the single outfit they wear, head to toe (garments, "
-         "colors, materials, footwear). The character is NEVER nude or "
-         "underwear-only — always fully dressed in the outfit.\n\n"
+         f"Design the canonical on-screen look of ONE visual subject for an anime "
+         f"reference image.\n"
+         f"SUBJECT NAME: {name}\n"
+         f"ROLE: {role or 'supporting entity'}\n"
+         f"HOW THE EPISODE DEPICTS IT: {context or '(not described in the script)'}\n\n"
+         "From the name, the world and the depiction above, decide what this subject "
+         "ACTUALLY is — a person, a machine/mech/vehicle, a creature, a group or "
+         "squadron of units, a faction, or a prop — and describe THAT. Do not assume a "
+         "human, and do not turn a group/squadron/faction into one person.\n\n"
+         f"Series bible (world, tone, style): {world}\n"
+         + (f"Visual style guide: {style}\n" if style else "")
+         + "\n" + prompts.appearance_canonical_rules() + "\n\n"
+         "MANDATORY: name the SINGLE canonical subject the reference image must show, "
+         "matching what the entity really is in this world. A person is described in "
+         "one outfit; a non-person is described as itself (form, materials, colors, "
+         "markings, scale).\n\n"
          'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
     ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
     try:
@@ -252,9 +219,6 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
     Returns the names of newly created characters.
     """
     from .clients.lmstudio import LMStudioClient
-    from .remote.ops import ServiceOps
-    from .comfy_workflows import generate_keyframe, load_workflow
-    from .consistency import render_until_single
 
     cfg = cfg or get_config()
     script = _latest_script(show, episode)
@@ -273,7 +237,23 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
         cast.append(threat)
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
     model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
-    vmodel = cfg.get("llm", "roles", {}).get("describer") or model
+    # Everything the appearance writer needs to identify the SUBJECT correctly for
+    # ANY show: the world/tone/style (bible), the episode's story (plan plot), and
+    # how the script depicts this entity. No show-specific assumptions.
+    bible = show.read_bible() or {}
+    style = (bible.get("style_guide") or "").strip()
+    plan_plot = (plan.get("plot") or "").strip()
+
+    def _entity_context(nm: str) -> str:
+        ctx = _character_context(script, nm)
+        if plan_plot:
+            ctx = (ctx + " " + plan_plot).strip()
+        return ctx[:1400]
+
+    def _entity_role(nm: str) -> str:
+        return ("threat of the week" if threat and nm.lower() == threat.lower()
+                else "episode supporting entity")
+
     approved = _approved_names(show)
     approved_units = {_unit_key(n) for n in approved}
     missing = [name for name in cast
@@ -283,69 +263,43 @@ def create_missing_character_refs(show: Show, episode: int, cfg=None, llm=None,
         return []
 
     created: list[str] = []
-    ops = ServiceOps(cfg)
-    wf_path = cfg.workflows_dir / "image_keyframe.json"
-    client, stop = ops._krea2_client()
-    try:
-        for name in missing:
-            # Group-count names ("Pods (x6)") are normalized to ONE unit so the
-            # sheet + ref describe a single pod and the scene decides the count.
-            unit = _unit_name(name)
-            slug = re.sub(r"[^a-z0-9-]+", "-", unit.lower()).strip("-") or "char"
-            sheet_path = show.characters_dir / f"{slug}.yaml"
-            # A sheet may exist with no ref (e.g. the threat of the week got a
-            # sheet but the ref pass skipped it because the sheet was there).
-            # Reuse its appearance_canonical and render the missing ref; only
-            # WRITE a new sheet when none exists.
-            if sheet_path.exists():
-                existing = show.read_character(slug)
-                canon = (existing.get("appearance_canonical") or "").strip()
-                if not canon:
-                    ACTIVITY[show.show_id] = {"detail": f"Ref pass: writing appearance for {name}…",
-                                              "ts": time.time()}
-                    canon = _ask_appearance(llm, model, unit, _character_context(script, name))
-                    if not canon:
-                        continue
-                    existing["appearance_canonical"] = canon
-                    show.write_character(existing)
-            else:
+    for name in missing:
+        # Group-count names ("Pods (x6)") are normalized to ONE unit so the sheet +
+        # ref describe a single pod and the scene decides the count.
+        unit = _unit_name(name)
+        slug = re.sub(r"[^a-z0-9-]+", "-", unit.lower()).strip("-") or "char"
+        sheet_path = show.characters_dir / f"{slug}.yaml"
+        # A sheet may exist with no ref. Reuse its appearance_canonical; only WRITE a
+        # new sheet when none exists.
+        if sheet_path.exists():
+            existing = show.read_character(slug)
+            canon = (existing.get("appearance_canonical") or "").strip()
+            if not canon:
                 ACTIVITY[show.show_id] = {"detail": f"Ref pass: writing appearance for {name}…",
                                           "ts": time.time()}
-                canon = _ask_appearance(llm, model, unit, _character_context(script, name))
+                canon = _ask_appearance(llm, model, unit, _entity_context(name),
+                                        bible=bible, style=style, role=_entity_role(name))
                 if not canon:
                     continue
-                show.write_character({"id": slug, "name": unit, "role": "episode supporting",
-                                      "appearance_canonical": canon})
-            refs_dir = show.character_refs_dir(slug)
-            refs_dir.mkdir(parents=True, exist_ok=True)
-            out = refs_dir / f"{slug}_ref_01.png"
-            # Use the de-quantified unit name (ONE pod, not "Pods (x6)") so a
-            # group-count suffix never asks the model for multiple figures.
-            style = ((show.read_bible() or {}).get("style_guide") or "").strip()
-            prompt = prompts.character_ref_prompt(unit, canon, style)
-            ACTIVITY[show.show_id] = {"detail": f"Ref pass: rendering ref for {name} (Krea 2)…",
+                existing["appearance_canonical"] = canon
+                show.write_character(existing)
+        else:
+            ACTIVITY[show.show_id] = {"detail": f"Ref pass: writing appearance for {name}…",
                                       "ts": time.time()}
-            try:
-                wf = load_workflow(wf_path)
-
-                def _render(name=name, out=out, prompt=prompt, wf=wf) -> bool:
-                    generate_keyframe(client, wf, prompt, 0, str(out),
-                                      aspect_ratio="3:4", style_ref=_style_ref(show))
-                    return out.exists()
-
-                gate = render_until_single(_render, out, llm=llm, model=vmodel,
-                                           label=f"base ref {name}")
-                if not gate["ok"]:
-                    raise RuntimeError("krea2 render produced no image")
-                (refs_dir / "refs.json").write_text(
-                    json.dumps({"status": "real", "refs": [out.name],
-                                "variants": {"base": out.name}}),
-                    encoding="utf-8")
+            canon = _ask_appearance(llm, model, unit, _entity_context(name),
+                                    bible=bible, style=style, role=_entity_role(name))
+            if not canon:
+                continue
+            show.write_character({"id": slug, "name": unit, "role": "episode supporting",
+                                  "appearance_canonical": canon})
+        # ONE pipeline (refs): nude identity root -> clothed canonical.
+        ACTIVITY[show.show_id] = {"detail": f"Ref pass: refs for {name} (nude → outfit)…",
+                                  "ts": time.time()}
+        try:
+            if refs.generate_refs(show, slug, show.read_character(slug), cfg=cfg, llm=llm):
                 created.append(name)
-            except Exception as exc:
-                ACTIVITY.setdefault(show.show_id, {})["detail"] = (
-                    f"Ref pass {name} failed: {exc}")
-    finally:
-        if stop:
-            stop()
+            else:
+                ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Ref pass {name} failed"
+        except Exception as exc:
+            ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Ref pass {name} failed: {exc}"
     return created

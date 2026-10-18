@@ -32,6 +32,9 @@ def _skeleton(show_id: str) -> None:
             # Per-show style references (set these in the show's bible).
             "baseline": "",
             "fanservice_baseline": "",
+            # Optional per-show art medium for reference images; empty = the
+            # house default (prompts.REF_MEDIUM).
+            "medium": "",
         },
         "arcs": [],
         "overall_plotline": None,

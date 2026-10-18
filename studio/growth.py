@@ -180,43 +180,10 @@ def _generate_ref(show: Show, char: dict[str, Any], cfg=None) -> None:
     if not krea2.get("url"):
         return
     try:
-        from .clients.lmstudio import LMStudioClient
-        from .consistency import render_until_single
-        from .remote import ServiceOps
-        name = char.get("name", "")
-        canon = (char.get("appearance_canonical") or "").strip()
-        style = ((show.read_bible() or {}).get("style_guide") or "").strip()
-        prompt = prompts.character_ref_prompt(name, canon, style)
-        rd = show.character_refs_dir(char.get("id", ""))
-        rd.mkdir(parents=True, exist_ok=True)
-        out = rd / f"{char.get('id', 'char')}_ref_01.png"
-        ops = ServiceOps(cfg)
-        seeds: list[int] = []
-
-        def _render() -> bool:
-            anchor = show.dir / "style_anchor.png"
-            use_anchor = cfg.get("comfy", "style_anchor", False)
-            res = ops.generate_image(prompt, seed=0, aspect_ratio="3:4",
-                                     out_path=str(out),
-                                     style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
-            seeds.append(int(res.get("seed", 0)))
-            return bool(res.get("ok") and out.exists())
-
-        vmodel = (cfg.get("llm", "roles", {}).get("describer")
-                  or cfg.get("llm", "model"))
-        gate = render_until_single(
-            _render, out,
-            llm=LMStudioClient(cfg.get("llm", "base_url"), timeout=240),
-            model=vmodel, label=f"base ref {name}")
-        if gate["ok"]:
-            (rd / "refs.json").write_text(json.dumps(
-                {"status": "real", "refs": [out.name],
-                 "seed": seeds[-1] if seeds else 0},
-                ensure_ascii=False), encoding="utf-8")
-        else:
-            (rd / "refs.json").write_text(
-                '{"status": "stub", "note": "Krea 2 ref generation unavailable"}',
-                encoding="utf-8")
+        from . import refs
+        cid = char.get("id", "")
+        if not refs.generate_refs(show, cid, char, cfg=cfg):
+            refs.mark_stub(show, cid, "character ref generation unavailable")
     except Exception as exc:
         log.warning("new character ref generation failed for %s: %s",
                     char.get("id"), exc)

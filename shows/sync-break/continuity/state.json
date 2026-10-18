@@ -1,26 +1,97 @@
 {
   "episode": 0,
   "world": {
-    "facts": []
+    "facts": [
+      {
+        "text": "Harrow Wing operates as an active rival wing to Vixen Flight",
+        "episode": 1
+      },
+      {
+        "text": "Vixen Flight defeats Harrow Wing in a televised duel via four-Frame link",
+        "episode": 1
+      },
+      {
+        "text": "League rulings are read live on broadcast with on-camera chip transfer",
+        "episode": 1
+      },
+      {
+        "text": "Vixen Bunk Room houses Ren Tojo under Vixen custody starting tonight",
+        "episode": 1
+      },
+      {
+        "text": "Vixen Pit serves as Vixen Flight's home pit under broadcast shutdown threat",
+        "episode": 1
+      }
+    ]
   },
   "characters": {
     "Ren Tojo": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Ren Tojo's contract chip reads Vixen Flight",
+          "episode": 1
+        },
+        {
+          "text": "Ren Tojo bunks in Mira Kaine's bunk starting tonight",
+          "episode": 1
+        },
+        {
+          "text": "Ren Tojo suffers nosebleeds and overheating when holding high sync",
+          "episode": 1
+        },
+        {
+          "text": "Ren Tojo serves as sole co-pilot for all four Vixen Frames",
+          "episode": 1
+        }
+      ]
     },
     "Mira Kaine": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Mira Kaine holds Ren Tojo's contract chip and schedule as flight lead",
+          "episode": 1
+        }
+      ]
     },
     "Sable Voss": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Sable Voss holds claim to Ren Tojo's first towel-off and morning shift",
+          "episode": 1
+        }
+      ]
     },
     "Juno Hale": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Juno Hale claims the middle bunk in the Vixen Bunk Room",
+          "episode": 1
+        }
+      ]
     },
     "Tessa Rook": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Tessa Rook monitors Ren Tojo's vitals after sync burn",
+          "episode": 1
+        },
+        {
+          "text": "Tessa Rook anchors the four-Frame sync chain through her cockpit",
+          "episode": 1
+        }
+      ]
     },
     "Harrow Wing": {
-      "notes": []
+      "notes": [
+        {
+          "text": "Harrow Wing loses the televised duel to Vixen Flight",
+          "episode": 1
+        },
+        {
+          "text": "Harrow Wing vows to file a buyout and take Ren Tojo by duel",
+          "episode": 1
+        }
+      ]
     },
     "League Official": {
       "notes": []
@@ -105,8 +176,58 @@
       "kind": "character"
     }
   ],
-  "unresolved_threads": [],
-  "continuity_rules": [],
+  "unresolved_threads": [
+    {
+      "text": "Harrow Wing plans to file a buyout and take Ren Tojo by duel",
+      "episode": 1
+    },
+    {
+      "text": "Harrow Wing baits Ren Tojo into restarting their Frame to file a claim",
+      "episode": 1
+    },
+    {
+      "text": "Vixen Flight lacks a stable bunk and calibration schedule for sharing Ren Tojo",
+      "episode": 1
+    },
+    {
+      "text": "Ren Tojo risks nerve burnout from repeated 90% sync spikes",
+      "episode": 1
+    },
+    {
+      "text": "Ren Tojo still lacks a properly fitting plug suit",
+      "episode": 1
+    }
+  ],
+  "continuity_rules": [
+    {
+      "text": "One contract chip covers every Frame restarted in the same duel",
+      "episode": 1
+    },
+    {
+      "text": "Restarting a rival Frame lets that rival owner file a claim in the morning",
+      "episode": 1
+    },
+    {
+      "text": "Carrying a co-pilot for short hops and palm-to-hull contact is legal",
+      "episode": 1
+    },
+    {
+      "text": "Plug suits must stay sealed past the waist or the League fines delays",
+      "episode": 1
+    },
+    {
+      "text": "Holding sync past 80% causes nosebleeds and overheating requiring cooldown",
+      "episode": 1
+    },
+    {
+      "text": "A duel stays live while the protesting wing can still move and shoot",
+      "episode": 1
+    },
+    {
+      "text": "Four Frames can share one co-pilot's sync when linked through an anchor cockpit",
+      "episode": 1
+    }
+  ],
   "overall_plotline": {
     "id": "shared-property-contract",
     "name": "Shared Property Contract",

@@ -182,6 +182,15 @@ def generate_episode_prose(show: Show, episode: int, llm=None, cfg=None,
     characters = [show.read_character(cid) for cid in show.list_characters()]
     plan = read_episode_plan(show, episode)
     skeleton = plan.get("scenes", []) if isinstance(plan, dict) else []
+    # The writers' room already wrote the approved per-scene treatments (narrative +
+    # dialogue_beats) at the scene-details gate. Feed them in so the screenplay USES
+    # that dialogue instead of reinventing it — the fragment dialogue came from a
+    # prose draft that only saw the one-line plan skeleton.
+    try:
+        from .planner import read_scene_details
+        scene_details = (read_scene_details(show, episode) or {}).get("scenes") or []
+    except Exception:
+        scene_details = []
     ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: writing whole-episode prose…",
                               "ts": time.time()}
     text = promptlog.logged_chat(
@@ -191,7 +200,7 @@ def generate_episode_prose(show: Show, episode: int, llm=None, cfg=None,
             show.style_profile(cfg).get("baseline", ""))},
          {"role": "user", "content": prompts.episode_prose_prompt(
              bible, skeleton, characters, continuity, _target(show),
-             read_director_notes(show), notes)}],
+             read_director_notes(show), notes, scene_details)}],
         model=model, role="script", temperature=0.8, max_tokens=16384,
         on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
             "detail": f"Episode {episode}: episode prose ({n} tokens…)",
@@ -239,6 +248,7 @@ def revise_episode_prose(prose: str, reviews: dict[str, Any],
                          llm=None, cfg=None, show=None, episode: int = 0) -> str:
     """Stage P2b: prose-to-prose revision (chat, no JSON either side)."""
     from .clients.lmstudio import LMStudioClient
+    from .review import review_notes_text
 
     cfg = cfg or get_config()
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
@@ -248,8 +258,10 @@ def revise_episode_prose(prose: str, reviews: dict[str, Any],
     text = promptlog.logged_chat(
         llm, show, episode, "prose-revise",
         [{"role": "system", "content": prompts.showrunner_system(
-            show.style_profile(cfg), "mature", show.style_profile(cfg).get("baseline", ""))},
-         {"role": "user", "content": prompts.prose_revision_prompt(prose, reviews)}],
+            show.style_profile(cfg), (show.read_bible() or {}).get("content_policy", "mature"),
+            show.style_profile(cfg).get("baseline", ""))},
+         {"role": "user", "content": prompts.prose_revision_prompt(
+             prose, review_notes_text(reviews))}],
         model=model, role="script", temperature=0.7, max_tokens=16384)
     return (text or "").strip() or prose
 
@@ -302,6 +314,7 @@ def breakdown_prose_to_shots(show: Show, episode: int, llm=None, cfg=None,
     ep_summary = (plan or {}).get("plot") or (plan or {}).get("summary", "")
     sc_dir = _scenes_dir(show, episode)
     sc_dir.mkdir(parents=True, exist_ok=True)
+    approved_spine = _approved_spine(show, episode)
     episodes: list[dict[str, Any]] = []
     for ps in scenes:
         sid = ps.get("id", "s01")
@@ -318,7 +331,8 @@ def breakdown_prose_to_shots(show: Show, episode: int, llm=None, cfg=None,
                       "summary": (ps.get("beats") or [""])[0][:300],
                       "narrative": ps.get("prose", ""),
                       "characters": ps.get("characters", [])}
-        spine = ps.get("dialogue") or None
+        spine = (approved_spine.get(sid) if approved_spine is not None
+                 else (ps.get("dialogue") or None))
         scene = generate_scene_shots(show, episode, plan_scene, llm=llm, cfg=cfg,
                                      episode_summary=ep_summary, notes=notes,
                                      dialogue_spine=spine)
@@ -327,30 +341,67 @@ def breakdown_prose_to_shots(show: Show, episode: int, llm=None, cfg=None,
     return {"episode": episode, "summary": ep_summary, "scenes": episodes}
 
 
+def _approved_spine(show: Show, episode: int) -> dict[str, list[dict[str, Any]]] | None:
+    """The APPROVED per-scene dialogue (scene_details.dialogue_beats), cast-resolved.
+
+    This is the source of truth for dialogue: the prose stage only supplies
+    narrative/action, so the approved lines cannot be rewritten by it. Returns None
+    when there are no scene details (caller falls back to the prose's dialogue).
+    """
+    from .planner import _cast_lookup, read_scene_details
+    sd = (read_scene_details(show, episode) or {}).get("scenes") or []
+    if not sd:
+        return None
+    chars = [show.read_character(cid) for cid in show.list_characters()]
+    lut = _cast_lookup([c.get("name") for c in chars if c.get("name")])
+    spine: dict[str, list[dict[str, Any]]] = {}
+    for sc in sd:
+        sid = sc.get("id", "s01")
+        lines: list[dict[str, Any]] = []
+        for b in (sc.get("dialogue_beats") or []):
+            if isinstance(b, dict) and b.get("line"):
+                lines.append({
+                    "char": lut.get(str(b.get("char", "")).lower(), b.get("char", "")),
+                    "line": b["line"],
+                    "on_camera": b.get("on_camera", True),
+                })
+        spine[sid] = lines
+    return spine
+
+
 def write_prose_dialogue_spine(show: Show, episode: int,
                                scenes: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Persist the prose's dialogue as dialogue.json + dialogue.txt.
+    """Persist the dialogue spine as dialogue.json + dialogue.txt.
 
-    dialogue.json (cast-resolved, verbatim) is the spine the shot blocker
-    distributes; dialogue.txt is the human-readable script the dashboard shows.
+    The lines come from the APPROVED scene details (``dialogue_beats``) — NOT the
+    prose — so the screenplay/prose stage cannot rewrite them. dialogue.json is the
+    cast-resolved spine the shot blocker distributes; dialogue.txt is the
+    human-readable script the dashboard shows.
     """
     from .planner import _cast_lookup, _dialogue_path, DIALOGUE_TXT
 
     characters = [show.read_character(cid) for cid in show.list_characters()]
     lut = _cast_lookup([c.get("name") for c in characters if c.get("name")])
+    approved = _approved_spine(show, episode)
     spine: dict[str, list[dict[str, Any]]] = {}
     txt_lines: list[str] = []
     for sc in scenes:
-        lines: list[dict[str, Any]] = []
-        for d in sc.get("dialogue") or []:
-            entry = dict(d)
-            entry["char"] = lut.get(str(d.get("char", "")).lower(),
-                                    d.get("char", ""))
-            lines.append(entry)
+        sid = sc.get("id", "s01")
+        source = approved.get(sid) if approved is not None else None
+        if source is None:
+            # No approved scene details for this scene: fall back to the prose's own
+            # dialogue (still cast-resolved).
+            source = []
+            for d in sc.get("dialogue") or []:
+                entry = dict(d)
+                entry["char"] = lut.get(str(d.get("char", "")).lower(),
+                                        d.get("char", ""))
+                source.append(entry)
+        lines = source
         if lines or sc.get("silent"):
-            spine[sc.get("id", "s01")] = lines
+            spine[sid] = lines
         if sc.get("id"):
-            txt_lines.append(f"=== {sc['id']} ===")
+            txt_lines.append(f"=== {sid} ===")
             if sc.get("silent") and not lines:
                 txt_lines.append("(silent)")
             for entry in lines:
@@ -359,8 +410,8 @@ def write_prose_dialogue_spine(show: Show, episode: int,
             txt_lines.append("")
     p = _dialogue_path(show, episode)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"episode": episode, "scenes": spine}, indent=2,
-                            ensure_ascii=False), encoding="utf-8")
+    from . import epstate
+    epstate.write_json(p, {"episode": episode, "scenes": spine})
     (p.parent / DIALOGUE_TXT).write_text("\n".join(txt_lines).strip() + "\n",
                                          encoding="utf-8")
     return spine
@@ -409,8 +460,7 @@ def prose_assembly_scenes(show: Show, episode: int, llm=None, cfg=None,
         ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: revising prose "
                                   "from director feedback…", "ts": time.time()}
         prose = revise_episode_prose(existing, {"director": {
-            "pass": False,
-            "notes": [{"severity": "HIGH", "note": notes}]}}, llm=llm, cfg=cfg,
+            "pass": False, "review": notes}}, llm=llm, cfg=cfg,
             show=show, episode=episode)
         _prose_path(show, episode).write_text(prose, encoding="utf-8")
         _prose_index_path(show, episode).write_text(

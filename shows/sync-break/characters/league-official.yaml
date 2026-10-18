@@ -1,9 +1,12 @@
 id: league-official
 name: League Official
 role: episode supporting
-appearance_canonical: A 55-year-old man with stocky medium build, 5 foot 10 inches
-  tall, light tan skin, short neat side-parted dark gray hair, brown almond-shaped
-  eyes, clean-shaven face. He wears a navy blue polyester blazer with gold trim and
-  a gold circular emblem pin on the left chest, white cotton button-up dress shirt,
-  solid red polyester necktie, charcoal gray wool dress trousers, black leather belt
-  with silver buckle, black leather oxford dress shoes.
+appearance_canonical: League Official is a 44-year-old stocky man, 182cm tall, medium-tan
+  skin, short black buzz-cut hair with gray temples, narrow brown eyes, thick black
+  mustache, League barcode tattoo on left jaw. He wears a charcoal-gray wool double-breasted
+  League uniform coat with high collar, neon-yellow piping, silver buttons, and white
+  LEAGUE TERMS shoulder patch, white cotton button shirt with black tie, charcoal-gray
+  wool trousers with neon-yellow side stripe, black leather belt with silver stamp-holster,
+  white cotton gloves, black polished leather boots, and black peaked cap with glossy
+  visor and yellow League crest.
+is_person: true
