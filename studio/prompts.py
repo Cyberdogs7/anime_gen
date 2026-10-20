@@ -510,6 +510,35 @@ def character_prompt(bible: dict[str, Any], existing: list[dict[str, Any]], name
 # Scenes (initial registry)
 # ---------------------------------------------------------------------------
 
+def new_locations_prompt(bible: dict[str, Any],
+                         locations: list[dict[str, Any]]) -> str:
+    """Describe NEW recurring locations the outline introduced, for the registry.
+
+    The outline writer names a specific spot the series has not seen before; this
+    turns those into proper registry entries (canonical description + a Krea 2
+    setting fragment) so the place gets a reference image and stays consistent
+    every time it recurs.
+    """
+    schema = {"locations": [{
+        "location": "the location name, verbatim from the input",
+        "description": "one sentence: the canonical description of this place",
+        "setting_prompt": "a Krea 2 background prompt fragment: an EMPTY unpopulated "
+                          "establishing shot of this place, background only, no people",
+    }]}
+    return (
+        "The episode outline introduces recurring ALL-NEW locations. For EACH one below, "
+        "write a canonical registry entry: a one-sentence description and a Krea 2 "
+        "background setting prompt (empty establishing shot, background only, no people, "
+        "matching the show's art style). Keep each `location` name verbatim.\n\n"
+        f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
+        f"NEW LOCATIONS (each with its scene summary and beats for context):\n"
+        f"{json.dumps(locations, indent=2, ensure_ascii=False)}\n\n"
+        "Return ONLY valid JSON matching this schema:\n"
+        f"{json.dumps(schema, indent=2)}\n"
+        "No markdown fences, no commentary."
+    )
+
+
 def scenes_prompt(bible: dict[str, Any], feedback: str = "",
                   current_draft: dict[str, Any] | None = None) -> str:
     schema = {
@@ -1363,13 +1392,44 @@ def costume_ref_prompt(name: str, label: str, canon: str,
     )
 
 
+def _scene_registry_block(registry: list[dict[str, Any]] | None) -> str:
+    """Scene-registry context for the outline prompts (canonical location ids).
+
+    Every scene must carry a ``location_id`` drawn from this list so its set
+    reference image is reused instead of re-invented; the free-text ``location``
+    describes the specific spot within that registered place.
+    """
+    if not registry:
+        return ""
+    lines = []
+    for r in registry:
+        rid = str(r.get("id") or "").strip()
+        if not rid:
+            continue
+        name = str(r.get("name") or "").strip()
+        desc = str(r.get("description") or "").strip()[:200]
+        lines.append(f"  - {rid}" + (f" ({name})" if name else "") + (f": {desc}" if desc else ""))
+    if not lines:
+        return ""
+    return (
+        "\nSCENE REGISTRY (the series' recurring places). For each scene set "
+        "`location_id` to the id of the registry place the scene is IN when one fits. "
+        "If the scene takes place in a NEW specific set that is not listed (a cockpit "
+        "interior, a monitor wall, an apron...), leave `location_id` as an EMPTY "
+        "STRING and give `location` that set's name plus a `location_setting` Krea 2 "
+        "fragment for it \u2014 it will be registered as its own place. Do NOT fold a "
+        "specific set into a broader place that is not where the shot physically is:\n"
+        + "\n".join(lines) + "\n")
+
+
 def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[str, Any],
                         names: list[str], target: int, current_plan: dict[str, Any] | None = None,
                         feedback: str = "", director_constraints: list[str] | None = None,
                         state: dict[str, Any] | None = None,
                         fixed_episode_type: str = "",
                         cast_brief: str = "",
-                        reward: bool = False) -> str:
+                        reward: bool = False,
+                        scene_registry: list[dict[str, Any]] | None = None) -> str:
     """Stage 1 — REVISION setup: rewrite a rejected outline from the director's feedback.
 
     Original creation uses the show-specific story-engine template (stored per show).
@@ -1395,7 +1455,9 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
                     "important — not scenery, not environmental details. Omit if none."],
         "scenes": [{
             "id": "s01",
-            "location": "location name",
+            "location_id": "a SCENE REGISTRY id when the scene is in that place, else \"\"",
+            "location": "the specific set's name (free text)",
+            "location_setting": "only when location_id is empty: a Krea 2 background fragment for this NEW set (empty establishing shot, background only)",
             "time_of_day": "str",
             "summary": "one sentence: what happens in this scene",
             "characters": ["EXACT character names present"],
@@ -1419,7 +1481,8 @@ def episode_plan_prompt(bible: dict[str, Any], synopsis: str, continuity: dict[s
            if fixed_episode_type else "Keep the episode_type consistent with the content.\n")
         + "Return the FULL revised outline JSON (same schema).\n"
         + mature_service_clause(bible, reward)
-        + "\n\n"
+        + _scene_registry_block(scene_registry)
+        + "\n"
         f"Series bible: {json.dumps(bible)}\n"
         f"Cast: {names}\n{cast_brief}"
         f"Target runtime ~{target}s (~{target // 60} minutes).\n\n"
@@ -1498,7 +1561,8 @@ def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
                          dev: dict[str, Any], dir_notes: list[str],
                          target: int,
                          continuity: dict[str, Any] | None = None,
-                         reward: bool = False) -> str:
+                         reward: bool = False,
+                         scene_registry: list[dict[str, Any]] | None = None) -> str:
     """Chunked plan Phase 1: the episode OUTLINE (meta + one-line scene list).
 
     One coherent brief covering the engine, the story shape, and - for mature shows -
@@ -1517,7 +1581,10 @@ def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
                     "continuity; omit scenery; omit if none"],
         "plotline_updates": {"active_plotline_progress": "how the active plotline moved",
                              "dormant_plotline_beat": "the dormant-plotline tease"},
-        "scenes": [{"id": "s01", "location": "str", "time_of_day": "str",
+        "scenes": [{"id": "s01", "location_id": "a SCENE REGISTRY id, or \"\" for a new set",
+                    "location": "the specific set's name (free text)",
+                    "location_setting": "only when location_id is \"\": a Krea 2 background fragment for this NEW set",
+                    "time_of_day": "str",
                     "summary": "ONE short sentence: what happens here",
                     "characters": ["EXACT names present"]}],
     }
@@ -1554,6 +1621,7 @@ def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
         + (f"\nCONTINUITY (established world facts and character state - HONOUR "
            f"these, never contradict them):\n"
            f"{json.dumps(continuity, ensure_ascii=False)}\n" if continuity else "")
+        + _scene_registry_block(scene_registry)
         + f"\nSeries bible: {json.dumps(bible, ensure_ascii=False)}\n"
         f"Active plotline: {(state or {}).get('active', '{}')}\n"
         f"Dormant plotline to tease: {(state or {}).get('dormant', '{}')}\n"
@@ -1566,7 +1634,8 @@ def plan_skeleton_prompt(bible: dict[str, Any], state: dict[str, Any],
 
 
 def plan_beats_prompt(bible: dict[str, Any], scenes: list[dict[str, Any]],
-                      dev: dict[str, Any], dir_notes: list[str]) -> str:
+                      dev: dict[str, Any], dir_notes: list[str],
+                      scene_registry: list[dict[str, Any]] | None = None) -> str:
     """Chunked plan Phase 2: expand a batch of outline scenes into full beats.
 
     ``scenes`` are the one-line-summary skeleton scenes for THIS batch. Returns each
@@ -1574,7 +1643,9 @@ def plan_beats_prompt(bible: dict[str, Any], scenes: list[dict[str, Any]],
     """
     schema = {"scenes": [{
         "id": "the scene id (verbatim)",
+        "location_id": "the scene's location_id (verbatim from the input; may be \"\")",
         "location": "str",
+        "location_setting": "the scene's location_setting (verbatim from the input, if present)",
         "time_of_day": "str",
         "summary": "the scene's one-sentence summary (verbatim)",
         "characters": ["EXACT character names present"],
@@ -1594,10 +1665,11 @@ def plan_beats_prompt(bible: dict[str, Any], scenes: list[dict[str, Any]],
         "clothing, looks, poses, camera, props or UI/scoreboards; those are chosen later.\n"
         "In a character episode the beats are about relationships, emotion and comedy; "
         "in a battle episode about the fight and the crew's response. Keep each scene's "
-        "id, location, time_of_day and summary exactly as given.\n\n"
+        "id, location_id, location, location_setting, time_of_day and summary exactly as given.\n\n"
         f"{dev_snip}\n"
         f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n"
-        f"SCENES TO EXPAND (this batch):\n{json.dumps(scenes, ensure_ascii=False)}\n"
+        + _scene_registry_block(scene_registry)
+        + f"SCENES TO EXPAND (this batch):\n{json.dumps(scenes, ensure_ascii=False)}\n"
         f"{notes_txt}\n"
         + mature_service_clause(bible)
         + "\nReturn ONLY valid JSON matching this schema:\n"
@@ -1728,7 +1800,8 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
                       episode_summary: str, plan_scene: dict[str, Any],
                       cast: list[dict[str, Any]], draft: list[dict[str, Any]] | None,
                       target_seconds: int, notes: str = "",
-                      dialogue_spine: list[dict[str, Any]] | None = None) -> str:
+                      dialogue_spine: list[dict[str, Any]] | None = None,
+                      continuity: str = "") -> str:
     """Build ONE focused 'job description' prompt for a single scene shot pass.
 
     Each pass is one small, single-responsibility LLM call over the same scene:
@@ -1787,6 +1860,14 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
             "\n\nDIALOGUE SPINE (this scene's spoken lines, already written and FINAL - "
             "place these EXACT lines; never reword, add, or drop one):\n"
             f"{numbered}")
+    cont_txt = ""
+    if (continuity or "").strip():
+        cont_txt = (
+            "\n\nSCENE CONTINUITY (the location's fixed physical facts - keep these "
+            "consistent across every shot of the scene: architecture, materials, fixed "
+            "props and lighting. Do NOT repeat the same framing: each shot chooses its "
+            "own camera size and angle on the action):\n"
+            + (continuity or "").strip())
     return (
         f"You are the {job} for ONE scene of an anime episode. Each shot is one H3 video "
         f"generation (4-30s).\n\n"
@@ -1798,7 +1879,7 @@ def scene_pass_prompt(pass_cfg: dict[str, Any], bible: dict[str, Any],
         "'aggressive', 'violent', 'clash', 'fierce' â€” use specific, evocative language.\n"
         f"Cast (name -> {cast_key}): {cast_snip}\n\n"
         f"SCENE TO WORK ON:\n{json.dumps(plan_scene, indent=2, ensure_ascii=False)}\n\n"
-        f"{context}{spine_txt}\n\n"
+        f"{context}{spine_txt}{cont_txt}\n\n"
         f"YOUR JOB:\n{instructions}\n"
         f"{spoken_note}\n"
         "- Keep every shot id exactly as given; never add, remove, or reorder shots.\n"

@@ -38,7 +38,9 @@ try:
         MiniMaxH3PlanV2DialogueEvent,
         IMAGE_DEFINE_VISIBLE,
         CONTENT_IDENTITY,
+        CONTENT_SCENE,
         RETENTION_AUTO,
+        RETENTION_WEAK,
         AUDIO_VOICE,
     )
     _GUIDE_AVAILABLE = True
@@ -94,19 +96,53 @@ def prepare_episode_prompts(show: Show, episode: int, cfg=None,
              for sh in sc.get("shots", [])]
     prompts: dict[str, Any] = {}
 
+    # Per SET: the continuity brief (one vision pass per distinct environment,
+    # cached). A shot may sit in its own environment (a cockpit, the apron) that
+    # differs from the scene's broader place, so briefs are keyed by environment.
+    from .scene_anchor import (anchor_path, continuity_brief, cached_continuity_brief,
+                               _env_id)
+    scenes: dict[str, dict[str, Any]] = {}
+    for sc, _sh in shots:
+        sid = sc.get("id", "")
+        if sid and sid not in scenes:
+            scenes[sid] = sc
+    if scenes:
+        # One representative shot per distinct environment in the episode.
+        reps: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for sid, sc in scenes.items():
+            for sh in sc.get("shots", []):
+                reps.setdefault(_env_id(show, sc, sh), (sc, sh))
+        missing = [(e, sc, sh) for e, (sc, sh) in reps.items()
+                   if not cached_continuity_brief(show, episode, sc, shot=sh)]
+        try:
+            if missing:
+                with get_gpu_manager(cfg).acquire(ServiceType.LLM):
+                    for e, (sc, sh) in reps.items():
+                        anc = anchor_path(show, episode, sc, shot=sh, cfg=cfg)
+                        if anc:
+                            continuity_brief(show, episode, sc, anc, shot=sh, cfg=cfg)
+        except Exception:
+            pass
+
     def _one(sc: dict[str, Any], sh: dict[str, Any]) -> None:
         from .storyboard import _shot_refs
         sid = sh.get("id", "shot")
         names, _ = _shot_refs(show, sh)
+        brief = cached_continuity_brief(show, episode, sc, shot=sh)
+        anchor = anchor_path(show, episode, sc, shot=sh, cfg=cfg)
+        scene_ref = str(anchor) if anchor else ""
         # Guide path: beat-based, shadow-sanitized, minimal silence — fallback to legacy on error
         try:
             compiler = cfg.get("pipeline", "prompt_compiler", "guide")
         except Exception:
             compiler = "guide"
         if compiler == "guide" and _GUIDE_AVAILABLE:
-            base = compile_shot_prompt_guide(show, script, sc, sh, names)
+            base = compile_shot_prompt_guide(show, script, sc, sh, names,
+                                             scene_ref=scene_ref, scene_ref_desc=brief)
         else:
-            base = compile_shot_prompt(show, script, sc, sh, names)
+            base = compile_shot_prompt(show, script, sc, sh, names,
+                                       scene_ref_pic=(len(names) + 1) if scene_ref else None,
+                                       scene_ref_desc=brief)
         prompts[sid] = {"base": base, "rewritten": base, "rewrite": rewrite}
         if rewrite:
             from .clients.lmstudio import LMStudioClient
@@ -324,7 +360,9 @@ def _line_frag(d: dict[str, Any], line: str, subj: str, sid: str,
 def compile_shot_prompt(show: Show | None, script: dict[str, Any],
                         scene: dict[str, Any], shot: dict[str, Any],
                         names: list[str],
-                        audio_refs: list[dict[str, str]] | None = None) -> str:
+                        audio_refs: list[dict[str, str]] | None = None,
+                        scene_ref_pic: int | None = None,
+                        scene_ref_desc: str = "") -> str:
     """Full-Reference Mode rewrite prompt, EXACTLY per MiniMax's
     VIDEO_PROMPT_WRITING_GUIDE_ref_en.md (six sections, in order):
 
@@ -359,13 +397,16 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
     ``audio_refs`` carries {"char": name, "token": "<Audio N>"} per voice ref.
     """
     # A reference image IS supplied for every character, and it carries the
-    # outfit (base OR variant). Describing clothing in the prompt text would
-    # contradict the image and make H3 render the base outfit, so the subject
-    # definition carries IDENTITY only (face/hair/build) - never wardrobe.
+    # outfit (base OR variant). The identity text must not re-describe the outfit
+    # in competing detail, but it DOES have to state which approved outfit the
+    # reference shows: a body-only identity line let H3 undress a character even
+    # though the dressed variant was uploaded ("wearing exactly the outfit in
+    # <Picture N>"). The clause confirms the image rather than contradicting it.
     # Characters visible ONLY through a screen/monitor/broadcast (e.g. a rival
     # laughing on the jumbotron). Their ref IS included - but the prompt must say
     # they appear INSIDE the display, or H3 renders them physically in the scene.
     via_display = set((shot.get("references") or {}).get("via_display") or [])
+    costumes = ((shot.get("references") or {}).get("costumes") or {}) or {}
 
     # --- subject_definitions ---
     subject_by_name: dict[str, str] = {}
@@ -377,12 +418,28 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
         appearance = _character_identity(show, name) if show else ""
         appearance = appearance[:1].lower() + appearance[1:] if appearance else ""
         appearance = appearance.rstrip(" .") if appearance else ""
+        cost = str(costumes.get(name) or "").strip()
+        costume_clause = ""
+        if cost and cost.lower() == "nude":
+            costume_clause = (f", unclothed exactly as shown in {pic}")
+        elif cost and cost.lower() != "base":
+            costume_clause = (f", wearing exactly the outfit shown in {pic} ({cost})")
         display_clause = (", visible ONLY on the screen/broadcast WITHIN the shot - "
                           "NOT physically present in the scene" if name in via_display
                           else "")
         subject_lines.append(f"{subj} is {name}, shown in {pic}"
                              + (f", {appearance}" if appearance else "")
-                             + display_clause + ".")
+                             + costume_clause + display_clause + ".")
+    # Scene/location grounding: a shared reference image (the shot's set) is
+    # passed for EVERY shot in the scene, so the cockpit/background/placement
+    # cannot drift shot to shot. Cited as a <Subject> bound to its <Picture>.
+    scene_subject = ""
+    if scene_ref_pic:
+        scene_subject = f"<Subject {len(subject_by_name) + 1}>"
+        desc = (scene_ref_desc or "").strip().rstrip(" .")
+        subject_lines.append(
+            f"{scene_subject} is the location, shown in <Picture {scene_ref_pic}>"
+            + (f", {desc}" if desc else "") + ".")
     for a in (audio_refs or []):
         char = a.get("char", "")
         sid = _speaker_id(char, shot)
@@ -418,9 +475,17 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
     retention_lines: list[str] = []
     for name in names:
         subj = subject_by_name.get(name, f"<Subject {len(subject_by_name) + 1}>")
+        cost = str(costumes.get(name) or "").strip()
+        outfit = (f"the approved outfit ({cost})" if cost and cost.lower() not in ("base", "nude")
+                  else ("the unclothed body" if cost.lower() == "nude" else "clothing"))
         retention_lines.append(
-            f"{subj} (appears in [Shot 1]): fully_preserved - {name}'s identity, "
-            f"clothing and appearance are retained exactly as shown.")
+            f"{subj} (appears in [Shot 1]): fully_preserved - {name}'s identity and "
+            f"{outfit} are retained exactly as shown in their reference picture.")
+    if scene_subject:
+        retention_lines.append(
+            f"{scene_subject} (appears in [Shot 1]): weak_reference - the location's "
+            f"architecture, materials, fixed props and lighting inform the shot; do NOT "
+            f"copy the reference image's camera framing or overall composition.")
     for a in (audio_refs or []):
         char = a.get("char", "")
         who = subject_by_name.get(char) or f"{char} (off-screen)"
@@ -444,6 +509,12 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
                           + (" - appearing ONLY on the screen/broadcast in the scene, "
                              "not physically present" if name in via_display else ""))
     placed_txt = ", ".join(placed)
+    if scene_subject:
+        env_txt = (f"The set is {scene_subject} (the location shown in <Picture "
+                   f"{scene_ref_pic}>); keep its architecture, materials, fixed props "
+                   f"and lighting consistent, but frame the shot on the action - do not "
+                   f"reproduce the reference image's wide composition")
+        placed_txt = f"{placed_txt}. {env_txt}" if placed_txt else env_txt
 
     parts: list[str] = []
     action = (shot.get("action") or "").strip()
@@ -532,7 +603,9 @@ def _sanitize_initial_prompt(raw: str) -> str:
 
 def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
                               scene: dict[str, Any], shot: dict[str, Any],
-                              names: list[str]) -> str:
+                              names: list[str],
+                              scene_ref: str = "",
+                              scene_ref_desc: str = "") -> str:
     """Guide path: build a Plan v2 for ONE shot and compile via plan_v2.compile_h3_plan.
 
     Uses beat-based initial_prompt (not episode labyrinth), minimal silence,
@@ -541,7 +614,9 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
     determinism as legacy). Falls back to legacy compile on any failure.
     """
     if not _GUIDE_AVAILABLE:
-        return compile_shot_prompt(show, script, scene, shot, names)
+        return compile_shot_prompt(show, script, scene, shot, names,
+                                   scene_ref_pic=(len(names) + 1) if scene_ref else None,
+                                   scene_ref_desc=scene_ref_desc)
     try:
         from plan_v2 import compile_h3_plan  # local import to avoid top-level hard dep
         from studio.compile.durations import snap_duration
@@ -559,6 +634,7 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
         setup = MiniMaxH3PlanV2ProjectSetup()
         plan, _, _ = setup.start(initial_prompt, snap_s, visual_style, soundscape, music)
         # Add image refs (dummy tensors, real files are uploaded separately in _render_shot)
+        costumes = ((shot.get("references") or {}).get("costumes") or {}) or {}
         for name in names:
             c_text = ""
             if show:
@@ -567,10 +643,30 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
                     if cc.get("name") == name:
                         c_text = (cc.get("appearance_canonical") or "")[:500]
                         break
+            cost = str(costumes.get(name) or "").strip()
+            desc = c_text or name
+            if cost and cost.lower() == "nude":
+                desc = f"{desc}, unclothed" if desc else "unclothed"
+            elif cost and cost.lower() != "base":
+                desc = (f"{desc}, wearing the approved outfit: {cost}" if desc
+                        else f"wearing the approved outfit: {cost}")
             dummy = _guide_dummy_image()
             plan, _, _, _ = MiniMaxH3PlanV2ImageReference().add_image(
                 plan, dummy, IMAGE_DEFINE_VISIBLE, f"{name} identity",
-                c_text or name, CONTENT_IDENTITY, name, RETENTION_AUTO, "", ""
+                desc, CONTENT_IDENTITY, name, RETENTION_AUTO, "", ""
+            )
+        # Scene/location grounding image — uploaded right after the character
+        # refs in _render_shot, so its <Picture N> = len(names) + 1. Cited as a
+        # reusable location Subject with WEAK retention: it grounds the set's
+        # architecture, materials, props and lighting, but must NOT impose its
+        # own camera framing on the shot (a wide location plate was otherwise
+        # forced into every shot, putting the whole arena behind the action).
+        if scene_ref:
+            dummy = _guide_dummy_image()
+            plan, _, _, _ = MiniMaxH3PlanV2ImageReference().add_image(
+                plan, dummy, IMAGE_DEFINE_VISIBLE, "location reference",
+                (scene_ref_desc or "The scene's fixed location and set"),
+                CONTENT_SCENE, "the location", RETENTION_WEAK, "", ""
             )
         # Add voice-timbre audio refs + dialogue events for spoken entries
         spoken = _spoken_entries(shot)
@@ -629,7 +725,9 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Guide compile failed for %s, falling back to legacy: %s", shot.get("id"), exc)
-        return compile_shot_prompt(show, script, scene, shot, names)
+        return compile_shot_prompt(show, script, scene, shot, names,
+                                   scene_ref_pic=(len(names) + 1) if scene_ref else None,
+                                   scene_ref_desc=scene_ref_desc)
 
 
 def _speaker_id(char: str, shot: dict[str, Any]) -> str:
@@ -663,6 +761,24 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
             image_filenames.append(client.upload_image(ref))
         except Exception:
             continue
+    # Scene grounding anchor: the SAME set image for every shot of the scene,
+    # uploaded right after the character refs so its <Picture N> is stable.
+    scene_ref_pic: int | None = None
+    scene_brief = ""
+    try:
+        from .scene_anchor import anchor_path, cached_continuity_brief
+        anchor = anchor_path(show, episode, scene, shot=shot, cfg=cfg)
+        if anchor:
+            try:
+                fname = client.upload_image(str(anchor))
+                if fname not in image_filenames:
+                    scene_ref_pic = len(image_filenames) + 1
+                    image_filenames.append(fname)
+            except Exception:
+                scene_ref_pic = None
+            scene_brief = cached_continuity_brief(show, episode, scene, shot=shot)
+    except Exception:
+        scene_ref_pic = None
     for p in _shot_ref_paths(show, episode, scene, shot):
         try:
             fname = client.upload_image(p)
@@ -694,7 +810,9 @@ def _render_shot(show: Show, episode: int, client: ComfyClient, cfg,
                                "token": f"<Audio {len(audio_refs) + 1}>"})
 
     prompt = compile_shot_prompt(show, script, scene, shot, names,
-                                 audio_refs=audio_refs or None)
+                                 audio_refs=audio_refs or None,
+                                 scene_ref_pic=scene_ref_pic,
+                                 scene_ref_desc=scene_brief)
     # Pass 1 (prepare_episode_prompts) already persisted the final prompt — the
     # rewritten brief when h3_rewrite_prompt is on, else the deterministic one.
     # Use it verbatim so this render pass makes ZERO LLM calls (the LLM is long
@@ -781,11 +899,15 @@ def render_episode(show: Show, episode: int, cfg=None, progress=None,
     done = 0
     with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
         try:
-            for sc in script.get("scenes", []):
-                for shot in sc.get("shots", []):
+            for scene_idx, sc in enumerate(script.get("scenes", []), start=1):
+                for shot_idx, shot in enumerate(sc.get("shots", []), start=1):
                     if should_stop and should_stop():
                         return done  # cooperative cancel: stop before the next shot
                     sid = shot.get("id", f"sh{done}")
+                    # Scene-stable seed: every shot in a scene draws from the same
+                    # seed family (scene*100 + shot), so compositions are not
+                    # re-rolled per shot. Retakes still jump by 1000.
+                    base_seed = scene_idx * 100 + shot_idx
                     out = show.dir / "runs" / f"EP{episode:02d}" / "video" / f"{sid}.mp4"
                     if out.exists():
                         done += 1
@@ -802,7 +924,7 @@ def render_episode(show: Show, episode: int, cfg=None, progress=None,
                         retake = int((shot_approvals(show, episode)
                                       .get(sid, {}).get("retake_count", 0) or 0))
                         _render_shot(show, episode, client, cfg, script, sc, shot,
-                                     seed=done + 1000 * retake, timeout_s=timeout_s)
+                                     seed=base_seed + 1000 * retake, timeout_s=timeout_s)
                     except Exception as exc:
                         ACTIVITY.setdefault(show.show_id, {})["detail"] = (
                             f"Render {sid} failed: {exc}")
@@ -824,7 +946,7 @@ def render_episode(show: Show, episode: int, cfg=None, progress=None,
                                 if any("silent shot has unexpected speech" in str(x) for x in issues):
                                     max_silent_retakes = int(cfg.get("qc", "stt", {}).get("max_silent_retakes", 2) or 2)
                                     for attempt in range(1, max_silent_retakes + 1):
-                                        ACTIVITY[show.show_id] = {"detail": f"QC {sid} silent hallucination {len(qc_res.get('transcript','').split())}w → retake {attempt}/{max_silent_retakes} (seed {done + 1000*attempt})…", "ts": time.time()}
+                                        ACTIVITY[show.show_id] = {"detail": f"QC {sid} silent hallucination {len(qc_res.get('transcript','').split())}w → retake {attempt}/{max_silent_retakes} (seed {base_seed + 1000*attempt})…", "ts": time.time()}
                                         # delete failed clip so _render_shot will re-render with new seed
                                         try:
                                             out.unlink(missing_ok=True)
@@ -843,7 +965,7 @@ def render_episode(show: Show, episode: int, cfg=None, progress=None,
                                             pass
                                         try:
                                             _render_shot(show, episode, client, cfg, script, sc, shot,
-                                                         seed=done + 1000 * attempt, timeout_s=timeout_s)
+                                                         seed=base_seed + 1000 * attempt, timeout_s=timeout_s)
                                         except Exception as exc2:
                                             ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Retake {sid} failed: {exc2}"
                                             continue

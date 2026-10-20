@@ -619,6 +619,28 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
             else:
                 vcheck_rollup["fail"] += 1
 
+    # Storyboard-preview visual check (same VLM, run on the 1s previews so misses
+    # are caught BEFORE the full render). Separate from the post-render vcheck.
+    from .vcheck import _vcheck_summary as _vsum_preview
+    _preview_vs = _vsum_preview(show, ep_num, "storyboard")
+    pvcheck_shots: dict[str, Any] = {}
+    pvcheck_rollup: dict[str, Any] = {"pass": 0, "fail": 0, "skip": 0, "total": 0}
+    for _sid, _entry in _preview_vs.items():
+        if not isinstance(_entry, dict):
+            continue
+        pvcheck_shots[_sid] = {
+            "verdict": _entry.get("verdict", "skip"),
+            "issues": _entry.get("issues", []),
+            "characters": _entry.get("characters", []),
+            "unknown_characters": _entry.get("unknown_characters", []),
+            "action_match": bool(_entry.get("action_match")),
+            "action_issue": _entry.get("action_issue", ""),
+            "text_defect": bool(_entry.get("text_defect")),
+        }
+        pvcheck_rollup["total"] += 1
+        _v = _entry.get("verdict", "skip")
+        pvcheck_rollup[_v if _v in pvcheck_rollup else "fail"] += 1
+
     scenes_out: list[dict[str, Any]] = []
     total_shots = 0
     dialogue_lines = 0
@@ -654,6 +676,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
             "preview": preview.name if preview.exists() else "",
             "qc": qc_shots.get(sid, {}),
             "vcheck": vcheck,
+            "vcheck_preview": pvcheck_shots.get(sid, {}),
             "approval": {"status": ap.get("status", "pending"),
                          "notes": ap.get("notes", ""),
                          "retake_count": ap.get("retake_count", 0),
@@ -824,6 +847,7 @@ def episode_payload(show_id: str, ep: str) -> dict[str, Any]:
         "storyboard": sb,
         "qc": qc_rollup,
         "vcheck": vcheck_rollup,
+        "vcheck_preview": pvcheck_rollup,
         "paused": is_episode_paused(show_id, ep_num),
         "consistency": consistency,
         "plan": plan,
@@ -1408,6 +1432,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True,
                                  "messages": [f"consistency: {len(report)} shots reviewed, "
                                               f"{len(fails)} failed"]})
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "vcheck-previews":
+                import threading as _t
+                from .vcheck import run_preview_vcheck
+                ep = int(body.get("episode", 1) or 1)
+                _show = Show(parts[2])
+
+                def _run_preview_vcheck() -> None:
+                    try:
+                        run_preview_vcheck(_show, ep)
+                    except Exception:
+                        pass
+
+                _t.Thread(target=_run_preview_vcheck, daemon=True).start()
+                self._send(200, {"ok": True, "messages": [
+                    "storyboard visual check started (background)"]})
                 return
             if len(parts) == 4 and parts[:2] == ["api", "show"] and parts[3] == "render":
                 from .render import build_render

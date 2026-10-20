@@ -37,17 +37,64 @@ def _latest_script(show: Show, episode: int) -> tuple[dict[str, Any] | None, Pat
     return json.loads(scripts[-1].read_text(encoding="utf-8")), scripts[-1]
 
 
+def _name_in_text(name: str, text: str) -> bool:
+    """True when the character is named in the shot's action/camera/beat."""
+    toks = [t for t in re.split(r"[^a-z0-9]+", (name or "").lower()) if t]
+    if not toks:
+        return False
+    if re.search(r"\b" + re.escape(" ".join(toks)) + r"\b", text):
+        return True
+    return bool(re.search(r"\b" + re.escape(toks[0]) + r"\b", text))
+
+
 def _shot_characters(shot: dict[str, Any]) -> list[str]:
+    """Names of the characters PHYSICALLY ON SCREEN in this shot.
+
+    The declared cast (``references.characters``) is trusted, but the references
+    pass sometimes lists a speaker who is only heard off-screen on a prop/monitor
+    INSERT. H3 ref-mode couples <Subject N> to <Picture N> to <Audio N>, so
+    attaching a ref RENDERS the character - which is how an insert of a pressure
+    dial ends up with Ren standing over it. So: a declared character who speaks
+    ONLY off-screen (``on_camera: false``), is not described in the action/camera,
+    and is not shown on a display is NOT on screen and gets no ref. Display-only
+    (``via_display``) names never get a physical ref.
+    """
     refs = shot.get("references", {}) or {}
-    chars = list(refs.get("characters", []) or [])
-    for dlg in shot.get("dialogue", []) or []:
-        c = dlg.get("char")
-        # An OFF-SCREEN speaker (on_camera False) must NOT become a visual
-        # subject: H3 ref-mode couples <Subject N> to <Picture N> to <Audio N>,
-        # so attaching a ref RENDERS the character on screen. An off-screen line
-        # is emitted as dialogue with NO ref (no picture, no voice-timbre ref).
-        if c and c not in chars and dlg.get("on_camera") is not False:
+    declared = list(refs.get("characters", []) or [])
+    dlg = shot.get("dialogue", []) or []
+    on_cam = {d.get("char") for d in dlg if d.get("char") and d.get("on_camera") is not False}
+    off_only = {d.get("char") for d in dlg if d.get("char") and d.get("on_camera") is False}
+    via = set(refs.get("via_display") or [])
+    text = " ".join(str(shot.get(k) or "") for k in ("action", "camera", "beat")).lower()
+    chars: list[str] = []
+    for name in declared:
+        if name in on_cam:
+            chars.append(name)
+            continue
+        if name in via:
+            continue  # visible only through a screen/broadcast, never physically
+        if name in off_only and not _name_in_text(name, text):
+            continue  # off-screen speaker on an insert - not in frame
+        chars.append(name)
+    for dlg_entry in dlg:
+        c = dlg_entry.get("char")
+        if c and c not in chars and c not in via and dlg_entry.get("on_camera") is not False:
             chars.append(c)
+    # "Declared" is not "framed": on a shot whose CAMERA names its subjects (a
+    # two-shot on Ren and Mira), drop the extras the references pass also listed
+    # for the room - background/edging characters get no ref and cannot be
+    # rendered. A camera that stages a GROUP keeps its whole declared cast; if the
+    # camera names nobody (and isn't a group shot), fall back to the action.
+    frame_text = str(shot.get("camera") or "").lower()
+    group_shot = bool(re.search(
+        r"\b(all (three|four|five|six|seven)|group|ensemble|everyone|crew|team)\b",
+        frame_text))
+    if not group_shot:
+        named = [c for c in chars if _name_in_text(c, frame_text)]
+        if not named:
+            named = [c for c in chars if _name_in_text(c, text)]
+        if named:
+            chars = [c for c in chars if c in named or c in on_cam]
     return chars
 
 
@@ -623,6 +670,7 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
     """
     from .render import (_render_client, _shot_character_ref, _voice_sample_path,
                          compile_shot_prompt, _shot_ref_paths)
+    from .scene_anchor import anchor_path, cached_continuity_brief
     from .h3 import build_h3_ref2va_workflow, run_h3_shot
     from .compile.durations import snap_duration
     from .gpu_manager import ServiceType, get_gpu_manager
@@ -674,6 +722,21 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
                             image_filenames.append(client.upload_image(ref))
                         except Exception:
                             continue
+                    # Scene grounding anchor: the SAME set image for every shot of
+                    # the scene. On the first shot it is the registry location ref
+                    # (if the plan's location resolves); from shot 2 on it is the
+                    # last frame of the scene's first preview, so later previews
+                    # inherit the established set instead of inventing one.
+                    scene_ref_pic: int | None = None
+                    try:
+                        anchor = anchor_path(show, episode, sc, shot=shot, cfg=cfg)
+                        if anchor:
+                            fname = client.upload_image(str(anchor))
+                            if fname not in image_filenames:
+                                scene_ref_pic = len(image_filenames) + 1
+                                image_filenames.append(fname)
+                    except Exception:
+                        scene_ref_pic = None
                     for p in _shot_ref_paths(show, episode, sc, shot):
                         try:
                             fname = client.upload_image(p)
@@ -702,7 +765,9 @@ def generate_shot_keyframes(show: Show, episode: int, cfg=None, progress=None,
                             audio_refs.append({"char": name,
                                                "token": f"<Audio {len(audio_refs) + 1}>"})
                     prompt = compile_shot_prompt(show, script, sc, shot, names,
-                                                 audio_refs=audio_refs or None)
+                                                 audio_refs=audio_refs or None,
+                                                 scene_ref_pic=scene_ref_pic,
+                                                 scene_ref_desc=cached_continuity_brief(show, episode, sc, shot=shot))
                     wf = build_h3_ref2va_workflow(
                         prompt, 1.0, 0, cfg=cfg,
                         ref_image_filenames=image_filenames or None,
@@ -1331,6 +1396,17 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
                     job["detail"] = f"Ref pass: new characters {', '.join(created)}"
                     job["ts"] = time.time()
                     ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                # Location refs for every environment the outline/shots introduced
+                # (new places AND per-shot sets like a cockpit or the apron). This
+                # is the correct GPU phase for them: the krea2 batch already holds
+                # the COMFYUI lock, which has evicted the local LLM — generating
+                # them any earlier (while the LLM is resident) would OOM it.
+                from .scenes import generate_missing_refs
+                scn = generate_missing_refs(show, cfg=cfg)
+                if scn:
+                    job["detail"] = f"Location refs: {scn} environments"
+                    job["ts"] = time.time()
+                    ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
                 vn = ensure_variant_refs(show, script or {}, cfg=cfg, progress=prog)
                 if vn:
                     job["detail"] = f"Costume refs: {vn} variants"
@@ -1397,6 +1473,27 @@ def build_storyboard(show: Show, episode: int, cfg=None) -> None:
             job["report"] = run_consistency_check(
                 show, episode, cfg=cfg,
                 on_progress=lambda: job.__setitem__("ts", time.time()))
+            # AUTO preview visual check: the same VLM as the post-render check,
+            # run on the freshly-generated 1s previews so a wrong character or
+            # action is flagged BEFORE the expensive full render. Never
+            # auto-rejects — it stores a verdict the dashboard surfaces. Keeps
+            # the job's ts fresh so the reconciler's stale-job watchdog can't
+            # mistake this legitimate vision pass for a hung worker.
+            try:
+                pv_dir = show.dir / "runs" / f"EP{episode:02d}" / "storyboard"
+                if (storyboard_status(show.show_id).get("state") != "stopped"
+                        and pv_dir.exists() and any(pv_dir.glob("*.mp4"))):
+                    job["detail"] = "Preview visual check (vision)…"
+                    job["ts"] = time.time()
+                    ACTIVITY[show.show_id] = {"detail": job["detail"], "ts": time.time()}
+                    from .vcheck import run_preview_vcheck
+                    run_preview_vcheck(
+                        show, episode, cfg=cfg,
+                        on_progress=lambda d, t, label: job.__setitem__(
+                            "ts", time.time()))
+            except Exception as exc:
+                log.warning("[storyboard] preview vcheck failed: %s", exc,
+                            exc_info=True)
             job["state"] = "done"
             job["detail"] = "Storyboard + consistency complete"
         except Exception as exc:

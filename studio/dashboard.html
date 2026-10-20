@@ -1371,6 +1371,19 @@ function episodeStoryboard(ep, d) {
     const label = v.verdict === "pass" ? "VL pass" : (v.verdict === "skip" ? "VL skip" : "VL FAIL" + retaking);
     return ` <span class="badge ${cls}" title="post-render visual check">${label}</span>`;
   }
+  function pvcheckBadgeFor(s) {
+    const v = s.vcheck_preview || {};
+    if (!v.verdict) return "";
+    const cls = v.verdict === "pass" ? "pass" : (v.verdict === "skip" ? "pending" : "fail");
+    const label = v.verdict === "pass" ? "VL preview pass" : (v.verdict === "skip" ? "VL preview skip" : "VL PREVIEW FAIL");
+    return ` <span class="badge ${cls}" title="storyboard preview visual check (pre-render)">${label}</span>`;
+  }
+  function pvcheckDetails(s) {
+    const v = s.vcheck_preview || {};
+    if (!v.verdict || v.verdict === "pass") return "";
+    const iss = (v.issues || []).join("; ");
+    return `<div class="qc-detail muted"><b>Preview visual check:</b> ${esc(v.verdict)}${iss ? ` · <span style="color:var(--bad)">${esc(iss)}</span>` : ""}</div>`;
+  }
   function vcheckDetails(s) {
     const v = s.vcheck || {};
     if (!v.verdict) return "";
@@ -1615,6 +1628,7 @@ function episodeStoryboard(ep, d) {
       const consBadge = consMap[s.id] ? ` ${badge(consMap[s.id])}` : "";
       const qcBadge = qcBadgeFor(s);
       const vcBadge = vcheckBadgeFor(s);
+      const pvBadge = pvcheckBadgeFor(s);
       const ap = s.approval || {};
       const renderRunning = d.render && d.render.state === "running";
       const retakeReady = !!(d.videos && d.videos[s.id]);
@@ -1625,9 +1639,10 @@ function episodeStoryboard(ep, d) {
       const apNotes = ap.notes && ap.status === "rejected"
         ? `<div class="qc-detail muted"><b>Reject notes:</b> ${esc(ap.notes)}</div>` : "";
       sh += `<div class="shot${isRej ? " rejected" : ""}">${banner}${prev}${vid}
-        <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}${qcBadge}${vcBadge}</div>
+        <div class="shot-meta"><span class="badge ${s.importance === "hero" ? "" : "ghost"}">${esc(s.importance || "")}</span> ${esc(s.duration_s || "")}s · ${esc(s.id)}${consBadge}${qcBadge}${vcBadge}${pvBadge}</div>
         ${qcDetails(s)}
         ${vcheckDetails(s)}
+        ${pvcheckDetails(s)}
         ${apNotes}
         <div class="shot-costumes">${costs}</div>
         <div class="kv">${esc(s.camera || "")}</div>
@@ -1726,6 +1741,13 @@ function storyboardControls(d) {
   if (done && shots && done >= shots) {
     h += `<div class="kv muted">Storyboard complete (${done} previews) — consistency review auto-runs</div>`;
   }
+  if (done) {
+    const pv = d.vcheck_preview || {};
+    const label = pv.total
+      ? `↻ Re-check previews (${pv.fail || 0} flagged)`
+      : `Visual check previews`;
+    h += `<div class="actions"><button class="btn ghost" onclick="vcheckPreviews('${esc(d.episode)}')">${label}</button></div>`;
+  }
   return h;
 }
 
@@ -1733,6 +1755,12 @@ function genStoryboard(ep) {
   const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
   act(`/api/show/${SHOW}/storyboard`, { episode: n },
       "Starting storyboard generation (background)…");
+}
+
+function vcheckPreviews(ep) {
+  const n = parseInt(String(ep).replace(/\D/g, ""), 10) || 1;
+  act(`/api/show/${SHOW}/vcheck-previews`, { episode: n },
+      "Storyboard visual check started (background)…");
 }
 
 async function doApproveObject(ep, slug) {

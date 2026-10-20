@@ -3,23 +3,23 @@
   "world": {
     "facts": [
       {
-        "text": "Harrow Wing operates as an active rival wing to Vixen Flight",
+        "text": "Salvage law awards a restarter's contract to a dead Frame's owner when restart happens mid-duel on onboard power.",
         "episode": 1
       },
       {
-        "text": "Vixen Flight defeats Harrow Wing in a televised duel via four-Frame link",
+        "text": "League officials log restart timestamps live and deny protests once a lock breaks and a Frame revives.",
         "episode": 1
       },
       {
-        "text": "League rulings are read live on broadcast with on-camera chip transfer",
+        "text": "Harrow Wing is a rival sponsor wing that ambushes Vixen Flight four-on-one and loses.",
         "episode": 1
       },
       {
-        "text": "Vixen Bunk Room houses Ren Tojo under Vixen custody starting tonight",
+        "text": "Vixen Flight keeps a shared bunk with a blank schedule board for Ren's nights.",
         "episode": 1
       },
       {
-        "text": "Vixen Pit serves as Vixen Flight's home pit under broadcast shutdown threat",
+        "text": "Rival wings flash buyout bids for Ren on optics during and after duels.",
         "episode": 1
       }
     ]
@@ -28,19 +28,19 @@
     "Ren Tojo": {
       "notes": [
         {
-          "text": "Ren Tojo's contract chip reads Vixen Flight",
+          "text": "Ren Tojo's contract chip is pressed to Mira Kaine and he bunks in the Vixen bunk starting tonight.",
           "episode": 1
         },
         {
-          "text": "Ren Tojo bunks in Mira Kaine's bunk starting tonight",
+          "text": "Ren Tojo suffers nosebleeds, pulse spikes, and sync burns when he holds high sync.",
           "episode": 1
         },
         {
-          "text": "Ren Tojo suffers nosebleeds and overheating when holding high sync",
+          "text": "Ren Tojo wears an oversized borrowed hangar spare plug suit that gaps and splits.",
           "episode": 1
         },
         {
-          "text": "Ren Tojo serves as sole co-pilot for all four Vixen Frames",
+          "text": "Ren Tojo is owed lead's share, dinner, and a towel by Mira Kaine for restarting her first.",
           "episode": 1
         }
       ]
@@ -48,7 +48,11 @@
     "Mira Kaine": {
       "notes": [
         {
-          "text": "Mira Kaine holds Ren Tojo's contract chip and schedule as flight lead",
+          "text": "Mira Kaine holds Ren Tojo's salvage contract slate as Vixen lead and anchor Frame.",
+          "episode": 1
+        },
+        {
+          "text": "Mira Kaine claims Monday and Friday nights with Ren Tojo on the schedule board.",
           "episode": 1
         }
       ]
@@ -56,7 +60,11 @@
     "Sable Voss": {
       "notes": [
         {
-          "text": "Sable Voss holds claim to Ren Tojo's first towel-off and morning shift",
+          "text": "Sable Voss claims Ren Tojo's first towel-off and starts collecting it.",
+          "episode": 1
+        },
+        {
+          "text": "Sable Voss is owed dinner and a night by Ren Tojo for going dark twice.",
           "episode": 1
         }
       ]
@@ -64,7 +72,11 @@
     "Juno Hale": {
       "notes": [
         {
-          "text": "Juno Hale claims the middle bunk in the Vixen Bunk Room",
+          "text": "Juno Hale wagers her towel-off and Harrow drift patterns for Ren Tojo's sync.",
+          "episode": 1
+        },
+        {
+          "text": "Juno Hale holds intercepted Harrow scout chatter and a log of rival bids for Ren Tojo.",
           "episode": 1
         }
       ]
@@ -72,11 +84,11 @@
     "Tessa Rook": {
       "notes": [
         {
-          "text": "Tessa Rook monitors Ren Tojo's vitals after sync burn",
+          "text": "Tessa Rook rewrites the bunk board to place Ren Tojo near her with mandatory rest breaks.",
           "episode": 1
         },
         {
-          "text": "Tessa Rook anchors the four-Frame sync chain through her cockpit",
+          "text": "Tessa Rook monitors Ren Tojo's pulse and sync burns after each link.",
           "episode": 1
         }
       ]
@@ -84,17 +96,22 @@
     "Harrow Wing": {
       "notes": [
         {
-          "text": "Harrow Wing loses the televised duel to Vixen Flight",
+          "text": "Harrow Wing loses its kill lock on Vixen Flight and has its protest and appeal denied.",
           "episode": 1
         },
         {
-          "text": "Harrow Wing vows to file a buyout and take Ren Tojo by duel",
+          "text": "Harrow Wing flashes a buyout bid for Ren Tojo on optics.",
           "episode": 1
         }
       ]
     },
     "League Official": {
-      "notes": []
+      "notes": [
+        {
+          "text": "League Official finalizes Ren Tojo's salvage custody to Mira Kaine for one restarted Frame.",
+          "episode": 1
+        }
+      ]
     }
   },
   "plotlines": [
@@ -178,53 +195,49 @@
   ],
   "unresolved_threads": [
     {
-      "text": "Harrow Wing plans to file a buyout and take Ren Tojo by duel",
+      "text": "Who receives each night on the blank Vixen bunk schedule board.",
       "episode": 1
     },
     {
-      "text": "Harrow Wing baits Ren Tojo into restarting their Frame to file a claim",
+      "text": "Whether Harrow Wing's flashed buyout or Juno's logged rival bids pry Ren from Vixen.",
       "episode": 1
     },
     {
-      "text": "Vixen Flight lacks a stable bunk and calibration schedule for sharing Ren Tojo",
+      "text": "Whether Ren's nosebleeds and burns limit how many high-sync restarts he holds.",
       "episode": 1
     },
     {
-      "text": "Ren Tojo risks nerve burnout from repeated 90% sync spikes",
+      "text": "When Mira pays lead's share, dinner, towel, and bunk to Ren.",
       "episode": 1
     },
     {
-      "text": "Ren Tojo still lacks a properly fitting plug suit",
+      "text": "When Sable collects first towel-off plus dinner and night from Ren.",
+      "episode": 1
+    },
+    {
+      "text": "When Juno delivers towel-off and full Harrow intel to Ren.",
+      "episode": 1
+    },
+    {
+      "text": "What Tessa's rewritten bunk board version mandates.",
       "episode": 1
     }
   ],
   "continuity_rules": [
     {
-      "text": "One contract chip covers every Frame restarted in the same duel",
+      "text": "A salvage restart must use the dead Frame's own onboard starter charge through an open hatch with no outside power.",
       "episode": 1
     },
     {
-      "text": "Restarting a rival Frame lets that rival owner file a claim in the morning",
+      "text": "Ren spikes past 90% sync with any Vixen pilot and must unlink fast to avoid nosebleed and nerve burn.",
       "episode": 1
     },
     {
-      "text": "Carrying a co-pilot for short hops and palm-to-hull contact is legal",
+      "text": "A revived pilot resumes solo control immediately after Ren unlinks.",
       "episode": 1
     },
     {
-      "text": "Plug suits must stay sealed past the waist or the League fines delays",
-      "episode": 1
-    },
-    {
-      "text": "Holding sync past 80% causes nosebleeds and overheating requiring cooldown",
-      "episode": 1
-    },
-    {
-      "text": "A duel stays live while the protesting wing can still move and shoot",
-      "episode": 1
-    },
-    {
-      "text": "Four Frames can share one co-pilot's sync when linked through an anchor cockpit",
+      "text": "A forfeited duel drops rank and loses sponsors that night.",
       "episode": 1
     }
   ],

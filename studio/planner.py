@@ -375,11 +375,18 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         show.style_profile(cfg), bible.get("content_policy", "mature"),
         show.style_profile(cfg).get("baseline", ""))
 
+    # Canonical locations: hand the outline the scene registry so every scene
+    # names a recurring place (a stable location_id), instead of inventing a
+    # free-text spot that no reference image is attached to.
+    from . import scenes as _scenes
+    _registry = _scenes.registry_block(show)
+
     if current_plan and notes.strip():
         # Revision path: rewrite the rejected outline in one call from the notes.
         user_prompt = prompts.episode_plan_prompt(
             bible, synopsis, continuity, names, _target(show), current_plan, notes,
-            dir_notes, state, fixed_episode_type=plan_dev.get("episode_type", ""))
+            dir_notes, state, fixed_episode_type=plan_dev.get("episode_type", ""),
+            scene_registry=_registry)
         if season_mandate:
             user_prompt += season_mandate
         plan = promptlog.logged_chat_json(
@@ -399,7 +406,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         _reward = _service.is_reward_episode(show, episode, cfg)
         skeleton_prompt = prompts.plan_skeleton_prompt(
             bible, state, dev, dir_notes, _target(show), continuity=continuity,
-            reward=_reward)
+            reward=_reward, scene_registry=_registry)
         # Feed each character's FLAW/MOTIVATION so the outline's beats honour them —
         # the stakes/agency reviewers cite these sheets, but the generator (which only
         # saw the bible) did not, producing interchangeable beats.
@@ -433,7 +440,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
                 f"plan-beats-{batch[0].get('id', '?')}..{batch[-1].get('id', '?')}",
                 [{"role": "system", "content": system},
                  {"role": "user", "content": prompts.plan_beats_prompt(
-                     bible, batch, dev, dir_notes)}],
+                     bible, batch, dev, dir_notes, scene_registry=_registry)}],
                 model=model, role="showrunner", temperature=0.6, max_tokens=32768,
                 on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                     "detail": f"Episode {episode}: scene beats ({n} tokens…)",
@@ -445,6 +452,13 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         for sc in plan_scenes:
             scid = sc.get("id", "")
             full = expanded.get(scid) or dict(sc)
+            # The beats pass returns its own scene dicts; keep the skeleton's
+            # canonical location_id / location_setting when the beats pass dropped
+            # or blanked them.
+            if sc.get("location_id") and not full.get("location_id"):
+                full["location_id"] = sc["location_id"]
+            if sc.get("location_setting") and not full.get("location_setting"):
+                full["location_setting"] = sc["location_setting"]
             merged.append(full)
         plan["scenes"] = merged
     # Director constraints are also part of the outline's recorded mandate.
@@ -484,6 +498,9 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
                              bible, synopsis, continuity, names, state, dir_notes,
                              fixed_episode_type=plan_dev.get("episode_type", ""),
                              rejection_notes=notes)
+    # Canonicalize each scene's location onto the registry (the final, reviewed
+    # scene list can differ from the skeleton the LLM first labelled).
+    _canonicalize_locations(show, plan)
     plan["status"] = "pending"
     plan["synopsis"] = synopsis
     # Deferred plotline commit: carry what this episode featured so approve_plan
@@ -495,6 +512,105 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         plan["_season"] = {"season": season_no, "entry": season_entry}
     epstate.save_plan(show, episode, plan)
     return plan
+
+
+def _canonicalize_locations(show: Show, plan: dict[str, Any]) -> dict[str, Any]:
+    """Stamp a canonical ``location_id`` on every plan scene.
+
+    The outline writer names a free-text ``location``; only a registry id carries
+    a location reference image. Accept the LLM's ``location_id`` when it names a
+    real registry entry; otherwise resolve it from the free-text location with
+    the same confident matcher; otherwise leave it empty (the renderer then falls
+    back to the scene's own first-preview frame as its grounding image). Never
+    invents a new registry entry — no side effects on a draft outline.
+    """
+    try:
+        from . import scenes as _scenes
+        registry = set(show.list_scenes() or [])
+        for sc in plan.get("scenes", []) or []:
+            if not isinstance(sc, dict):
+                continue
+            lid = str(sc.get("location_id") or "").strip()
+            if lid not in registry:
+                lid = _scenes.resolve_slug(show, sc.get("location") or "") or ""
+            sc["location_id"] = lid
+    except Exception:
+        pass
+    return plan
+
+
+def _describe_new_locations(show: Show, plan: dict[str, Any],
+                            pending: list[dict[str, Any]], llm, cfg) -> dict[str, dict[str, Any]]:
+    """One LLM pass: canonical description + Krea 2 setting prompt per new location."""
+    out: dict[str, dict[str, Any]] = {}
+    locs = [{"location": str(sc.get("location") or ""),
+             "summary": str(sc.get("summary") or ""),
+             "beats": sc.get("beats") or []} for sc in pending]
+    try:
+        from .clients.lmstudio import LMStudioClient
+        cfg = cfg or get_config()
+        llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=180)
+        model = (cfg.get("llm", "roles", {}) or {}).get("script") or cfg.get("llm", "model")
+        res = llm.chat_json(
+            [{"role": "user", "content": prompts.new_locations_prompt(show.read_bible(), locs)}],
+            model=model, role="showrunner", temperature=0.5, max_tokens=2000)
+        for item in (res or {}).get("locations", []) or []:
+            if isinstance(item, dict) and item.get("location"):
+                out[str(item["location"]).strip()] = item
+    except Exception:
+        pass
+    return out
+
+
+def _register_plan_locations(show: Show, plan: dict[str, Any], llm=None, cfg=None) -> list[str]:
+    """Register locations new to the series; called at plan APPROVAL.
+
+    The commit boundary: every scene must end up with a registry ``location_id``.
+    Scenes that match an existing entry reuse it; genuinely-new places are added
+    to the registry (canonical description + Krea 2 setting fragment) and their
+    location reference image is generated in the background. Best-effort — a
+    failure never blocks approval. Returns the newly-registered ids.
+    """
+    new_ids: list[str] = []
+    try:
+        from . import scenes as _scenes
+        registry = set(show.list_scenes() or [])
+        pending: list[dict[str, Any]] = []
+        for sc in plan.get("scenes", []) or []:
+            if not isinstance(sc, dict):
+                continue
+            name = str(sc.get("location") or "").strip()
+            lid = str(sc.get("location_id") or "").strip()
+            # The free-text `location` is the SPECIFIC set the scene is in; it
+            # wins over a broader `location_id` the outline may have chosen. If it
+            # already resolves to a registry entry, reuse it; otherwise register
+            # it as its own top-level place (below).
+            resolved = _scenes.resolve_slug(show, name) if name else None
+            if resolved:
+                sc["location_id"] = resolved
+                continue
+            if name:
+                pending.append(sc)
+            elif lid in registry:
+                sc["location_id"] = lid
+        if not pending:
+            return new_ids
+        briefs = _describe_new_locations(show, plan, pending, llm, cfg)
+        for sc in pending:
+            name = str(sc.get("location") or "").strip()
+            b = briefs.get(name) or {}
+            desc = str(b.get("description") or "").strip() or name
+            setting = (str(sc.get("location_setting") or "").strip()
+                       or str(b.get("setting_prompt") or "").strip())
+            sid = _scenes.register_location(show, name, description=desc,
+                                            setting_prompt=setting)
+            if sid not in registry:
+                registry.add(sid)
+                new_ids.append(sid)
+            sc["location_id"] = sid
+    except Exception:
+        pass
+    return new_ids
 
 
 def read_episode_plan(show: Show, episode: int) -> dict[str, Any]:
@@ -616,11 +732,13 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
             "detail": f"Episode {episode}: revising outline from plan review (round {round_no})…",
             "ts": time.time()}
         from . import service as _service
+        from . import scenes as _scenes
         _rev_prompt = prompts.episode_plan_prompt(
             bible, synopsis, continuity, names, _target(show), plan, feedback,
             dir_notes, state, fixed_episode_type=fixed_episode_type,
             cast_brief=_cast_flaws_block(show),
-            reward=_service.is_reward_episode(show, episode, cfg))
+            reward=_service.is_reward_episode(show, episode, cfg),
+            scene_registry=_scenes.registry_block(show))
         if _season_mandate:
             _rev_prompt += _season_mandate
         revised = promptlog.logged_chat_json(
@@ -672,6 +790,16 @@ def approve_plan(show: Show, episode: int, llm=None, cfg=None, override: bool = 
     plan["status"] = "approved"
     if override:
         plan["approved_override"] = True
+    # Register any location new to the series BEFORE persisting the approved plan,
+    # so every scene ships a canonical location_id (and the new place gains a
+    # reference image). Idempotent: an already-registered location is reused.
+    try:
+        _register_plan_locations(show, plan, llm=llm, cfg=cfg)
+    except Exception as _exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "location registration failed for %s EP%02d (plan still approved): %s",
+            show.show_id, episode, _exc)
     # Commit the plotline bookkeeping NOW (this is the real approval gate): stamp
     # last_seen on featured plotlines and persist a reviewed new plotline to the
     # bible + continuity. Development only carried it on the plan, so a rejected
@@ -958,7 +1086,8 @@ def _clear_scenes_downstream(show: Show, episode: int) -> None:
     runs = show.dir / "runs" / f"EP{episode:02d}"
     sc_dir = _scenes_dir(show, episode)
     if sc_dir.exists():
-        for f in list(sc_dir.glob("*_shots.json")) + list(sc_dir.glob("*.p*.json")):
+        for f in (list(sc_dir.glob("*_shots.json")) + list(sc_dir.glob("*.p*.json"))
+                  + list(sc_dir.glob("*_anchor.png")) + list(sc_dir.glob("*.continuity*.txt"))):
             try:
                 f.unlink()
             except Exception:
@@ -1225,6 +1354,10 @@ _SCENE_PASSES: list[dict[str, Any]] = [
             "Break the scene into enough shots to fill ~{target_s}s of runtime "
             "(~{n_shots} shots). Fully realize every beat of the scene treatment; "
             "vary what happens across the shots instead of replaying one movement. "
+            "ONE SHOT = ONE ENVIRONMENT: never let a single shot travel from one "
+            "place into another (e.g. start outside then move inside a cockpit) — "
+            "that is two shots; cut on the transition, because each shot is grounded "
+            "on one location reference. "
             "Mark the scene's 1-2 hero money shots."),
         "cast_key": "appearance_canonical",
     },
@@ -1238,8 +1371,13 @@ _SCENE_PASSES: list[dict[str, Any]] = [
         "instructions": (
             "Describe each shot's camera: framing (wide / medium / close-up / insert), "
             "angle, lens feel, and movement (static, pan, tilt, dolly, crane, tracking, "
-            "handheld). Vary coverage across the scene — never repeat the same framing "
-            "on consecutive shots. Match the shot's beat."),
+            "handheld). Match the shot's beat. DIALOGUE COVERAGE IS NOT COVERAGE FOR ITS "
+            "OWN SAKE: for a run of consecutive shots carrying lines of the SAME exchange, "
+            "HOLD the established framing and change it only gently - a small angle/height "
+            "shift or a short reframe (classic shot/reverse-shot at the SAME distance). Do "
+            "NOT jump from wide to close, or cross to a new axis, between consecutive "
+            "dialogue lines. Reserve a big framing change (new distance or axis) for a new "
+            "story beat, a location change, or a marked hero money shot."),
         "fields": ["camera"],
     },
     {
@@ -1262,16 +1400,29 @@ _SCENE_PASSES: list[dict[str, Any]] = [
             "id": "shot id (verbatim)",
             "references": {"characters": ["EXACT cast names on screen"],
                            "via_display": ["of those, the names visible ONLY through a screen/TV/monitor/hologram/broadcast (NOT physically present)"],
-                           "scene": "location name"},
+                           "scene": "the SINGLE set this shot is physically in (its specific environment, e.g. 'Mira's dead cockpit')"},
         }]},
         "instructions": (
             "For every shot, list the EXACT cast names visible on screen in "
             "references.characters (empty array if no characters are visible) and the "
-            "scene's location in references.scene. Separately, list in "
-            "references.via_display any of those names that are visible ONLY through a "
+            "specific SET the shot is physically in for references.scene. Only a "
+            "character the CAMERA ACTUALLY FRAMES belongs in references.characters: a "
+            "two-shot declares two, a single declares one. Characters merely present in "
+            "the room - standing in the background, edging frame, or part of the crowd - "
+            "are NOT framed and must not be declared (they get no reference and would be "
+            "rendered as extras). When the camera names specific characters, declare only "
+            "those plus anyone who speaks ON CAMERA. Also: a speaker heard off-screen "
+            "(their line is on_camera false) is NOT visible and must never be listed, and "
+            "an insert of a prop/dial/monitor, or an exterior with no bodies, has an EMPTY "
+            "characters list. One shot is in ONE environment: if the shot's action would "
+            "move between places, the blocker must have split it - report only the single "
+            "environment this shot occupies. Use the most specific name (a cockpit, a "
+            "monitor wall, the apron), not the broad venue. Separately, list in "
+            "references.via_display any name visible ONLY through a "
             "screen/monitor/broadcast/hologram (e.g. a rival laughing on a jumbotron) - "
             "they are NOT physically present, so the render must show them INSIDE the "
-            "display, never standing in the scene. Names must match the cast exactly."),
+            "display, never standing in the scene, and they must NOT also appear in "
+            "references.characters. Names must match the cast exactly."),
         "nested": [("references", ["characters", "via_display", "scene"])],
     },
     {
@@ -1381,7 +1532,9 @@ def _blocking_pass(with_dialogue_spine: bool) -> dict[str, Any]:
         "single short line or a silent insert ~5s. Write each shot's `beat` as PLAIN, "
         "DIRECT screen action (what we SEE happen) - no run-on sentences. Do NOT "
         "describe costumes, looks, props or UI/scoreboards here; those are owned by the "
-        "scene details and referenced by later passes. Do NOT restate the narrative.")
+        "scene details and referenced by later passes. Do NOT restate the narrative. "
+        "Keep ONE ENVIRONMENT per shot: a shot that would move between two places (e.g. "
+        "outside then inside a cockpit) must be split into two shots.")
     return p
 
 
@@ -1618,6 +1771,21 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
     passes = _scene_passes(dialogue_spine is not None)
     effective_notes = _effective_shot_notes(show, notes)
 
+    # One-time visual grounding: a short environment brief derived from the
+    # scene's location ref (when the plan's location resolves to one). Carried
+    # into EVERY pass so all shots in the scene share one layout and lighting
+    # instead of each pass re-inventing the set.
+    continuity = ""
+    try:
+        from .scene_anchor import anchor_path, continuity_brief
+        anc = anchor_path(show, episode, plan_scene, cfg=cfg)
+        if anc:
+            vision_llm = llm if hasattr(llm, "chat") else None
+            continuity = continuity_brief(show, episode, plan_scene, anc,
+                                          llm=vision_llm, cfg=cfg)
+    except Exception:
+        continuity = ""
+
     for i, pass_cfg in enumerate(passes):
         if i < start:
             continue
@@ -1635,7 +1803,7 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.scene_pass_prompt(
                  pass_cfg, bible, episode_summary, plan_scene, cast, draft, target_s, effective_notes,
-                 dialogue_spine=dialogue_spine)}],
+                 dialogue_spine=dialogue_spine, continuity=continuity)}],
             model=model, role="showrunner", temperature=0.8, max_tokens=32768,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: scene {sid} — {name} ({n} tokens…)",
@@ -1661,7 +1829,117 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
         "summary": plan_scene.get("summary", ""),
         "shots": draft,
     }
+    # Reconcile the declared cast with what is ACTUALLY visible: drop off-screen
+    # speakers (and display-only names) the references pass listed on insert /
+    # monitor / exterior shots, so H3 never renders a character over a prop shot.
+    try:
+        from .storyboard import _shot_characters
+        for sh in draft:
+            if not isinstance(sh.get("references"), dict):
+                continue
+            visible = _shot_characters(sh)
+            sh["references"]["characters"] = visible
+            sh["type"] = "ref2va" if visible else "fl2va"
+    except Exception:
+        pass
+    # Per-shot environment grounding: a shot can sit in a specific set of its own
+    # (a dropped cockpit, a monitor wall, the apron) that differs from the scene's
+    # broader place. Resolve every shot's `references.scene` to a registry
+    # environment id — registering a new top-level entry (and its ref) the first
+    # time a set appears — so each shot grounds on its OWN environment, not the
+    # scene's umbrella place.
+    try:
+        _canonicalize_shot_environments(show, episode, scene, llm=llm, cfg=cfg)
+    except Exception:
+        pass
     return scene
+
+
+def _repair_shot_locations(show: Show, script: dict[str, Any]) -> None:
+    """Make every shot's location_id and cast point at real data after review.
+
+    - A shot whose ``references.location_id`` has no registry entry is re-resolved
+      from ``references.scene`` and, failing that, registered (filesystem only, no
+      GPU) so the storyboard's GPU phase can render its ref. This catches the
+      writers'-room revision that splits "mira's dead cockpit" into sable/juno/
+      tessa cockpits textually without creating those entries.
+    - ``references.characters`` / ``type`` are re-derived from the final dialogue:
+      off-screen speakers and display-only names are not visual subjects.
+    """
+    from . import scenes as _scenes
+    from .storyboard import _shot_characters
+    registry = set(show.list_scenes() or [])
+    for sc in script.get("scenes", []) or []:
+        for sh in sc.get("shots", []) or []:
+            if not isinstance(sh, dict):
+                continue
+            refs = sh.get("references")
+            if not isinstance(refs, dict):
+                refs = {}
+                sh["references"] = refs
+            lid = str(refs.get("location_id") or "").strip()
+            name = str(refs.get("scene") or sc.get("location") or "").strip()
+            if lid not in registry:
+                resolved = _scenes.resolve_slug(show, name) if name else None
+                if not resolved and (name or lid):
+                    resolved = _scenes.register_location(
+                        show, name or lid, description=name or lid)
+                if resolved:
+                    refs["location_id"] = resolved
+                    registry.add(resolved)
+            visible = _shot_characters(sh)
+            refs["characters"] = visible
+            sh["type"] = "ref2va" if visible else "fl2va"
+
+
+def _canonicalize_shot_environments(show: Show, episode: int, scene: dict[str, Any],
+                                    llm=None, cfg=None) -> None:
+    """Stamp a registry environment id on every shot's ``references``.
+
+    Existing matches reuse their entry; a genuinely-new set is registered as a
+    top-level location (canonical description + Krea 2 setting) and its ref is
+    rendered in the background. Idempotent: re-running resolves to the same ids.
+    """
+    shots = scene.get("shots") or []
+    if not shots:
+        return
+    from . import scenes as _scenes
+    scene_loc = str(scene.get("location") or "").strip()
+    pending: dict[str, list[dict[str, Any]]] = {}
+    for sh in shots:
+        if not isinstance(sh, dict):
+            continue
+        refs = sh.get("references")
+        if not isinstance(refs, dict):
+            refs = {}
+            sh["references"] = refs
+        name = str(refs.get("scene") or scene_loc or "").strip()
+        if not name:
+            continue
+        lid = str(refs.get("location_id") or "").strip()
+        if lid and _scenes.environment_ref(show, lid):
+            continue
+        resolved = _scenes.resolve_slug(show, name)
+        if resolved:
+            refs["location_id"] = resolved
+            continue
+        pending.setdefault(name, []).append(sh)
+    if not pending:
+        return
+    items = [{"location": name, "summary": scene.get("summary", ""), "beats": []}
+             for name in pending]
+    briefs = _describe_new_locations(show, {"scenes": []}, items, llm, cfg)
+    # Register ONLY (write the entry). Ref images are rendered later, in a GPU
+    # phase (scenes.generate_missing_refs) — never here: this runs while the
+    # local LLM owns the GPU, and a concurrent krea2 render would OOM it.
+    for name, shs in pending.items():
+        b = briefs.get(name) or {}
+        desc = str(b.get("description") or "").strip() or name
+        setting = str(b.get("setting_prompt") or "").strip()
+        lid = _scenes.register_location(show, name, description=desc,
+                                        setting_prompt=setting)
+        for sh in shs:
+            sh.setdefault("references", {})["location_id"] = lid
 
 
 def attach_review_verdict(script: dict[str, Any], reviews: dict[str, dict[str, Any]],
@@ -2066,6 +2344,17 @@ def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
     # spine distribution) and re-save the final revision.
     _restore_dialogue(script, sc_dir, spine=dialogue_scenes)
     _finalize_on_camera_script(script)
+    # The writers'-room revision can rewrite `references.location_id` (e.g. split
+    # "mira's dead cockpit" into sable/juno/tessa cockpits) without creating the
+    # registry entries, leaving dangling ids whose refs never render. Ensure each
+    # shot points at a REAL entry (registering it — filesystem only, no GPU) and
+    # re-derive the on-screen cast/type from the final dialogue.
+    try:
+        _repair_shot_locations(show, script)
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "shot-location repair failed for %s EP%02d: %s", show.show_id, episode, exc)
     _scripts = sorted(runs.glob("script.r*.json"),
                       key=lambda p: int(p.stem.rsplit("r", 1)[-1]))
     if _scripts:

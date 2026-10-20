@@ -44,8 +44,13 @@ The pipeline builds the image list in a fixed order (`render.py:_render_shot`):
 1. **Character refs first**, one per on-screen character, in the order returned by
    `_shot_refs()` (`studio/storyboard.py:106`). This is the identity anchor — its
    `<Picture N>` number **must** match the `names` order used to compile `<Subject N>`.
-2. **Object refs** (recurring props matched from the shot's action text, `_shot_object_refs()`).
-3. **The shot's storyboard keyframe** (`runs/EP##/storyboard/<sid>.png`) last — it is
+2. **The environment grounding anchor** (`studio/scene_anchor.py`) — the reference for the
+   set THIS shot is in. A shot's own `references.location_id` (its specific set: a cockpit,
+   the apron, a monitor wall) wins over the scene's broader place, so each shot grounds on
+   its own environment. Cited as `<Subject K> is the location, shown in <Picture N>` with
+   **weak** retention — the set's look, not its camera framing.
+3. **Object refs** (recurring props matched from the shot's action text, `_shot_object_refs()`).
+4. **The shot's storyboard keyframe** (`runs/EP##/storyboard/<sid>.png`) last — it is
    the composition anchor, not an identity anchor.
 
 Rule of thumb: **who goes in `<Subject N>` goes first.** If a character ref is missing

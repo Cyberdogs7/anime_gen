@@ -46,6 +46,7 @@ vcheck:
   timeout_s: 300
   auto_feed: true              # fail -> auto-reject into the shot gate (capped)
   max_auto_retakes: 2          # auto-reject a shot at most this many times; then a human decides
+  preview_auto_feed: true      # storyboard preview fails also auto-reject + regenerate the preview
   schedule: "post_render"      # post_render | manual
   vllm:
     url: "http://127.0.0.1:8001/v1"

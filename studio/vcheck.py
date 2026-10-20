@@ -63,9 +63,14 @@ VCHECK_PROMPT = (
     "calls for a specific setting (city, lab, rooftop) or object, is it there?\n"
     "Also flag any rendered text/subtitles/captions/watermarks in the frames "
     "as a text defect.\n"
+    "3. DUPLICATION: each expected character must appear EXACTLY ONCE in the shot "
+    "unless the scripted action explicitly calls for multiple copies. If the SAME "
+    "character appears two or more times in the frames (a clone/duplicate of the "
+    "same face and outfit, foreground or background), that is a FAILURE: add a "
+    "concrete issue naming it and set pass false.\n"
     "pass is true ONLY if every expected character is present and consistent, "
-    "there are no unknown characters, no body morphing, no text defects, AND the "
-    "scripted action plays out in the frames.\n"
+    "each appears exactly once, there are no unknown characters, no body morphing, "
+    "no text defects, AND the scripted action plays out in the frames.\n"
     "Reply with ONLY a JSON object:\n"
     '{"characters": [{"name": "...", "present": true/false, "consistent": true/false, '
     '"issue": "what differs for this character"}], '
@@ -286,8 +291,18 @@ def _vcheck_dir(show: Show, episode: int) -> Path:
     return show.dir / "runs" / f"EP{episode:02d}" / "vcheck"
 
 
-def _vcheck_summary(show: Show, episode: int) -> dict[str, Any]:
-    p = _vcheck_dir(show, episode) / "summary.json"
+def _summary_path(show: Show, episode: int, kind: str = "video") -> Path:
+    """Per-kind vcheck report file: the final render vs the storyboard previews.
+
+    Previews are reviewed into their OWN file so a preview verdict can never
+    overwrite (or be mistaken for) the final-render verdict.
+    """
+    fn = "summary.json" if kind == "video" else f"{kind}_summary.json"
+    return _vcheck_dir(show, episode) / fn
+
+
+def _vcheck_summary(show: Show, episode: int, kind: str = "video") -> dict[str, Any]:
+    p = _summary_path(show, episode, kind)
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8")) or {}
@@ -296,12 +311,13 @@ def _vcheck_summary(show: Show, episode: int) -> dict[str, Any]:
     return {}
 
 
-def _save_summary(show: Show, episode: int, entry: dict[str, Any]) -> None:
+def _save_summary(show: Show, episode: int, entry: dict[str, Any],
+                  kind: str = "video") -> None:
     d = _vcheck_dir(show, episode)
     d.mkdir(parents=True, exist_ok=True)
-    summary = _vcheck_summary(show, episode)
+    summary = _vcheck_summary(show, episode, kind)
     summary[entry["shot_id"]] = entry
-    (d / "summary.json").write_text(
+    _summary_path(show, episode, kind).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -351,7 +367,7 @@ def _vcheck_model(cfg) -> str:
 
 
 def run_shot_vcheck(show: Show, episode: int, clip_path: Path, shot: dict[str, Any],
-                    cfg=None, llm=None) -> dict[str, Any]:
+                    cfg=None, llm=None, kind: str = "video") -> dict[str, Any]:
     """Run the VLM check on ONE rendered clip and persist the report.
 
     NATIVE VIDEO (vcheck.server == vllm): the whole clip is streamed to
@@ -426,8 +442,8 @@ def run_shot_vcheck(show: Show, episode: int, clip_path: Path, shot: dict[str, A
         report["verdict"] = "fail"
         log.warning("[vcheck] shot check failed for %s: %s", sid, exc,
                     exc_info=True)
-    _save_summary(show, episode, report)
-    _persist_db(show, sid, report)
+    _save_summary(show, episode, report, kind)
+    _persist_db(show, (sid if kind == "video" else f"{kind}:{sid}"), report)
     return report
 
 
@@ -608,29 +624,30 @@ def run_object_vcheck_batch(show: Show, episode: int, cfg=None, llm=None,
     return actions
 
 
-def clear_shot_vcheck(show: Show, episode: int, sid: str) -> None:
+def clear_shot_vcheck(show: Show, episode: int, sid: str, kind: str = "video") -> None:
     """Drop a shot's stored vcheck report (used when a clip is re-rendered)."""
     try:
-        summary = _vcheck_summary(show, episode)
+        summary = _vcheck_summary(show, episode, kind)
         if sid in summary:
             summary.pop(sid)
-            (_vcheck_dir(show, episode) / "summary.json").write_text(
+            _summary_path(show, episode, kind).write_text(
                 json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         log.debug("[vcheck] clear summary failed for %s", sid, exc_info=True)
     try:
         from .db import open_db
+        _db_sid = sid if kind == "video" else f"{kind}:{sid}"
         db = open_db()
-        db.conn.execute("DELETE FROM vcheck_results WHERE shot_id = ?", (sid,))
+        db.conn.execute("DELETE FROM vcheck_results WHERE shot_id = ?", (_db_sid,))
         db.conn.commit()
         db.close()
     except Exception:
         log.debug("[vcheck] db clear failed for %s", sid, exc_info=True)
 
 
-def episode_vcheck_summary(show: Show, episode: int) -> dict[str, Any]:
+def episode_vcheck_summary(show: Show, episode: int, kind: str = "video") -> dict[str, Any]:
     """Roll-up counts over every shot's stored vcheck report."""
-    summary = _vcheck_summary(show, episode)
+    summary = _vcheck_summary(show, episode, kind)
     counts = {"pass": 0, "fail": 0, "skip": 0, "total": 0}
     for entry in summary.values():
         v = entry.get("verdict", "fail")
@@ -644,7 +661,8 @@ def episode_vcheck_summary(show: Show, episode: int) -> dict[str, Any]:
 
 def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
                        on_progress=None, auto_feed: bool | None = None,
-                       max_auto_retakes: int | None = None) -> list[str]:
+                       max_auto_retakes: int | None = None,
+                       kind: str = "video") -> list[str]:
     """Post-render visual check over every rendered clip lacking a report.
 
     With ``vcheck.server == vllm`` the whole REVIEW pass runs under the GPU
@@ -673,7 +691,9 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
     if not vck.get("enabled", True):
         return []
     if auto_feed is None:
-        auto_feed = vck.get("auto_feed", True)
+        # Previews are a 1s heads-up, not the deliverable: never AUTO-reject a
+        # shot off a preview verdict — surface it and let the human decide.
+        auto_feed = vck.get("auto_feed", True) if kind == "video" else False
     cap = int(max_auto_retakes if max_auto_retakes is not None
               else vck.get("max_auto_retakes", 2))
 
@@ -682,8 +702,8 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
         return []
     shots = {s.get("id"): s for sc in script.get("scenes", [])
              for s in sc.get("shots", [])}
-    vd = show.dir / "runs" / f"EP{episode:02d}" / "video"
-    stored = _vcheck_summary(show, episode)
+    vd = show.dir / "runs" / f"EP{episode:02d}" / ("video" if kind == "video" else "storyboard")
+    stored = _vcheck_summary(show, episode, kind)
     clips = sorted(vd.glob("*.mp4"))
     actions: list[str] = []
     pending_fails: list[tuple[str, dict]] = []
@@ -699,7 +719,7 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
             if not shot:
                 continue
             report = run_shot_vcheck(show, episode, clip, shot, cfg=cfg,
-                                     llm=client)
+                                     llm=client, kind=kind)
             if report.get("verdict") != "fail":
                 continue
             pending_fails.append((sid, report))
@@ -749,9 +769,35 @@ def run_episode_vcheck(show: Show, episode: int, cfg=None, llm=None,
         # otherwise reuse the injected client so tests never touch the network.
         msgs = reject_shot(show, episode, sid, notes=notes,
                            llm=None if use_vllm else llm)
-        clear_shot_vcheck(show, episode, sid)   # re-checked after the retake
+        clear_shot_vcheck(show, episode, sid, kind)   # re-checked after the retake
+        if kind == "storyboard":
+            # Drop the rejected preview so generate_shot_keyframes re-renders it
+            # (it skips shots whose mp4 already exists); the shot gate carries the
+            # revised prompt into that regeneration.
+            try:
+                (vd / f"{sid}.mp4").unlink(missing_ok=True)
+            except Exception:
+                pass
         actions.extend(msgs)
 
     if on_progress:
         on_progress(len(clips), len(clips), "done")
     return actions
+
+
+def run_preview_vcheck(show: Show, episode: int, cfg=None, llm=None,
+                       on_progress=None) -> list[str]:
+    """Visually check the STORYBOARD PREVIEWS (``storyboard/*.mp4``).
+
+    Same VLM as the post-render check, but on the cheap 1s previews so wrong
+    characters/actions are caught BEFORE the expensive full render. Auto-feed is
+    on by default (``qc.vcheck.preview_auto_feed``): a failing preview rejects the
+    shot and deletes the preview so the storyboard regenerates it, capped by
+    ``max_auto_retakes``. Set it false to make previews advisory only.
+    """
+    cfg = cfg or get_config()
+    vck = cfg.get("qc", "vcheck", {}) or {}
+    auto = bool(vck.get("preview_auto_feed", True))
+    return run_episode_vcheck(show, episode, cfg=cfg, llm=llm,
+                              on_progress=on_progress, auto_feed=auto,
+                              kind="storyboard")
