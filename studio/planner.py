@@ -1860,9 +1860,9 @@ def _repair_shot_locations(show: Show, script: dict[str, Any]) -> None:
 
     - A shot whose ``references.location_id`` has no registry entry is re-resolved
       from ``references.scene`` and, failing that, registered (filesystem only, no
-      GPU) so the storyboard's GPU phase can render its ref. This catches the
-      writers'-room revision that splits "mira's dead cockpit" into sable/juno/
-      tessa cockpits textually without creating those entries.
+      GPU) so the storyboard's GPU phase can render its ref. This catches a
+      writers'-room revision that splits one shared set into several named sets
+      textually without creating those entries.
     - ``references.characters`` / ``type`` are re-derived from the final dialogue:
       off-screen speakers and display-only names are not visual subjects.
     """
@@ -2345,8 +2345,8 @@ def assemble_episode_script(show: Show, episode: int, llm=None, cfg=None,
     _restore_dialogue(script, sc_dir, spine=dialogue_scenes)
     _finalize_on_camera_script(script)
     # The writers'-room revision can rewrite `references.location_id` (e.g. split
-    # "mira's dead cockpit" into sable/juno/tessa cockpits) without creating the
-    # registry entries, leaving dangling ids whose refs never render. Ensure each
+    # one shared set into several named sets) without creating the registry
+    # entries, leaving dangling ids whose refs never render. Ensure each
     # shot points at a REAL entry (registering it — filesystem only, no GPU) and
     # re-derive the on-screen cast/type from the final dialogue.
     try:

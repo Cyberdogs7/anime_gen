@@ -99,8 +99,15 @@ def test_writer_review_stores_verdict_for_every_reviewer(tmp_path):
     assert saved["_review"]["reviews"]["slop"]["grade"] == "Fail"
 
 
-def test_prose_prompt_does_not_teach_numbered_spike():
+def test_prose_prompt_ships_no_show_specific_canon():
+    """Show canon (e.g. the single-sync-spike rule) must come from the show folder
+    via director notes, never be baked into the code."""
     from studio.prompts import episode_prose_prompt
     p = episode_prose_prompt({"tone": [], "genre": []}, [], [], {}, 1320, [], "")
     assert "Ninety-four already" not in p
-    assert "second numbered spike" in p or "past-ninety" in p
+    assert "second numbered spike" not in p
+    assert "past-ninety" not in p
+    with_note = episode_prose_prompt(
+        {"tone": [], "genre": []}, [], [], {}, 1320,
+        ["never invent a second numbered sync spike"], "")
+    assert "never invent a second numbered sync spike" in with_note

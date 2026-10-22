@@ -480,8 +480,8 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
             # Per-show style references (set these in the show's bible).
             "baseline": "",
             "fanservice_baseline": "",
-            # Optional per-show art medium for reference images; empty = the
-            # house default (prompts.REF_MEDIUM).
+            # Optional per-show art medium for reference images; empty = the show
+            # declares no medium (the code imposes none).
             "medium": "",
         },
         "arcs": [],

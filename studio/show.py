@@ -123,7 +123,7 @@ class Show:
 
     def ref_medium(self) -> str:
         """Per-show art medium for reference images (bible.yaml ``medium``), or ''
-        to use the house default (``prompts.REF_MEDIUM``)."""
+        when the show declares none — the code imposes no art style of its own."""
         return str((self.read_bible() or {}).get("medium") or "").strip()
 
     # ---- concept ----

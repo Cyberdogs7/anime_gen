@@ -44,10 +44,10 @@ def resolve_slug(show: Show, text: str) -> str | None:
     """Best registry location slug for a free-text name, or None.
 
     Exact slug wins. Otherwise the free-text tokens and the registered slug/name
-    must be a SUBSET of each other (so "Vixen Pit" -> vixen-hangar-pit and
+    must be a SUBSET of each other (so "Hangar Pit" -> hangar-pit and
     "pit monitor wall" -> pit-wall), scored by Jaccard. Distinct proper names do
-    NOT collapse into each other: "Sable's dead cockpit" shares "dead cockpit"
-    with "mira-s-dead-cockpit" but neither token set contains the other, so it
+    NOT collapse into each other: "Red's dead cockpit" shares "dead cockpit"
+    with "red-s-dead-cockpit" but neither token set contains the other, so it
     resolves to no entry and gets registered as its own place.
     """
     try:
@@ -211,8 +211,8 @@ def generate_ref(show: Show, scene: dict[str, Any], sid: str, cfg=None,
 
 
 # Venue "cores": entries sharing one are the SAME physical place under different
-# phrasings ("stadium arena floor", "concrete stadium bowl", "arena floor at
-# Sable's Frame"). Cockpits and other proper sets never share a core, so they are
+# phrasings ("stadium arena floor", "concrete stadium bowl", "arena floor at the
+# north gate"). Cockpits and other proper sets never share a core, so they are
 # never merged. The canonical entry is the OLDEST (the series' original place).
 _VENUE_CORES = {
     "arena": "arena", "stadium": "arena", "bowl": "arena", "concourse": "arena",

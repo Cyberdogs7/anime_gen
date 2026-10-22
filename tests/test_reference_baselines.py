@@ -50,18 +50,18 @@ def test_style_profile_empty_when_show_declares_none(tmp_path):
     assert not prof.get("fanservice_baseline")
 
 
-def test_showrunner_system_uses_the_shows_own_references():
+def test_showrunner_system_uses_the_shows_baseline():
     text = prompts.showrunner_system({"fanservice_baseline": "other-anime"},
                                      "mature", "some-anime")
     assert "some-anime" in text
-    assert "other-anime" in text
-    assert "load-bearing" in text          # the mature bar stays story-driven
+    # The showrunner prompt carries the production baseline; the fan-service bar
+    # is authored per stage (dialogue / reviewer) rather than duplicated here.
+    assert "other-anime" not in text
 
 
 def test_showrunner_system_neutral_without_references():
     text = prompts.showrunner_system({}, "mature", "")
     assert prompts.NEUTRAL_BASELINE in text
-    assert prompts.NEUTRAL_MATURE in text
     # No show title leaks in as a code default.
     assert "ranma" not in text.lower()
     assert "dxd" not in text.lower()

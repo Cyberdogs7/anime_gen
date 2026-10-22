@@ -544,9 +544,9 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
                      "The shot carries no dialogue.")
     shot_txt = " ".join(p for p in parts if p)
 
-    style = (script.get("style_guide") or
-             "The target video uses a cinematic 2D-anime style.").strip()
-    detailed = f"{style}\n[Shot 1] {placed_txt}. {shot_txt}".strip()
+    style = (script.get("style_guide") or "").strip()
+    detailed = ((f"{style}\n" if style else "")
+                + f"[Shot 1] {placed_txt}. {shot_txt}").strip()
 
     # --- overall_soundscape / non_diegetic_music ---
     # overall_soundscape holds ONLY ambience and physical action sounds; speech
@@ -625,7 +625,7 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
         if not raw_initial:
             raw_initial = (script.get("summary") or "One cinematic shot.").strip()
         initial_prompt = _sanitize_initial_prompt(raw_initial)
-        visual_style = (script.get("style_guide") or "cinematic 2D-anime style").strip()
+        visual_style = (script.get("style_guide") or "").strip()
         soundscape = (shot.get("soundscape") or "").strip()
         music = (shot.get("music") or "N/A").strip()
         # snap duration for native grid validation

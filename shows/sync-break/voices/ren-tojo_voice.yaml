@@ -1,7 +1,0 @@
-id: ren-tojo_voice
-engine: qwen3_tts
-mode: preset
-speaker: Ryan
-voice_description: ''
-speed: 1.0
-pitch: 0.0

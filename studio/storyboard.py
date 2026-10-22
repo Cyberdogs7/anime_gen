@@ -209,7 +209,7 @@ def _show_style(show: Show) -> str:
     """The show's visual style guide (from the bible) for image/video prompts.
 
     Every ref/keyframe prompt must carry this so the whole series renders in the
-    SAME look — without it the model falls back to its own default anime style.
+    SAME look — without it the model falls back to its own default look.
     """
     try:
         return ((show.read_bible() or {}).get("style_guide") or "").strip().rstrip(".")
@@ -250,11 +250,9 @@ def ensure_style_anchor(show: Show, cfg=None) -> Path | None:
         from .remote.ops import ServiceOps
         cfg = cfg or get_config()
         style = _show_style(show)
-        prompt = ("Anime key visual, the series' house art style"
-                  + (f": {style}" if style else "") + ". "
-                  "A cinematic wide shot of the show's signature setting with a few "
-                  "small original background figures, dramatic lighting, showcasing the "
-                  "show's linework, cel shading and color palette, high detail.")
+        prompt = ((f"{style}. " if style else "")
+                  + "A cinematic wide shot of the show's signature setting with a few "
+                  "small original background figures, dramatic lighting, high detail.")
         res = ServiceOps(cfg).generate_image(prompt, seed=0, aspect_ratio="16:9",
                                              out_path=str(p))
         if res.get("ok") and p.exists():
@@ -305,9 +303,9 @@ def _keyframe_prompt(shot: dict[str, Any], scene: dict[str, Any], names: list[st
     # becomes a positive token and the model draws exactly what was forbidden —
     # the same trap documented on prompts.character_ref_prompt (a "no duplication"
     # tail made refs render front+back turnarounds). State framing positively.
-    return ("Cinematic anime keyframe: "
+    return ("Cinematic keyframe: "
             f"{action} {camera}. Setting: {setting}. On screen: {chars}.{desc} "
-            "Dynamic cinematic composition, consistent series art style"
+            "Dynamic composition"
             + (f" {style}." if style else "")).rstrip(" .") + "."
 
 

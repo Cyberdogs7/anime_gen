@@ -17,8 +17,8 @@ _SENTENCE_PUNCT = re.compile(r"[.,;:!?\u2013\u2014\u2026\u00ab\u00bb\"]")
 def looks_like_character_name(name: str) -> bool:
     """True for a plausible character/entity NAME, False for a sentence fragment.
 
-    Names are short labels: "Mira Kaine", "Test-734", "Chitinous Marauder Pods
-    (x6)". Rejects long multi-word prose and any sentence punctuation (``.``,
+    Names are short labels: "Jane Doe", "Unit-734", "Marauder Pods (x6)". Rejects
+    long multi-word prose and any sentence punctuation (``.``,
     ``,``, ``;``, ``:``, ``!``, ``?``, dash-as-break, ellipsis) so plotline
     summaries and object descriptions can't be promoted into canon characters.
     """
