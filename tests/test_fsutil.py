@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from studio.fsutil import existing_by_mtime
-from studio.episode_repair import _rmtree_hard
+from studio.fsutil import rmtree_hard
 
 
 def test_existing_by_mtime_skips_vanished_files(tmp_path):
@@ -30,6 +30,6 @@ def test_rmtree_hard_removes_tree_and_tolerates_missing(tmp_path):
     d = tmp_path / "ep"
     (d / "sub").mkdir(parents=True)
     (d / "sub" / "f.json").write_text("{}")
-    _rmtree_hard(d)
+    rmtree_hard(d)
     assert not d.exists()
-    _rmtree_hard(d)                              # missing path: no-op, no raise
+    rmtree_hard(d)                              # missing path: no-op, no raise

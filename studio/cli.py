@@ -1,25 +1,23 @@
-"""Command-line interface. See DESIGN.md §17 / §20.1.
+"""Command-line interface. See DESIGN.md §0 (agent board) / §20.1.
 
-Commands: verify | init-show | add-character | request-run | serve | renderer | status
+Commands: board | request-run | init-show | bootstrap | status
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 import sys
-import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import yaml
 
 from . import fsutil
-from .bus import make_broker
-from .bus.events import RUN_REQUESTED, RUN_STARTED, new_event
 from .config import DEFAULT_RUNTIME_TARGET_S, Config, get_config
 from .db import DB
-from .run_controller import RunController
 from .setup import run_setup
 from .verify import run_verify
 
@@ -121,7 +119,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 def _cmd_script(args: argparse.Namespace) -> int:
     """Generate an episode script via the single pipeline path (prose -> review
-    -> shots), same as the reconciler runs. Requires the show's bible/cast;
+    -> shots). Requires the show's bible/cast;
     uses the approved plan as the skeleton when one exists."""
     from .clients.lmstudio import LMStudioClient
     from .planner import assemble_episode_script
@@ -379,19 +377,18 @@ def _cmd_rewrite(args: argparse.Namespace) -> int:
     cfg = get_config()
     show = Show(args.show)
     llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
-    where = "remote" if args.remote else "local"
     if args.stage == "outline":
-        plan = regenerate_outline_once(show, args.episode, args.model, remote=args.remote,
+        plan = regenerate_outline_once(show, args.episode, args.model,
                                        cfg=cfg, llm=llm, notes=args.notes)
         pr = plan.get("plan_review") or {}
-        print(f"{args.show} EP{args.episode:02d}: regenerated outline with {args.model} ({where})")
+        print(f"{args.show} EP{args.episode:02d}: regenerated outline with {args.model}")
         print(f"  passed={pr.get('passed')}  rounds={pr.get('rounds')}  "
               f"notes={len(pr.get('notes') or [])}")
         return 0
-    script = rewrite_script_once(show, args.episode, args.model, remote=args.remote,
+    script = rewrite_script_once(show, args.episode, args.model,
                                  cfg=cfg, llm=llm, notes=args.notes)
     rev = script.get("_review") or {}
-    print(f"{args.show} EP{args.episode:02d}: rewrote script with {args.model} ({where})")
+    print(f"{args.show} EP{args.episode:02d}: rewrote script with {args.model}")
     print(f"  passed={rev.get('passed')}  rounds={rev.get('rounds')}  "
           f"notes={len(rev.get('notes') or [])}")
     return 0
@@ -476,7 +473,8 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
             "tone": cfg.get("show_profile", "tone", []),
             "language": "en",
             "runtime_target_s": cfg.get("show_profile", "runtime_target_s", DEFAULT_RUNTIME_TARGET_S),
-            "style_guide": "",  # filled by the Gate 0 bootstrap
+            "style_guide": "",  # rendering/linework only; filled by the Gate 0 bootstrap
+            "art_direction": {},  # camera/lighting/palette reference; never in prompts
             # Per-show style references (set these in the show's bible).
             "baseline": "",
             "fanservice_baseline": "",
@@ -486,7 +484,7 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
         },
         "arcs": [],
         "overall_plotline": None,
-        "content_policy": cfg.get("show_profile", "maturity", "mature"),
+        "content_policy": cfg.get("show_profile", "maturity") or "",
     }
     (show_dir / "bible.yaml").write_text(
         yaml.safe_dump(bible, sort_keys=False, allow_unicode=True), encoding="utf-8",
@@ -498,190 +496,59 @@ def _cmd_init_show(args: argparse.Namespace) -> int:
     db.close()
     print(f"created show '{show_id}' at {show_dir}")
 
-    # Gate 0: generate the concept (brief or zero-input auto bootstrap)
-    if args.brief or args.generate:
-        from .bootstrap import BootstrapChain
-        from .show import Show
-        chain = BootstrapChain(Show(show_id))
-        if args.generate:
-            chain._auto_override = True
-            print(f"[init-show:{show_id}] running zero-input auto bootstrap...")
-        else:
-            print(f"[init-show:{show_id}] generating concept from brief...")
-        for line in chain.advance(brief=args.brief):
-            print("  ", line)
-        state = Show(show_id).bootstrap_state()
-        if state.get("complete"):
-            print(f"[init-show:{show_id}] BOOTSTRAP COMPLETE - the show is cast and can schedule episodes.")
-        else:
-            print(f"[init-show:{show_id}] next: `studio.py bootstrap --show {show_id}` "
-                  "(or `--auto`) to advance the approval chain.")
+    from .board.gate0 import bootstrap_cards
+    from .board.store import BoardSet
+    store = BoardSet(cfg)
+    cards = [store.upsert(c) for c in bootstrap_cards(show_id, brief=args.brief,
+                                                      auto=bool(args.generate))]
+    store.close()
+    print("queued " + ", ".join(c["id"] for c in cards) + " on the board "
+          "(run `studio.py board` to work them; approve on the board UI)")
     return 0
 
 
 def _cmd_bootstrap(args: argparse.Namespace) -> int:
-    from .bootstrap import BootstrapChain
-    from .show import Show
-    chain = BootstrapChain(Show(args.show))
-    if args.auto:
-        chain._auto_override = True
-    log = chain.advance()
-    for line in log:
-        print("  ", line)
-    state = Show(args.show).bootstrap_state()
-    if state.get("complete"):
-        print(f"[bootstrap:{args.show}] BOOTSTRAP COMPLETE")
-    else:
-        pending = _pending_step(state)
-        print(f"[bootstrap:{args.show}] blocked on human gate: {pending or 'unknown'}")
-        print(f"  approve: `studio.py approve --show {args.show} --step {pending.split(' ')[0] if pending else '...'}`")
+    """Queue (or re-queue) the show's Gate 0 card on the board."""
+    from .board.gate0 import bootstrap_cards
+    from .board.store import BoardSet
+    cfg = get_config()
+    if not (cfg.show_path(args.show) / "bootstrap.json").exists() and \
+            not (cfg.show_path(args.show) / "bible.yaml").exists():
+        print(f"error: no show '{args.show}'")
+        return 1
+    store = BoardSet(cfg)
+    cards = [store.upsert(c) for c in bootstrap_cards(args.show, auto=bool(args.auto))]
+    store.close()
+    print("queued " + ", ".join(c["id"] for c in cards) + " on the board "
+          "(run `studio.py board` to work them; approve on the board UI)")
     return 0
-
-
-def _cmd_reconcile(args: argparse.Namespace) -> int:
-    """Self-healing: resume any show whose Gate-0 chain was interrupted.
-
-    Reconcile is idempotent — it re-runs advance() from disk state, skipping
-    work that already produced artifacts and resuming interrupted steps. It
-    stops at the next human gate, so it is safe to run on a schedule or from
-    `serve` without ever auto-approving a gated artifact.
-    """
-    from .bootstrap import reconcile_show
-    from .show import Show
-    shows = [args.show] if args.show else get_config().list_shows()
-    for show_id in shows:
-        if not (get_config().show_path(show_id) / "bootstrap.json").exists():
-            continue
-        log = reconcile_show(show_id)
-        state = Show(show_id).bootstrap_state()
-        if state.get("complete"):
-            print(f"[reconcile:{show_id}] BOOTSTRAP COMPLETE")
-            continue
-        if log:
-            for line in log:
-                print(f"  {show_id}: {line}")
-        print(f"[reconcile:{show_id}] {_pending_step(state) or 'stalled, nothing pending'}")
-    return 0
-
-
-def _pending_step(state: dict) -> str | None:
-    if state.get("concept", {}).get("status") == "pending":
-        return "concept"
-    if state.get("bible", {}).get("status") == "pending":
-        return "bible"
-    for ch in state.get("characters", []):
-        if ch.get("voice") == "pending":
-            return f"voice --char {ch.get('name')}"
-        if ch.get("proposal") == "pending":
-            return f"character --char {ch.get('name')}"
-    if state.get("scenes", {}).get("status") == "pending":
-        return "scenes"
-    return None
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
-    from .bootstrap import BootstrapChain
-    from .bus.events import (
-        BIBLE_APPROVED, CHAR_PROPOSAL_APPROVED, CHAR_REFS_APPROVED,
-        CONCEPT_APPROVED, SCENE_REGISTRY_APPROVED, VOICE_APPROVED, new_event,
-    )
-    from .show import Show
-    show = Show(args.show)
-    st = show.bootstrap_state()
-    step = args.step
-    if step == "concept":
-        st["concept"]["status"] = "approved"
-        show.set_bootstrap_state(st)
-        chain = BootstrapChain(show)
-        chain._emit(new_event(CONCEPT_APPROVED, show_id=args.show, payload={"manual": True}))
-    elif step == "bible":
-        st["bible"]["status"] = "approved"
-        show.set_bootstrap_state(st)
-        chain = BootstrapChain(show)
-        chain._emit(new_event(BIBLE_APPROVED, show_id=args.show, payload={"manual": True}))
-    elif step in ("character", "voice"):
-        name = args.char or ""
-        entry = next((c for c in st.get("characters", []) if c.get("name") == name), None)
-        if entry is None:
-            print(f"error: no character named '{name}' in bootstrap state")
-            return 1
-        chain = BootstrapChain(show)
-        if step == "character":
-            # Whole-character approval: the proposal, its reference image and its
-            # voice are all signed off — identical to the dashboard's
-            # approve_step("character") so both entry points agree.
-            entry["proposal"] = "approved"
-            entry["refs"] = "approved"
-            entry["voice"] = "approved"
-            c = next((show.read_character(cid) for cid in show.list_characters()
-                      if show.read_character(cid).get("name") == name), None)
-            if c and c.get("id"):
-                from .storyboard import mark_base_ref_approved
-                mark_base_ref_approved(show, c["id"])
-            show.set_bootstrap_state(st)
-            chain._emit(new_event(CHAR_PROPOSAL_APPROVED, show_id=args.show,
-                                  payload={"char": name, "manual": True}))
-            chain._emit(new_event(CHAR_REFS_APPROVED, show_id=args.show,
-                                  payload={"char": name, "manual": True}))
-            chain._emit(new_event(VOICE_APPROVED, show_id=args.show,
-                                  payload={"char": name, "manual": True}))
-        else:
-            entry["voice"] = "approved"
-            show.set_bootstrap_state(st)
-            chain._emit(new_event(VOICE_APPROVED, show_id=args.show,
-                                  payload={"char": name, "manual": True}))
-    elif step == "scenes":
-        st["scenes"]["status"] = "approved"
-        show.set_bootstrap_state(st)
-        chain = BootstrapChain(show)
-        chain._emit(new_event(SCENE_REGISTRY_APPROVED, show_id=args.show, payload={"manual": True}))
-    else:
-        print(f"error: unknown step '{step}' (concept|bible|character|voice|scenes)")
-        return 2
-    for line in chain.advance():
+    from .approval import approve_step
+    try:
+        messages = approve_step(args.show, args.step,
+                               char=getattr(args, "char", "") or "",
+                               notes=getattr(args, "notes", "") or "")
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    for line in messages:
         print("  ", line)
-    print(f"[approve:{args.show}] {step} approved.")
+    print(f"[approve:{args.show}] {args.step} approved.")
     return 0
 
 
 def _cmd_reject(args: argparse.Namespace) -> int:
-    from .bootstrap import BootstrapChain
-    from .show import Show
-    show = Show(args.show)
-    st = show.bootstrap_state()
-    step = args.step
-    notes = args.notes or "no notes"
-    if step == "concept":
-        st["concept"] = {"status": "", "rejected_notes": notes}
-    elif step == "bible":
-        st["bible"] = {"status": "", "rejected_notes": notes}
-    elif step in ("character", "voice"):
-        name = args.char or ""
-        entry = next((c for c in st.get("characters", []) if c.get("name") == name), None)
-        if entry is None:
-            print(f"error: no character named '{name}' in bootstrap state")
-            return 1
-        # reject regenerates the proposal: drop the character file + reset its entry
-        cid = name.lower().replace(" ", "-")
-        for c in show.list_characters():
-            if show.read_character(c).get("name") == name:
-                cid = c
-                break
-        char_file = show.characters_dir / f"{cid}.yaml"
-        if char_file.exists():
-            char_file.unlink()
-        st["characters"] = [c for c in st.get("characters", []) if c.get("name") != name]
-        st["characters"].append({"name": name, "proposal": "pending", "refs": "",
-                                 "voice": "", "rejected_notes": notes})
-    elif step == "scenes":
-        st["scenes"] = {"status": "", "rejected_notes": notes}
-    else:
-        print(f"error: unknown step '{step}'")
-        return 2
-    show.set_bootstrap_state(st)
-    print(f"[reject:{args.show}] {step} rejected with notes: {notes!r}; regenerating...")
-    chain = BootstrapChain(show)
-    for line in chain.advance():
+    from .approval import reject_step
+    try:
+        messages = reject_step(args.show, args.step,
+                               char=getattr(args, "char", "") or "",
+                               notes=getattr(args, "notes", "") or "no notes")
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    for line in messages:
         print("  ", line)
     return 0
 
@@ -720,25 +587,28 @@ def _cmd_add_character(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _cmd_request_run(args: argparse.Namespace) -> int:
+    """Create the board cards for the next episode (agent-first)."""
+    from .board import request_episode
+    from .board.store import BoardSet
+    from .show import Show
+
     cfg = get_config()
-    db = DB(cfg.db_path)
-    bus = make_broker(cfg["bus"])
-    controller = RunController(cfg, db, bus)
-    bus.register("bus:run", "run-controller", controller.on_run_requested)
     show_id = args.show or (cfg.list_shows() or [None])[0]
     if not show_id:
         print("error: no show exists; run `studio.py init-show --name <id>` first")
         return 1
-    bus.publish("bus:run", new_event(
-        RUN_REQUESTED, show_id=show_id,
-        payload={"mode": args.mode, "budget_min": args.budget_min},
-    ))
-    row = db.query(
-        "SELECT id, episode, status FROM runs WHERE show_id=? ORDER BY id DESC LIMIT 1",
-        (show_id,),
-    )[0]
-    print(f"run #{row['id']} for {show_id} EP{row['episode']} status={row['status']}")
-    db.close()
+    store = BoardSet(cfg)
+    episode = int(getattr(args, "episode", 0) or 0)
+    if episode <= 0:
+        continuity = Show(show_id).read_continuity() or {}
+        cards = store.all(show_id=show_id)
+        episode = max([int(continuity.get("episode") or 0)] +
+                      [int(c.get("episode") or 0) for c in cards]) + 1
+    cards = request_episode(store, show_id, episode)
+    print(f"{show_id} EP{episode:02d}: {len(cards)} card(s) on the board")
+    for card in cards:
+        print(f"  {card['id']:22s} {card['state']:9s} {card['role']}")
+    store.close()
     return 0
 
 
@@ -746,93 +616,140 @@ def _cmd_request_run(args: argparse.Namespace) -> int:
 # serve (node B) - broker + consumers + timer source
 # ---------------------------------------------------------------------------
 
-def _cmd_dashboard(args: argparse.Namespace) -> int:
-    from .dashboard import serve
-    httpd = serve(port=args.port, bind=args.bind)
-    url = f"http://{args.bind}:{args.port}"
-    print(f"[dashboard] approval & review dashboard at {url}  (Ctrl+C to stop)")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[dashboard] stopping")
-    return 0
-
-
-def _cmd_serve(args: argparse.Namespace) -> int:
+def _cmd_board(args: argparse.Namespace) -> int:
+    """Run the agent board: HTTP API + supervisor daemon."""
+    from .board.api import serve as board_serve
     cfg = get_config()
-    db = DB(cfg.db_path)
-    bus = make_broker(cfg["bus"])
-    controller = RunController(cfg, db, bus)
-
-    bus.register("bus:run", "run-controller", controller.on_run_requested)
-    bus.register("bus:run", "log-run", lambda e: log.info("run event: %s", e.type))
-
-    def _log_stage(e):
-        log.info("stage event %s (show=%s ep=%s)", e.type, e.show_id, e.episode)
-
-    for stream in ("bus:dev", "bus:script", "bus:keyframes", "bus:shots",
-                   "bus:dialogue", "bus:assembly", "bus:qc", "bus:delivery",
-                   "bus:approval", "bus:system"):
-        bus.register(stream, "log", _log_stage)
-
-    bus.start()
-    print(f"[serve] broker={cfg['bus']['provider']} nodes: worker-B. Ctrl+C to stop.")
-    shows = cfg.list_shows()
-
-    # Self-healing: resume any show whose Gate-0 chain was interrupted before
-    # the worker came up (crash / restart). Runs once, in the background; stops
-    # at the next human gate and never auto-approves a gated artifact.
-    def _reconcile_all() -> None:
-        from .bootstrap import reconcile_if_stalled
-        from .clients.lmstudio import LMStudioClient
-        from .refs import rebuild_missing
-        from .show import Show
-        time.sleep(1.0)
-        try:
-            llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
-        except Exception:
-            llm = None
-        for show in shows:
-            try:
-                if reconcile_if_stalled(show):
-                    log.info("[reconcile] resumed Gate-0 chain for %s", show)
-            except Exception:
-                log.exception("[reconcile] precheck failed for %s", show)
-            # Auto-build refs for any character missing a real one (nude-first for
-            # the recurring cast). Serialized with the bootstrap chain's lock so the
-            # two startup passes can't race and clobber each other.
-            try:
-                from .bootstrap import run_show_locked
-                done = run_show_locked(
-                    show, lambda s=show: rebuild_missing(Show(s), cfg=cfg, llm=llm))
-                if done:
-                    log.info("[refs] startup-generated refs for %s: %s",
-                             show, ", ".join(done))
-            except Exception:
-                log.exception("[refs] startup ref build failed for %s", show)
-
-    threading.Thread(target=_reconcile_all, daemon=True,
-                     name="startup-reconcile").start()
-    if not shows:
-        print("[serve] no shows yet - `studio.py init-show --name <id>`")
-    elif args.request_once:
-        for show in shows:
-            bus.publish("bus:run", new_event(
-                RUN_REQUESTED, show_id=show,
-                payload={"mode": cfg.get("pipeline", "mode", "overnight"),
-                         "budget_min": cfg.get("pipeline", "budget_min", 480)},
-            ))
-            print(f"[serve] published RunRequested for {show}")
-        print("[serve] stage consumers land at M1; blocking for demo. Ctrl+C to stop.")
+    port = int(getattr(args, "port", 0) or cfg.get("agents", "port", 8130))
+    bind = getattr(args, "bind", "") or cfg.get("agents", "bind", "127.0.0.1")
+    start_daemon = not bool(getattr(args, "no_daemon", False))
+    cfg.data["agents"]["board_url"] = f"http://{bind}:{port}"
+    board_serve(port=port, bind=bind, start_daemon=start_daemon, cfg=cfg)
+    print(f"[board] cards + lanes at http://{bind}:{port}/api/board "
+          f"(daemon={'on' if start_daemon else 'off'}). Ctrl+C to stop.")
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
-        print("\n[serve] stopping")
-    finally:
-        bus.stop()
-        db.close()
+        print("\n[board] stopping")
     return 0
+
+
+def _board_url() -> str:
+    return (os.environ.get("STUDIO_BOARD_URL")
+            or get_config().get("agents", "board_url", "http://127.0.0.1:8130"))
+
+
+def _get_board(path: str, timeout: float = 30) -> dict:
+    req = urllib.request.Request(_board_url().rstrip("/") + path)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def _post_board(path: str, payload: dict, timeout: float) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        _board_url().rstrip("/") + path, data=data,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def _cmd_board_tool(args: argparse.Namespace) -> int:
+    run_id = args.run or os.environ.get("STUDIO_RUN_ID", "")
+    card_id = args.card or os.environ.get("STUDIO_CARD_ID", "")
+    if not run_id or not card_id:
+        print("error: --run and --card (or STUDIO_RUN_ID/STUDIO_CARD_ID)")
+        return 2
+    try:
+        tool_args = json.loads(args.args or "{}")
+    except ValueError as exc:
+        print(f"error: --args is not JSON: {exc}")
+        return 2
+    if not isinstance(tool_args, dict):
+        print("error: --args must be a JSON object")
+        return 2
+    extra = list(getattr(args, "extra", []) or [])
+    i = 0
+    while i < len(extra):
+        token = extra[i]
+        if not token.startswith("--"):
+            i += 1
+            continue
+        key = token[2:].replace("-", "_")
+        if "=" in key:
+            key, value = key.split("=", 1)
+            tool_args[key] = value
+            i += 1
+        elif i + 1 < len(extra) and not extra[i + 1].startswith("--"):
+            tool_args[key] = extra[i + 1]
+            i += 2
+        else:
+            tool_args[key] = True
+            i += 1
+    if isinstance(tool_args.get("ids"), str):
+        tool_args["ids"] = [x for x in tool_args["ids"].split(",") if x]
+    try:
+        out = _post_board(f"/api/tools/{args.name}",
+                          {"run_id": run_id, "card_id": card_id,
+                           "args": tool_args,
+                           "async": bool(getattr(args, "async_", False))},
+                          args.timeout)
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}")
+        return 1
+    if out.get("job_id"):
+        print(json.dumps({"job_id": out["job_id"], "state": "running"}))
+        return 0
+    print(json.dumps(out.get("result"), ensure_ascii=False, default=str))
+    return 0
+
+
+def _cmd_board_wait(args: argparse.Namespace) -> int:
+    deadline = time.time() + float(args.timeout or 110)
+    while True:
+        try:
+            out = _get_board(f"/api/jobs/{args.job}")
+        except Exception as exc:
+            print(f"error: {type(exc).__name__}: {exc}")
+            return 1
+        if out.get("state") in ("done", "failed") or time.time() >= deadline:
+            print(json.dumps(out, ensure_ascii=False, default=str))
+            return 0 if out.get("state") != "failed" else 1
+        time.sleep(1)
+
+
+def _cmd_board_finish(args: argparse.Namespace) -> int:
+    run_id = args.run or os.environ.get("STUDIO_RUN_ID", "")
+    if not run_id:
+        print("error: --run (or STUDIO_RUN_ID)")
+        return 2
+    payload: dict = {"run_id": run_id}
+    for key in ("status", "verdict", "summary", "notes", "error"):
+        value = getattr(args, key, None)
+        if value:
+            payload[key] = value
+    try:
+        _post_board("/api/runs/finish", payload, 60)
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}")
+        return 1
+    print("finished")
+    return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Legacy entry point: now runs the agent board."""
+    if getattr(args, "request_once", False):
+        from .board import request_episode
+        from .board.store import BoardSet
+        cfg = get_config()
+        store = BoardSet(cfg)
+        for show_id in cfg.list_shows():
+            cards = request_episode(store, show_id, 1)
+            print(f"[board] {show_id}: {len(cards)} card(s) queued")
+        store.close()
+    return _cmd_board(argparse.Namespace(port=0, bind="", no_daemon=False))
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +795,7 @@ def _cmd_qc(args: argparse.Namespace) -> int:
 
     Every rendered clip in runs/EP##/video/*.mp4 is transcribed and compared
     against its shot's script dialogue. Results persist to
-    runs/EP##/qc/summary.json + the qc_results DB table (what the dashboard
+    runs/EP##/qc/summary.json + the qc_results DB table (what the board
     shows). Always re-runs over existing clips; skip already-QC'd shots with
     the ``--shot`` filter to re-check just one.
     """
@@ -969,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("verify", help="health-check config/db/bus/clients")
+    sub.add_parser("verify", help="health-check config/db/board/clients")
 
     st = sub.add_parser("setup", help="per-machine provisioning checklist (DESIGN.md §7.7)")
     st.add_argument("--venv", action="store_true", help="create the .venv")
@@ -1070,9 +987,7 @@ def build_parser() -> argparse.ArgumentParser:
     rw.add_argument("--episode", type=int, default=1)
     rw.add_argument("--stage", choices=["script", "outline"], default="script",
                     help="what to rewrite: the failed script (default) or the outline")
-    rw.add_argument("--model", required=True, help="model id (local or remote)")
-    rw.add_argument("--remote", action="store_true",
-                    help="treat --model as a remote (Zen) model id")
+    rw.add_argument("--model", required=True, help="LM Studio model id")
     rw.add_argument("--notes", default="", help="extra director note folded into the rewrite")
 
     ev = sub.add_parser("eval", help="run a stage N times on frozen inputs; measure variance/quality/cost")
@@ -1091,9 +1006,6 @@ def build_parser() -> argparse.ArgumentParser:
     evc.add_argument("a", help="baseline report.json")
     evc.add_argument("b", help="candidate report.json")
 
-    dash = sub.add_parser("dashboard", help="run the local human approval & review dashboard")
-    dash.add_argument("--port", type=int, default=8125)
-    dash.add_argument("--bind", default="127.0.0.1")
     rv.add_argument("--show", default="", help="show id (for continuity + mature_spec context)")
     rv.add_argument("--episode", type=int, default=1)
     rv.add_argument("--round", type=int, default=1)
@@ -1122,9 +1034,6 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--show", required=True)
     b.add_argument("--auto", action="store_true", help="auto-approve every step to completion")
 
-    rc = sub.add_parser("reconcile", help="self-heal: resume any interrupted Gate-0 chains (idempotent)")
-    rc.add_argument("--show", default="", help="show id (default: all shows)")
-
     ap = sub.add_parser("approve", help="approve a bootstrap artifact (human gate)")
     ap.add_argument("--show", required=True)
     ap.add_argument("--step", required=True, choices=["concept", "bible", "character", "voice", "scenes"])
@@ -1141,14 +1050,42 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--name", required=True)
     a.add_argument("--brief", default="")
 
-    r = sub.add_parser("request-run", help="publish RunRequested for a show")
+    r = sub.add_parser("request-run", help="create board cards for the next episode")
     r.add_argument("--show", default="")
+    r.add_argument("--episode", type=int, default=0,
+                   help="episode number (default: next after the board/continuity)")
     r.add_argument("--mode", default="overnight")
     r.add_argument("--budget-min", type=int, default=480)
 
-    s = sub.add_parser("serve", help="run the worker node B (broker + consumers + timer)")
+    b = sub.add_parser("board", help="run the agent board (API + supervisor daemon)")
+    b.add_argument("--port", type=int, default=0, help="API port (config agents.port)")
+    b.add_argument("--bind", default="", help="bind address (config agents.bind)")
+    b.add_argument("--no-daemon", action="store_true",
+                   help="serve the API only; do not launch agents")
+
+    bt = sub.add_parser("board-tool", help="run one board tool for an agent run")
+    bt.add_argument("--name", required=True)
+    bt.add_argument("--run", default="")
+    bt.add_argument("--card", default="")
+    bt.add_argument("--args", default="{}", help="tool args as JSON")
+    bt.add_argument("--timeout", type=float, default=3600)
+    bt.add_argument("--async", dest="async_", action="store_true",
+                    help="submit and return a job id; poll with board-wait")
+    bw = sub.add_parser("board-wait", help="wait for an async board tool job")
+    bw.add_argument("--job", required=True)
+    bw.add_argument("--timeout", type=float, default=110)
+
+    bf = sub.add_parser("board-finish", help="send an agent run's final verdict")
+    bf.add_argument("--run", default="")
+    bf.add_argument("--status", default="")
+    bf.add_argument("--verdict", default="")
+    bf.add_argument("--summary", default="")
+    bf.add_argument("--notes", nargs="?", const="", default="")
+    bf.add_argument("--error", default="")
+
+    s = sub.add_parser("serve", help="run the agent board (legacy alias)")
     s.add_argument("--request-once", action="store_true",
-                   help="publish RunRequested for each show once, then block (M0 demo)")
+                   help="queue episode 1 cards for each show, then run the board")
 
     sub.add_parser("renderer", help="run the renderer node A agent (M0 stub)")
 
@@ -1177,7 +1114,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        if args.command == "board-tool":
+            args.extra = list(getattr(args, "extra", []) or []) + unknown
+        else:
+            parser.error("unrecognized arguments: " + " ".join(unknown))
     _log_setup(args.verbose)
     handlers = {
         "verify": _cmd_verify,
@@ -1201,13 +1144,15 @@ def main(argv: list[str] | None = None) -> int:
         "scene-master": _cmd_scene_master,
         "init-show": _cmd_init_show,
         "bootstrap": _cmd_bootstrap,
-        "reconcile": _cmd_reconcile,
         "approve": _cmd_approve,
         "reject": _cmd_reject,
         "add-character": _cmd_add_character,
         "request-run": _cmd_request_run,
+        "board": _cmd_board,
+        "board-tool": _cmd_board_tool,
+        "board-wait": _cmd_board_wait,
+        "board-finish": _cmd_board_finish,
         "serve": _cmd_serve,
-        "dashboard": _cmd_dashboard,
         "renderer": _cmd_renderer,
         "status": _cmd_status,
         "qc": _cmd_qc,

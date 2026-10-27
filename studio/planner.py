@@ -128,10 +128,10 @@ def ensure_story_engine(show: Show, llm=None, cfg=None) -> str:
     text = promptlog.logged_chat(
         llm, show, 0, "story-engine",
         [{"role": "system", "content": prompts.showrunner_system(
-            show.style_profile(cfg), bible.get("content_policy", "mature"),
+            show.style_profile(cfg), bible.get("content_policy") or "",
             show.style_profile(cfg).get("baseline", ""))},
          {"role": "user", "content": _p.story_engine_architect_prompt(bible)}],
-        model=model, role="showrunner", temperature=0.6, max_tokens=16384,
+        model=model, role="showrunner", temperature=0.6, max_tokens=16384, retries=2,
         on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
             "detail": f"Designing story engine ({n} tokens…)",
             "output": t[-500:], "ts": time.time()}}))
@@ -240,22 +240,15 @@ class _ModelOverride:
     chosen model for the whole writers' room.
     """
 
-    def __init__(self, client, model: str | None = None,
-                 remote_model: str | None = None, prefer_local: bool = False):
+    def __init__(self, client, model: str | None = None):
         self._client = client
         self._model = model
-        self._remote_model = remote_model
-        self._prefer_local = prefer_local
 
     def _apply(self, kw: dict[str, Any]) -> dict[str, Any]:
         if str(kw.get("role") or "").endswith("_reviewer"):
             return kw
         if self._model:
             kw["model"] = self._model
-        if self._remote_model:
-            kw["remote_model"] = self._remote_model
-        if self._prefer_local:
-            kw["prefer_local"] = True
         return kw
 
     def chat(self, messages, **kw):
@@ -295,13 +288,55 @@ def _cast_flaws_block(show: Show) -> str:
             + "\n".join(lines))
 
 
-def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
-                          notes: str = "") -> dict[str, Any]:
-    """Chunk 1: produce the episode plan (summary + scene blueprint). Writes plan.json.
+PLAN_SKELETON_FILE = "plan.skeleton.json"
+PLAN_CONTEXT_FILE = "plan.context.json"
 
-    SEASON-FIRST: ensures the covering season plan exists (auto-generates it
-    hands-free on first use), then development expands that season entry.
-    The season entry is strict canon carried on the plan as ``_season_entry``.
+
+def _plan_context_path(show: Show, episode: int) -> Path:
+    p = show.dir / "runs" / f"EP{episode:02d}" / PLAN_CONTEXT_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _plan_skeleton_path(show: Show, episode: int) -> Path:
+    p = show.dir / "runs" / f"EP{episode:02d}" / PLAN_SKELETON_FILE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _plan_beats_path(show: Show, episode: int, first: str, last: str) -> Path:
+    p = (show.dir / "runs" / f"EP{episode:02d}"
+         / f"plan.beats.{first}..{last}.json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def read_plan_skeleton(show: Show, episode: int) -> dict[str, Any]:
+    return epstate.read_json(_plan_skeleton_path(show, episode), {}) or {}
+
+
+def read_plan_context(show: Show, episode: int) -> dict[str, Any]:
+    return epstate.read_json(_plan_context_path(show, episode), {}) or {}
+
+
+def _cancel_requested(cancel) -> bool:
+    if cancel is None:
+        return False
+    is_set = getattr(cancel, "is_set", None)
+    return bool(is_set() if callable(is_set) else cancel)
+
+
+def _check_cancel(cancel) -> None:
+    if _cancel_requested(cancel):
+        raise RuntimeError("outline job canceled")
+
+
+def _plan_setup(show: Show, episode: int, llm, cfg, notes: str = "") -> dict[str, Any]:
+    """Everything the skeleton needs before its one LLM call.
+
+    Season canon + development are resolved HERE once and persisted with the
+    skeleton, so the per-batch beat calls and the final merge do not re-run
+    ``develop_episode`` (itself an LLM call) for every card.
     """
     from .clients.lmstudio import LMStudioClient
     from .development import develop_episode
@@ -372,28 +407,115 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
     dir_notes = read_director_notes(show)
 
     system = prompts.showrunner_system(
-        show.style_profile(cfg), bible.get("content_policy", "mature"),
+        show.style_profile(cfg), bible.get("content_policy") or "",
         show.style_profile(cfg).get("baseline", ""))
 
     # Canonical locations: hand the outline the scene registry so every scene
     # names a recurring place (a stable location_id), instead of inventing a
     # free-text spot that no reference image is attached to.
     from . import scenes as _scenes
-    _registry = _scenes.registry_block(show)
+    registry = _scenes.registry_block(show)
+    return {
+        "llm": llm, "cfg": cfg, "model": model, "bible": bible,
+        "continuity": continuity, "names": names, "synopsis": synopsis,
+        "dev": dev, "plan_dev": plan_dev, "season_entry": season_entry,
+        "season_no": season_no, "season_mandate": season_mandate,
+        "state": state, "current_plan": current_plan, "dir_notes": dir_notes,
+        "system": system, "registry": registry, "target": _target(show),
+    }
+
+
+def _finalize_plan(show: Show, episode: int, plan: dict[str, Any],
+                   ctx: dict[str, Any], *, notes: str = "",
+                   review: bool = False, cancel=None) -> dict[str, Any]:
+    """Shared cleanup/save for the single-call and staged outline paths."""
+    if dir_notes := ctx.get("dir_notes"):
+        plan.setdefault("director_constraints", dir_notes)
+    if isinstance(plan.get("plot"), dict):
+        plan["plot"] = (plan["plot"].get("summary") or "")
+    if not notes.strip():
+        plan.setdefault("episode", episode)
+    if notes.strip():
+        plan["rejected_notes"] = notes
+    names = ctx.get("names") or []
+    chars = [c for c in (plan.get("characters") or []) if isinstance(c, str) and c]
+    if not chars:
+        chars = list(names)
+    plan["characters"] = chars
+    plan.setdefault("cast", chars)
+    plan_scenes = [s for s in (plan.get("scenes") or [])
+                   if isinstance(s, dict) and s.get("id")]
+    if plan_scenes:
+        plan["scenes"] = plan_scenes
+    ep_type = str(plan.get("episode_type") or "").lower()
+    if ep_type == "character":
+        plan["threat_of_the_week"] = "none"
+    if review:
+        plan = _plan_review_loop(
+            show, episode, plan, ctx["llm"], ctx["cfg"], ctx["model"],
+            ctx["system"], ctx["bible"], ctx["synopsis"], ctx["continuity"],
+            names, ctx["state"], ctx["dir_notes"],
+            fixed_episode_type=str((ctx.get("plan_dev") or {}).get("episode_type") or ""),
+            rejection_notes=notes, cancel=cancel)
+    else:
+        # The outline reviewer card owns plan_review on the board. Never leave a
+        # stale pass from a previous draft on the regenerated plan.
+        plan.pop("plan_review", None)
+    _canonicalize_locations(show, plan)
+    plan["status"] = "pending"
+    plan["synopsis"] = ctx.get("synopsis") or ""
+    plan["_plan_dev"] = ctx.get("plan_dev") or {}
+    if ctx.get("season_entry"):
+        plan["_season"] = {"season": ctx.get("season_no"),
+                           "entry": ctx["season_entry"]}
+    epstate.save_plan(show, episode, plan)
+    return plan
+
+
+def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
+                          notes: str = "", review: bool = True,
+                          cancel=None) -> dict[str, Any]:
+    """Chunk 1: produce the episode plan (summary + scene blueprint). Writes plan.json.
+
+    SEASON-FIRST: ensures the covering season plan exists (auto-generates it
+    hands-free on first use), then development expands that season entry.
+    The season entry is strict canon carried on the plan as ``_season_entry``.
+
+    ``review=False`` skips the internal plan-review loop; the board uses it
+    because a dedicated outline_reviewer card already reviews the plan (running
+    the same reviewers twice was hours of duplicate LLM work per outline).
+    """
+    ctx = _plan_setup(show, episode, llm, cfg, notes)
+    llm = ctx["llm"]
+    cfg = ctx["cfg"]
+    model = ctx["model"]
+    bible = ctx["bible"]
+    continuity = ctx["continuity"]
+    names = ctx["names"]
+    synopsis = ctx["synopsis"]
+    dev = ctx["dev"]
+    plan_dev = ctx["plan_dev"]
+    season_mandate = ctx["season_mandate"]
+    state = ctx["state"]
+    current_plan = ctx["current_plan"]
+    dir_notes = ctx["dir_notes"]
+    system = ctx["system"]
+    registry = ctx["registry"]
+    _check_cancel(cancel)
 
     if current_plan and notes.strip():
         # Revision path: rewrite the rejected outline in one call from the notes.
         user_prompt = prompts.episode_plan_prompt(
             bible, synopsis, continuity, names, _target(show), current_plan, notes,
             dir_notes, state, fixed_episode_type=plan_dev.get("episode_type", ""),
-            scene_registry=_registry)
+            scene_registry=registry)
         if season_mandate:
             user_prompt += season_mandate
         plan = promptlog.logged_chat_json(
             llm, show, episode, "plan-revise",
             [{"role": "system", "content": system},
              {"role": "user", "content": user_prompt}],
-            model=model, role="showrunner", temperature=0.6, max_tokens=32768,
+            model=model, role="showrunner", temperature=0.6, max_tokens=16384, retries=2,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: revising plan ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
@@ -406,7 +528,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         _reward = _service.is_reward_episode(show, episode, cfg)
         skeleton_prompt = prompts.plan_skeleton_prompt(
             bible, state, dev, dir_notes, _target(show), continuity=continuity,
-            reward=_reward, scene_registry=_registry)
+            reward=_reward, scene_registry=registry)
         # Feed each character's FLAW/MOTIVATION so the outline's beats honour them —
         # the stakes/agency reviewers cite these sheets, but the generator (which only
         # saw the bible) did not, producing interchangeable beats.
@@ -419,7 +541,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
             llm, show, episode, "plan-skeleton",
             [{"role": "system", "content": system},
              {"role": "user", "content": skeleton_prompt}],
-            model=model, role="showrunner", temperature=0.6, max_tokens=32768,
+            model=model, role="showrunner", temperature=0.6, max_tokens=8192, retries=2,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: scene skeleton ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
@@ -431,6 +553,7 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
         # Phase 2: expand beats in batches.
         expanded: dict[str, dict[str, Any]] = {}
         for i in range(0, len(plan_scenes), beats_batch):
+            _check_cancel(cancel)
             batch = plan_scenes[i:i + beats_batch]
             ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: writing beats "
                                        f"({batch[0].get('id')}..{batch[-1].get('id')})…",
@@ -440,8 +563,8 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
                 f"plan-beats-{batch[0].get('id', '?')}..{batch[-1].get('id', '?')}",
                 [{"role": "system", "content": system},
                  {"role": "user", "content": prompts.plan_beats_prompt(
-                     bible, batch, dev, dir_notes, scene_registry=_registry)}],
-                model=model, role="showrunner", temperature=0.6, max_tokens=32768,
+                     bible, batch, dev, dir_notes, scene_registry=registry)}],
+                model=model, role="showrunner", temperature=0.6, max_tokens=8192, retries=2,
                 on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                     "detail": f"Episode {episode}: scene beats ({n} tokens…)",
                     "output": t[-500:], "ts": time.time()}}))
@@ -461,57 +584,280 @@ def generate_episode_plan(show: Show, episode: int, llm=None, cfg=None,
                 full["location_setting"] = sc["location_setting"]
             merged.append(full)
         plan["scenes"] = merged
-    # Director constraints are also part of the outline's recorded mandate.
-    if dir_notes:
-        plan.setdefault("director_constraints", dir_notes)
-    if isinstance(plan.get("plot"), dict):
-        plan["plot"] = (plan["plot"].get("summary") or "") if isinstance(plan["plot"], dict) else plan["plot"]
-    if not notes.strip():
-        plan.setdefault("episode", episode)
+    _check_cancel(cancel)
+    return _finalize_plan(show, episode, plan, ctx, notes=notes,
+                          review=review, cancel=cancel)
+
+
+def generate_plan_skeleton(show: Show, episode: int, llm=None, cfg=None,
+                           notes: str = "", cancel=None) -> dict[str, Any]:
+    """Phase 1 as its own board step: write plan.skeleton.json + plan.context.json."""
+    ctx = _plan_setup(show, episode, llm, cfg)
+    _check_cancel(cancel)
+    bible = ctx["bible"]
+    state = ctx["state"]
+    dev = ctx["dev"]
+    cfg = ctx["cfg"]
+    from . import service as _service
+    reward = _service.is_reward_episode(show, episode, cfg)
+    prompt = prompts.plan_skeleton_prompt(
+        bible, state, dev, ctx["dir_notes"], ctx["target"],
+        continuity=ctx["continuity"], reward=reward, scene_registry=ctx["registry"])
+    prompt += _cast_flaws_block(show)
+    if ctx["season_mandate"]:
+        prompt += ctx["season_mandate"]
     if notes.strip():
-        plan["rejected_notes"] = notes
-    # The model may omit the cast; the episode always features the approved
-    # roster (the script assembly keys off "cast", the dashboard off "characters").
-    chars = [c for c in (plan.get("characters") or []) if isinstance(c, str) and c]
-    if not chars:
-        chars = list(names)
-    plan["characters"] = chars
-    plan.setdefault("cast", chars)
-    # The scene-by-scene outline must be a list of dicts with at least an id; drop
-    # anything malformed so the dashboard/breakdown never trips on junk.
-    plan_scenes = [s for s in (plan.get("scenes") or [])
-                   if isinstance(s, dict) and s.get("id")]
-    if plan_scenes:
-        plan["scenes"] = plan_scenes
-    # A character episode must not carry a city-level threat: force the threat
-    # field to 'none' so the outline and downstream stages never re-index on it.
-    ep_type = str(plan.get("episode_type") or "").lower()
-    if ep_type == "character":
-        plan["threat_of_the_week"] = "none"
-    # Plan-level structural review: review the outline itself (plot vs synopsis vs
-    # scenes, cold-open-without-context for episode 1, resolved threat, distinct
-    # climax). If it fails, revise the outline with the reviewer notes as ABSOLUTE
-    # feedback and re-review, up to plan_max_revisions. The outcome is recorded on
-    # the plan as plan_review so approve_plan can refuse an outline that never
-    # cleared review.
-    plan = _plan_review_loop(show, episode, plan, llm, cfg, model, system,
-                             bible, synopsis, continuity, names, state, dir_notes,
-                             fixed_episode_type=plan_dev.get("episode_type", ""),
-                             rejection_notes=notes)
-    # Canonicalize each scene's location onto the registry (the final, reviewed
-    # scene list can differ from the skeleton the LLM first labelled).
-    _canonicalize_locations(show, plan)
-    plan["status"] = "pending"
-    plan["synopsis"] = synopsis
-    # Deferred plotline commit: carry what this episode featured so approve_plan
-    # can stamp continuity/bible ONLY on approval (never on a rejected/regenerated
-    # outline). Stripped from the stored plan by approve_plan.
-    plan["_plan_dev"] = plan_dev
-    # Season canon carried on the plan so approval can enforce it.
-    if season_entry:
-        plan["_season"] = {"season": season_no, "entry": season_entry}
+        current = read_plan_skeleton(show, episode)
+        if current:
+            prompt += ("\nCURRENT SKELETON (revise it; keep the good scenes):\n"
+                       + json.dumps(current, ensure_ascii=False) + "\n")
+        prompt += ("\nSKELETON FEEDBACK (apply it):\n" + notes.strip() + "\n")
+    ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: outlining scenes (skeleton)…",
+                              "ts": time.time()}
+    skeleton = promptlog.logged_chat_json(
+        ctx["llm"], show, episode, "plan-skeleton",
+        [{"role": "system", "content": ctx["system"]},
+         {"role": "user", "content": prompt}],
+        model=ctx["model"], role="showrunner", temperature=0.6, max_tokens=8192, retries=2,
+        on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+            "detail": f"Episode {episode}: scene skeleton ({n} tokens…)",
+            "output": t[-500:], "ts": time.time()}}))
+    plan = dict(skeleton or {})
+    scenes = [s for s in (plan.get("scenes") or [])
+              if isinstance(s, dict) and s.get("id")]
+    if not scenes:
+        raise RuntimeError(f"episode {episode} skeleton returned no scenes")
+    _check_cancel(cancel)
+    # A new skeleton invalidates every beat file from the previous draft.
+    for stale in (show.dir / "runs" / f"EP{episode:02d}").glob("plan.beats.*.json"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    epstate.write_json(_plan_skeleton_path(show, episode), plan)
+    epstate.write_json(_plan_context_path(show, episode), {
+        "model": ctx["model"], "system": ctx["system"],
+        "synopsis": ctx["synopsis"], "dev": dev, "names": ctx["names"],
+        "plan_dev": ctx["plan_dev"], "season_no": ctx["season_no"],
+        "season_entry": ctx["season_entry"],
+        "season_mandate": ctx["season_mandate"],
+        "dir_notes": ctx["dir_notes"],
+        "episode_type": str((ctx["plan_dev"] or {}).get("episode_type") or ""),
+    })
+    return {"path": str(_plan_skeleton_path(show, episode)),
+            "scenes": len(scenes),
+            "scene_ids": [s.get("id") for s in scenes]}
+
+
+def generate_plan_beats(show: Show, episode: int, scene_ids: list[str],
+                        llm=None, cfg=None, notes: str = "",
+                        cancel=None) -> dict[str, Any]:
+    """Phase 2 as its own board step: expand ONE batch of scenes into beats."""
+    skeleton = read_plan_skeleton(show, episode)
+    ctx = read_plan_context(show, episode)
+    if not skeleton or not ctx:
+        raise RuntimeError("no outline skeleton on disk; run outline_skeleton first")
+    wanted = {str(s) for s in (scene_ids or [])}
+    batch = [s for s in (skeleton.get("scenes") or [])
+             if isinstance(s, dict) and s.get("id")
+             and (not wanted or str(s.get("id")) in wanted)]
+    if not batch:
+        raise RuntimeError(f"outline skeleton has none of the requested scenes: "
+                           f"{sorted(wanted)}")
+    _check_cancel(cancel)
+    cfg = cfg or get_config()
+    if llm is None:
+        from .clients.lmstudio import LMStudioClient
+        llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=300)
+    bible = show.read_bible()
+    from . import scenes as _scenes
+    first, last = batch[0].get("id", "?"), batch[-1].get("id", "?")
+    beats_prompt = prompts.plan_beats_prompt(
+        bible, batch, ctx.get("dev") or {}, ctx.get("dir_notes") or [],
+        scene_registry=_scenes.registry_block(show))
+    if notes.strip():
+        beats_prompt += ("\n\nSCENE BEATS FEEDBACK (apply it exactly; keep the "
+                         "same scene ids and locations):\n" + notes.strip() + "\n")
+    ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: writing beats "
+                               f"({first}..{last})…", "ts": time.time()}
+    out = promptlog.logged_chat_json(
+        llm, show, episode, f"plan-beats-{first}..{last}",
+        [{"role": "system", "content": ctx.get("system") or ""},
+         {"role": "user", "content": beats_prompt}],
+        model=ctx.get("model") or cfg.get("llm", "model"),
+        role="showrunner", temperature=0.6, max_tokens=8192, retries=2,
+        on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+            "detail": f"Episode {episode}: scene beats ({n} tokens…)",
+            "output": t[-500:], "ts": time.time()}}))
+    scenes = [s for s in (out or {}).get("scenes", [])
+              if isinstance(s, dict) and s.get("id")]
+    _check_cancel(cancel)
+    path = _plan_beats_path(show, episode, str(first), str(last))
+    epstate.write_json(path, {"scenes": scenes})
+    return {"path": str(path),
+            "scene_ids": [s.get("id") for s in scenes],
+            "scenes": len(scenes)}
+
+
+def merge_outline_stages(show: Show, episode: int, llm=None, cfg=None,
+                         notes: str = "", cancel=None) -> dict[str, Any]:
+    """Final outline step: merge every beats batch into plan.json.
+
+    On a retake (``notes`` non-empty) it rewrites the whole outline in ONE call
+    from the reviewer notes, so the board's review/retake loop never re-runs
+    development or the beat batches.
+    """
+    skeleton = read_plan_skeleton(show, episode)
+    ctx = read_plan_context(show, episode)
+    if not skeleton or not ctx:
+        raise RuntimeError("no outline skeleton on disk; run outline_skeleton first")
+    cfg = cfg or get_config()
+    _check_cancel(cancel)
+    plan_dev = ctx.get("plan_dev") or {}
+    names = [c.get("name") for c in (show.read_character(cid)
+             for cid in show.list_characters()) if c.get("name")]
+    fin_ctx = {**ctx, "names": names}
+    if notes.strip():
+        if llm is None:
+            from .clients.lmstudio import LMStudioClient
+            llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=300)
+        bible = show.read_bible()
+        continuity = show.read_continuity()
+        state = state_tracker_data(
+            show, episode, episode_type=str(plan_dev.get("episode_type") or ""))
+        prior = read_episode_plan(show, episode) or skeleton
+        user_prompt = prompts.episode_plan_prompt(
+            bible, ctx.get("synopsis") or "", continuity, names, _target(show),
+            prior, notes, ctx.get("dir_notes") or [], state,
+            fixed_episode_type=str(plan_dev.get("episode_type") or ""),
+            scene_registry=_scenes_registry(show))
+        if ctx.get("season_mandate"):
+            user_prompt += ctx["season_mandate"]
+        plan = promptlog.logged_chat_json(
+            llm, show, episode, "plan-outline-revise",
+            [{"role": "system", "content": ctx.get("system") or ""},
+             {"role": "user", "content": user_prompt}],
+            model=ctx.get("model") or cfg.get("llm", "model"),
+            role="showrunner", temperature=0.6, max_tokens=16384, retries=2,
+            on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+                "detail": f"Episode {episode}: revising outline ({n} tokens…)",
+                "output": t[-500:], "ts": time.time()}}))
+        if not isinstance(plan, dict) or not plan.get("scenes"):
+            raise RuntimeError("outline revision returned no scenes")
+    else:
+        expanded: dict[str, dict[str, Any]] = {}
+        runs = show.dir / "runs" / f"EP{episode:02d}"
+        for path in sorted(runs.glob("plan.beats.*.json")):
+            try:
+                data = epstate.read_json(path, {}) or {}
+            except Exception:
+                continue
+            for sc in data.get("scenes") or []:
+                if isinstance(sc, dict) and sc.get("id"):
+                    expanded[sc["id"]] = sc
+        merged = []
+        for sc in (skeleton.get("scenes") or []):
+            if not isinstance(sc, dict) or not sc.get("id"):
+                continue
+            full = dict(expanded.get(sc["id"]) or sc)
+            if sc.get("location_id") and not full.get("location_id"):
+                full["location_id"] = sc["location_id"]
+            if sc.get("location_setting") and not full.get("location_setting"):
+                full["location_setting"] = sc["location_setting"]
+            merged.append(full)
+        plan = dict(skeleton)
+        plan["scenes"] = merged
+    _check_cancel(cancel)
+    plan = _finalize_plan(show, episode, plan, fin_ctx, notes=notes,
+                          review=False, cancel=cancel)
+    path = _plan_path(show, episode)
+    return {"path": str(path),
+            "plot": plan.get("plot") or plan.get("summary"),
+            "scenes": len(plan.get("scenes") or [])}
+
+
+def rewrite_plan_scene(show: Show, episode: int, scene_id: str, notes: str,
+                       llm=None, cfg=None, cancel=None) -> dict[str, Any]:
+    """Rewrite one scene (summary + beats) in ``plan.json`` with feedback."""
+    cfg = cfg or get_config()
+    plan = read_episode_plan(show, episode)
+    if not plan:
+        raise RuntimeError("no outline plan on disk")
+    scenes = list(plan.get("scenes") or [])
+    idx = next((i for i, s in enumerate(scenes)
+                if isinstance(s, dict) and str(s.get("id")) == str(scene_id)), None)
+    if idx is None:
+        raise RuntimeError(f"scene {scene_id} is not in the plan")
+    original = dict(scenes[idx])
+    _check_cancel(cancel)
+    if llm is None:
+        from .clients.lmstudio import LMStudioClient
+        llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=300)
+    bible = show.read_bible()
+    from . import scenes as _scenes
+    user_prompt = prompts.plan_beats_prompt(
+        bible, [original], plan.get("_plan_dev") or {},
+        read_director_notes(show), scene_registry=_scenes.registry_block(show))
+    user_prompt += (
+        "\n\nREWRITE FEEDBACK (apply this exactly; keep the same scene id, "
+        "location, time and cast unless the feedback explicitly changes them):\n"
+        f"{notes.strip() or 'No specific notes; improve this scene.'}\n\n"
+        "Return exactly ONE scene object in `scenes`.\n")
+    system = prompts.showrunner_system(
+        show.style_profile(cfg), bible.get("content_policy") or "",
+        show.style_profile(cfg).get("baseline", ""))
+    ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: rewriting {scene_id}…",
+                              "ts": time.time()}
+    out = promptlog.logged_chat_json(
+        llm, show, episode, f"plan-scene-rewrite-{scene_id}",
+        [{"role": "system", "content": system},
+         {"role": "user", "content": user_prompt}],
+        temperature=0.6, max_tokens=4096, retries=2,
+        on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
+            "detail": f"Episode {episode}: rewriting {scene_id} ({n} tokens…)",
+            "output": t[-500:], "ts": time.time()}}))
+    revised = next((s for s in (out or {}).get("scenes", [])
+                    if isinstance(s, dict)), None)
+    if not revised:
+        raise RuntimeError(f"{scene_id} rewrite returned no scene")
+    revised["id"] = original.get("id") or scene_id
+    for key in ("location_id", "location", "location_setting",
+                "time_of_day", "characters"):
+        if not revised.get(key) and original.get(key):
+            revised[key] = original[key]
+    _check_cancel(cancel)
+    scenes[idx] = revised
+    plan["scenes"] = scenes
+    plan.pop("plan_review", None)  # stale once a scene changes
     epstate.save_plan(show, episode, plan)
-    return plan
+    # Persist into the beat batch too, so a later merge cannot undo the rewrite.
+    runs = show.dir / "runs" / f"EP{episode:02d}"
+    wrote = False
+    for path in sorted(runs.glob("plan.beats.*.json")):
+        try:
+            data = epstate.read_json(path, {}) or {}
+        except Exception:
+            continue
+        batch = data.get("scenes") or []
+        if any(isinstance(x, dict) and str(x.get("id")) == str(scene_id)
+               for x in batch):
+            data["scenes"] = [revised if isinstance(x, dict)
+                              and str(x.get("id")) == str(scene_id) else x
+                              for x in batch]
+            epstate.write_json(path, data)
+            wrote = True
+            break
+    if not wrote:
+        epstate.write_json(runs / f"plan.beats.{scene_id}.json",
+                           {"scenes": [revised]})
+    return {"path": str(_plan_path(show, episode)), "scene_id": str(scene_id),
+            "summary": revised.get("summary"), "beats": revised.get("beats"),
+            "scene": revised}
+
+
+def _scenes_registry(show: Show) -> list[dict[str, Any]]:
+    from . import scenes as _scenes
+    return _scenes.registry_block(show)
 
 
 def _canonicalize_locations(show: Show, plan: dict[str, Any]) -> dict[str, Any]:
@@ -634,7 +980,8 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
                       names: list[str], state: dict[str, Any],
                       dir_notes: list[str],
                       fixed_episode_type: str = "",
-                      rejection_notes: str = "") -> dict[str, Any]:
+                      rejection_notes: str = "",
+                      cancel=None) -> dict[str, Any]:
     """Review the episode outline and revise it up to plan_max_revisions.
 
     Mirrors ``_writer_review`` but on the OUTLINE: the structure reviewer checks
@@ -676,12 +1023,15 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
         # downstream writer sees it, so the room that guards those must review the
         # OUTLINE - not only the finished script, where the outline is already locked.
         reviews = run_plan_reviewers(plan, show=show, cfg=cfg, llm=llm, episode=episode,
-                                     round_no=round_no, notes_dir=notes_dir)
+                                     round_no=round_no, notes_dir=notes_dir,
+                                     cancel=cancel)
         try:
             room = run_plan_room_reviewers(plan, show=show, cfg=cfg, llm=llm,
                                            episode=episode, round_no=round_no,
-                                           notes_dir=notes_dir)
+                                           notes_dir=notes_dir, cancel=cancel)
         except Exception as exc:
+            if _cancel_requested(cancel):
+                raise
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "plan room review failed EP%02d r%d: %s", episode, round_no, exc)
@@ -718,9 +1068,11 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
         return p
 
     round_no = 1
+    _check_cancel(cancel)
     reviews = _review(plan, round_no)
     passed = plan_passes(reviews)
     while not passed and round_no < max_revisions:
+        _check_cancel(cancel)
         round_no += 1
         feedback = _plan_review_feedback(reviews)
         if rejection_notes.strip():
@@ -745,7 +1097,7 @@ def _plan_review_loop(show: Show, episode: int, plan: dict[str, Any], llm, cfg,
             llm, show, episode, f"plan-outline-revise-r{round_no}",
             [{"role": "system", "content": system},
              {"role": "user", "content": _rev_prompt}],
-            model=model, role="showrunner", temperature=0.6, max_tokens=32768,
+            model=model, role="showrunner", temperature=0.6, max_tokens=16384, retries=2,
             on_progress=lambda n, t: ACTIVITY.update({show.show_id: {
                 "detail": f"Episode {episode}: revising outline ({n} tokens…)",
                 "output": t[-500:], "ts": time.time()}}))
@@ -924,7 +1276,7 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
             breakdown = promptlog.logged_chat_json(
                 llm, show, episode, "scene-breakdown",
                 [{"role": "system", "content": prompts.showrunner_system(
-                    show.style_profile(cfg), bible.get("content_policy", "mature"),
+                    show.style_profile(cfg), bible.get("content_policy") or "",
                     show.style_profile(cfg).get("baseline", ""))},
                  {"role": "user", "content": prompts.scene_breakdown_prompt(
                      bible, outline, cast, _target(show))}],
@@ -978,7 +1330,7 @@ def generate_scene_details(show: Show, episode: int, llm=None, cfg=None,
         detail = promptlog.logged_chat_json(
             llm, show, episode, f"scene-detail-{sid}",
             [{"role": "system", "content": prompts.showrunner_system(
-                show.style_profile(cfg), bible.get("content_policy", "mature"),
+                show.style_profile(cfg), bible.get("content_policy") or "",
                 show.style_profile(cfg).get("baseline", ""))},
              {"role": "user", "content": prompts.scene_detail_prompt(
                  bible,
@@ -1256,67 +1608,6 @@ def merge_nickname_ledger(existing: dict[str, Any] | None,
                 continue
             out.setdefault(speaker, {})[addressee] = [t for t in (terms or []) if t]
     return out
-
-
-def parse_dialogue_script(text: str, cast_names: list[str]) -> dict[str, list[dict[str, Any]]]:
-    """Parse the plain-text dialogue script into {scene_id: [line, ...]}.
-
-    Deterministic: the LLM returns lines like ``SPEAKER: words`` under ``=== sNN ===``
-    headers; everything before the first header (the VOICE block) is ignored. A
-    parenthetical marks a delivery note for the following words, or a speaker tag
-    (``V.O.`` / ``O.S.`` / ``OFF``) that makes the line an off-screen voiceover. A
-    ``(silent)`` scene maps to [] (an intentional silent beat); a header whose lines
-    all failed to parse is dropped so the caller can fall back.
-    """
-    cast_lut = _cast_lookup(cast_names)
-    scenes: dict[str, list[dict[str, Any]]] = {}
-    silent_marked: set[str] = set()
-    current: str | None = None
-    for raw in (text or "").splitlines():
-        line = raw.rstrip()
-        if not line.strip():
-            continue
-        header = _parse_scene_header(line)
-        if header:
-            current = header
-            scenes.setdefault(current, [])
-            continue
-        if current is None:
-            continue                      # VOICE notes / preamble
-        if line.strip().lower() in ("(silent)", "silent"):
-            silent_marked.add(current)
-            continue
-        if ":" not in line:
-            continue
-        name_part, _, spoken = line.partition(":")
-        name_part, spoken = name_part.strip(), spoken.strip()
-        if not spoken:
-            continue
-        on_camera: bool | None = None
-        tag_m = re.search(r"\(([^)]*)\)\s*$", name_part)
-        if tag_m:
-            tag = re.sub(r"[^a-z]", "", tag_m.group(1).lower())
-            name_part = name_part[:tag_m.start()].strip()
-            if tag in ("vo", "os", "off") or "voiceover" in tag or tag.startswith("off"):
-                on_camera = False
-        delivery = ""
-        del_m = re.match(r"^\(([^)]*)\)\s*(.*)$", spoken)
-        if del_m:
-            delivery, spoken = del_m.group(1).strip(), del_m.group(2).strip()
-        if not spoken:
-            continue
-        entry: dict[str, Any] = {"char": cast_lut.get(name_part.lower(), name_part),
-                                 "line": spoken}
-        if on_camera is False:
-            entry["on_camera"] = False
-        if delivery:
-            entry["delivery"] = delivery
-        scenes[current].append(entry)
-    # Keep a scene only if it has real lines or was explicitly marked (silent). A
-    # header whose lines all failed to parse is dropped, so the caller falls back
-    # to the legacy writer instead of silently silencing a scene that spoke.
-    return {sid: lines for sid, lines in scenes.items()
-            if lines or sid in silent_marked}
 
 
 def read_episode_dialogue(show: Show, episode: int) -> dict[str, list[dict[str, Any]]]:
@@ -1763,7 +2054,7 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
     target_s = _scene_runtime_target(plan_scene, _target(show),
                                      len(read_episode_plan(show, episode).get("scenes", [])))
     showrunner_sys = prompts.showrunner_system(
-        show.style_profile(cfg), bible.get("content_policy", "mature"),
+        show.style_profile(cfg), bible.get("content_policy") or "",
         show.style_profile(cfg).get("baseline", ""))
     sc_dir = _scenes_dir(show, episode)
     sc_dir.mkdir(parents=True, exist_ok=True)
@@ -1793,7 +2084,7 @@ def generate_scene_shots(show: Show, episode: int, plan_scene: dict[str, Any],
         # Dialogue gets its own system prompt: the showrunner prompt's "say more
         # with less / no on-the-nose lines" pushes overwritten, unspoken prose.
         system = (prompts.dialogue_system(
-            show.style_profile(cfg), bible.get("content_policy", "mature"),
+            show.style_profile(cfg), bible.get("content_policy") or "",
             show.style_profile(cfg).get("baseline", ""))
             if name == "dialogue" else showrunner_sys)
         ACTIVITY[show.show_id] = {"detail": f"Episode {episode}: scene {sid} — {name} pass…",
@@ -1976,7 +2267,7 @@ def _writer_review(show: Show, episode: int, script: dict[str, Any],
     cast_names = [c.get("name") for c in (show.read_character(cid) for cid in show.list_characters())
                   if c.get("name")]
     system = prompts.showrunner_system(
-        show.style_profile(cfg), bible.get("content_policy", "mature"),
+        show.style_profile(cfg), bible.get("content_policy") or "",
         show.style_profile(cfg).get("baseline", ""))
     runs = show.dir / "runs" / f"EP{episode:02d}"
     notes_dir = runs / "reviews"
@@ -2050,7 +2341,7 @@ def revise_script(show: Show, episode: int, script: dict[str, Any],
     cast_names = [c.get("name") for c in (show.read_character(cid)
                   for cid in show.list_characters()) if c.get("name")]
     system = prompts.showrunner_system(
-        show.style_profile(cfg), show.read_bible().get("content_policy", "mature"),
+        show.style_profile(cfg), show.read_bible().get("content_policy") or "",
         show.style_profile(cfg).get("baseline", ""))
     runs = show.dir / "runs" / f"EP{episode:02d}"
     if isinstance(reviews, dict) and isinstance(reviews.get("reviews"), dict):
@@ -2165,7 +2456,7 @@ def extract_continuity(show: Show, episode: int, script: dict[str, Any],
     out = promptlog.logged_chat_json(
         llm, show, episode, "continuity-extract",
         [{"role": "system", "content": prompts.showrunner_system(
-            show.style_profile(cfg), bible.get("content_policy", "mature"),
+            show.style_profile(cfg), bible.get("content_policy") or "",
             show.style_profile(cfg).get("baseline", ""))},
          {"role": "user", "content": prompts.continuity_extract_prompt(
              bible, episode, _continuity_digest(script), state, characters)}],
@@ -2461,7 +2752,7 @@ def reconcile_costume_labels(show: Show, episode: int, script: dict[str, Any],
             out = promptlog.logged_chat_json(
                 llm, show, episode, f"costume-reconcile-{name}",
                 [{"role": "system", "content": prompts.showrunner_system(
-                    show.style_profile(cfg), (show.read_bible() or {}).get("content_policy", "mature"),
+                    show.style_profile(cfg), (show.read_bible() or {}).get("content_policy") or "",
                     show.style_profile(cfg).get("baseline", ""))},
                  {"role": "user", "content": prompts.costume_reconcile_prompt(
                      char, known.get(name, []), candidates)}],

@@ -17,11 +17,6 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 
-#: Where the opencode CLI stores its auth (per-account API keys). The Zen/GO
-#: key lives here under the "opencode-go" account by default.
-DEFAULT_ZEN_AUTH_FILE = "~/.local/share/opencode/auth.json"
-DEFAULT_ZEN_AUTH_ACCOUNT = "opencode-go"
-
 #: Default episode runtime (22:00) in seconds, used when a show declares none.
 DEFAULT_RUNTIME_TARGET_S = 1320
 
@@ -39,7 +34,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "default_shot_duration_s": 10.125,
         "insert_shot_duration_s": 5.167,
         "hero_best_of": 2,
-        "auto_start_episode": True,  # hands-free: reconcile starts the next episode once the latest is complete
+        "auto_start_episode": False,  # the agent board starts episodes; legacy reconciler stays off
+        "legacy_reconciler": False,   # true: re-enable the old stage walker (pre-board system)
         "pause_storyboard": False,   # true: stop the reconciler from generating/restarting storyboards (debugging)
         "stale_job_s": 1800,         # storyboard/render job with no progress this long is declared hung and restarted
         "multishot": {  # H3 Multishot seamless chaining (joeygambino v2.6.3)
@@ -60,12 +56,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         # Phase 1 produces the skeleton (one-line scene summaries); Phase 2 expands
         # each scene's Setup/Change/Consequence beats in batches.
         "plan_beats_batch": 2,        # scenes expanded per beat call (1-4)
-    },
-    "bus": {
-        "provider": "memory",  # memory | redis
-        "url": "redis://127.0.0.1:6379",
-        "password": None,
-        "group_prefix": "studio",
     },
     "comfy": {
         "nodes": {
@@ -97,64 +87,35 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "fallback_url": "",
         "concurrency_limit": 4,
         "gpu_guard_urls": [],
-        "model": "dolphin-2.9.3-mistral-nemo-12b",
+        "model": "",
         "context": 32768,
-        "roles": {
-            "showrunner": "dolphin-2.9.3-mistral-nemo-12b",
-            "judge": "dolphin-2.9.3-mistral-nemo-12b",
-            "slop_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "continuity_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "fan_service_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "structure_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "voice_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "exposition_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "pacing_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "stakes_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "visual_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "agency_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "serial_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "growth_reviewer": "dolphin-2.9.3-mistral-nemo-12b",
-            "describer": "",
-        },
+        # Role -> model assignments are PER-SHOW/PER-STUDIO facts (config/llm.yaml);
+        # the code ships no model names of its own.
+        "roles": {},
         "gpu_offload": True,
         "evict_before_render": True,
-        # OpenCode Zen remote models (https://opencode.ai/docs/zen). When
-        # enabled AND an API key is available, text prompts go remote-first and
-        # fall back to the local instance on transport errors AND on
-        # content-policy refusals (explicit scenes remote models won't write).
-        # Without a key the studio is exactly today's local-only setup.
-        "zen": {
+    },
+    "agents": {
+        # Agent-first board. Lanes are concurrency resources; roles name the
+        # lane, model and tool allowlist they run with. Per-role model
+        # overrides live in config/agents.yaml.
+        "lanes": {
+            "llm": {"capacity": 2},
+            "image": {"capacity": 1},
+            "video": {"capacity": 1},
+            "audio": {"capacity": 1},
+            "io": {"capacity": 1},
+            "vision": {"capacity": 1},
+        },
+        "roles": {},
+        "tick_s": 5.0,
+        "run_timeout_s": 14400.0,
+        "port": 8130,
+        "bind": "127.0.0.1",
+        "board_url": "http://127.0.0.1:8130",
+        "opencode": {
             "enabled": True,
-            "base_url": "https://opencode.ai/zen/go/v1",
-            # The key is read from the opencode auth.json (account
-            # "opencode-go"); the environment variable is never consulted.
-            # Empty path = the standard ~/.local/share/opencode/auth.json;
-            # $OPENCODE_AUTH_FILE overrides the path.
-            "auth_file": "",
-            "auth_account": "opencode-go",
-            "model": "muse-spark-1.3-contributor",
-            "model_map": {},
-            # Models served on the /responses endpoint (Spark/GPT/Grok) vs
-            # /chat/completions (Kimi/DeepSeek/GLM/...). Matched with fnmatch
-            # so new models don't need code changes. Claude/Qwen /messages
-            # models are not spoken by this client (falls back local).
-            "responses_models": ["muse-spark-*", "gpt-*", "grok-*"],
-            # Per-role remote models, keyed by llm role name
-            # (showrunner, script, concept, slop_reviewer, ...). A call with
-            # role="script" uses roles["script"]; without an explicit role the
-            # client reverse-matches the requested LOCAL model name to a
-            # uniquely configured role. Empty = everything uses model/model_map.
-            "roles": {},
-            # Remote vision: image_url parts forward as-is; vLLM video_url
-            # parts are resampled to frames_per_video stills first. Disabled or
-            # undecodable clips fall back to the local vision stack.
-            "vision": {
-                "enabled": True,
-                "model": "muse-spark-1.3-contributor",
-                "frames_per_video": 6,
-                "frame_dim": 512,
-            },
-            "timeout": 180,
+            "provider": "lm_studio_local",
         },
     },
     "qc": {
@@ -277,10 +238,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "show_profile": {
         # Bootstrap defaults for zero-input `init-show`. Style references
         # (baseline / fanservice_baseline) are NOT here: they are per-show facts
-        # and live in each show's bible.yaml (see Show.style_profile).
+        # and live in each show's bible.yaml (see Show.style_profile). Maturity is
+        # also a show fact: leave it blank here unless the studio wants a default.
         "genre": ["romantic-comedy", "martial-arts"],
         "tone": ["warm", "comedic", "heartfelt"],
-        "maturity": "mature",
+        "maturity": "",
         "runtime_target_s": DEFAULT_RUNTIME_TARGET_S,
     },
     "env": {
@@ -291,14 +253,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
             "server_port": 1234,
             "context": 32768,
             "gpu_ratio": "max",     # 'max' | 'off' | 0..1 (partial offload for small GPUs)
-            "models": {"showrunner": "dolphin-2.9.3-mistral-nemo-12b"},
+            "models": {"showrunner": ""},
         },
         "comfyui": {
             "krea2": {"dir": "", "run": "run_nvidia_gpu.bat", "port": 8188},
             "h3": {"dir": "", "run": "run_nvidia_gpu.bat", "port": 8188},
         },
         "ffmpeg": "",
-        "tts": {"venv": "", "sox": "", "models": {"custom_voice": "", "voice_design": ""}},
+        "tts": {"venv": "", "sox": "", "models": {"base": "", "custom_voice": "",
+                                                   "voice_design": ""}},
     },
     "agent": {
         "bind": "0.0.0.0",          # remote-agent listener (firewall-scope to controller IP)
@@ -445,54 +408,3 @@ def reload_config(root: Path | str = ROOT) -> Config:
     global _default
     _default = None
     return get_config(root)
-
-
-def zen_auth_file(auth_file: str = "") -> Path:
-    """Path to the opencode auth.json holding the Zen/GO key.
-
-    Precedence: explicit ``auth_file`` arg (config) -> ``$OPENCODE_AUTH_FILE``
-    -> the standard ``~/.local/share/opencode/auth.json``. ``~`` is expanded.
-    """
-    raw = (auth_file or os.environ.get("OPENCODE_AUTH_FILE")
-           or DEFAULT_ZEN_AUTH_FILE)
-    return Path(raw).expanduser()
-
-
-def read_zen_key_from_auth_file(auth_file: str = "",
-                                account: str = DEFAULT_ZEN_AUTH_ACCOUNT) -> str:
-    """Read the Zen/GO API key from the opencode auth.json, or "" if absent.
-
-    Never raises: a missing / malformed file or a missing account returns ""
-    so callers fall back to local-only instead of crashing.
-    """
-    path = zen_auth_file(auth_file)
-    try:
-        if not path.is_file():
-            return ""
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return ""
-    entry = data.get(account) or {}
-    if not isinstance(entry, dict):
-        return ""
-    return str(entry.get("key") or "").strip()
-
-
-def resolve_zen_api_key(cfg: "Config | None" = None,
-                        override: str | None = None) -> str:
-    """Resolve the Zen/GO API key from the opencode auth.json.
-
-    The key ALWAYS comes from the auth file — the environment variable is
-    deliberately NOT consulted, so a stray ``OPENCODE_API_KEY`` can never
-    shadow (or silently substitute) the signed-in key. ``override`` is only for
-    explicit programmatic use (tests, one-off scripts). The auth.json
-    path/account come from ``llm.zen.auth_file`` / ``llm.zen.auth_account``.
-    Returns "" when the file/account has no key, keeping the studio local-only.
-    """
-    if override:
-        return override
-    cfg = cfg or get_config()
-    z = cfg.get("llm", "zen", {}) or {}
-    return read_zen_key_from_auth_file(
-        z.get("auth_file", ""),
-        z.get("auth_account", DEFAULT_ZEN_AUTH_ACCOUNT))

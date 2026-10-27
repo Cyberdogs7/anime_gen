@@ -79,9 +79,8 @@ def _annotate_provider(path: Path | None, llm) -> None:
     """Patch the just-written log with the provider/model that ACTUALLY answered.
 
     ``log_prompt`` runs BEFORE the call and only knows the requested local role
-    model, which is misleading when the call went remote (or fell back local).
-    Afterwards the client exposes ``provider_info()``; merge it in so the prompt
-    file records the truth. Never raises.
+    model. Afterwards the client exposes ``provider_info()``; merge it in so the
+    prompt file records the model that actually answered. Never raises.
     """
     if path is None:
         return

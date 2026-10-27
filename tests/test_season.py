@@ -29,6 +29,13 @@ def _make_show(tmp_path) -> Show:
     return show
 
 
+class _NullLLM:
+    """No-network stub: new-location briefs resolve to nothing."""
+
+    def chat_json(self, messages, **kwargs):
+        return {"locations": []}
+
+
 class SeasonLLM:
     """Answers season-plan + season-synopsis + outline + review calls."""
 
@@ -37,7 +44,7 @@ class SeasonLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
-        if "full 12-episode anime season" in user:
+        if "full 12-episode season" in user:
             self.season_calls += 1
             return {
                 "season": 1, "title": "Season One",
@@ -144,6 +151,6 @@ def test_approve_plan_refuses_season_type_drift(tmp_path):
     else:
         raise AssertionError("expected season mismatch to block approval")
     # Human override still works.
-    out = approve_plan(show, 1, override=True)
+    out = approve_plan(show, 1, override=True, llm=_NullLLM(), cfg=Config(tmp_path))
     assert out["status"] == "approved"
     assert "_season" not in out and "_plan_dev" not in out

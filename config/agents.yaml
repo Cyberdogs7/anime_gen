@@ -1,0 +1,240 @@
+﻿# Agent-first studio board. See studio/board/.
+#
+# Lanes are CONCURRENCY RESOURCES, not departments: one video render at a time,
+# N LLM calls at once, one vision pass, etc. A card names the lane it consumes.
+lanes:
+  llm:    {capacity: 2}   # showrunner + reviewers (config/llm.yaml concurrency)
+  image:  {capacity: 1}   # Krea 2 keyframes / refs
+  video:  {capacity: 1}   # H3 shot render
+  audio:  {capacity: 1}   # TTS
+  io:     {capacity: 1}   # assembly / delivery
+  vision: {capacity: 1}   # Qwen3-VL checks
+
+# Workers are opencode agents attached to a board-owned `opencode serve`.
+# The project plugin (.opencode/plugins/studio-board.ts) exposes the board
+# tools and forwards permission prompts to the board UI.
+opencode:
+  enabled: true
+  provider: "lm_studio_local"
+
+# A single long step (skeleton, one beats batch, a full outline revision) can
+# legitimately run for over an hour on the 27B model. The worker timeout must sit
+# above that; the daemon's stale-run recovery must sit above the worker.
+run_timeout_s: 28800
+
+# Every role sets its own model. Resolution order:
+#   agents.roles.<role>.model -> llm.roles.<role> -> llm.model
+# Change one line here to put a single role on a different model.
+roles:
+  voice_writer:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-writer
+    skill: voice-writer
+    temperature: 0.8
+    max_steps: 12
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/voice-writer/SKILL.md and write the character sample.
+
+  gate0_plan:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-writer
+    skill: show-bootstrap
+    temperature: 0.7
+    max_steps: 80
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/show-bootstrap/SKILL.md and build the show artifacts.
+
+  gate0_images:
+    kind: exec
+    lane: image
+    model: ""
+    max_steps: 1
+    tools: [gate0_images]
+    prompt: Deterministic character and scene reference images.
+
+  image_retake:
+    kind: exec
+    lane: image
+    model: ""
+    max_steps: 1
+    tools: [image_retake]
+    prompt: Deterministic retake of one rejected image.
+
+  gate0_voices:
+    kind: exec
+    lane: audio
+    model: ""
+    max_steps: 1
+    tools: [gate0_voices]
+    prompt: Deterministic voice samples.
+
+  human:
+    kind: reviewer
+    lane: llm
+    model: ""
+    temperature: 0.0
+    max_steps: 1
+    tools: []
+    prompt: >
+      Human approval gate. The board waits for a person; no agent runs here.
+
+  storyboard_planner:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-writer
+    skill: object-prompts
+    temperature: 0.3
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/object-prompts/SKILL.md and write the object prompts.
+
+  image_exec:
+    kind: exec
+    lane: image
+    model: ""
+    max_steps: 1
+    tools: [build_keyframes]
+    prompt: Deterministic ComfyUI object refs + keyframes.
+
+  render_exec:
+    kind: exec
+    lane: video
+    model: ""
+    max_steps: 1
+    tools: [render_shot]
+    prompt: Deterministic ComfyUI render for one shot.
+
+  qc_exec:
+    kind: exec
+    lane: vision
+    model: ""
+    max_steps: 1
+    tools: [run_episode_qc]
+    prompt: Deterministic VLM pass over the episode.
+
+  assembler_exec:
+    kind: exec
+    lane: io
+    model: ""
+    max_steps: 1
+    tools: [assemble_episode]
+    prompt: Deterministic episode assembly.
+
+  fixer:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-fixer
+    skill: qc-fixer
+    temperature: 0.3
+    max_steps: 24
+    timeout_s: 3600
+    # Legacy tool kept for the CLI test; the agent path uses the skill helpers.
+    tools: [apply_qc_fixes]
+    prompt: >
+      Read .agents/skills/qc-fixer/SKILL.md and fix the failed shots.
+
+  outline_writer:
+    kind: exec
+    lane: llm
+    # Legacy staged prep: skeleton + one beats batch per card. The actual
+    # outline writing is done by outline_writer_agent (opencode + skill).
+    model: "dolphin-2.9.3-mistral-nemo-12b"
+    temperature: 0.7
+    max_steps: 8
+    timeout_s: 3600
+    tools: [outline_skeleton, outline_beats]
+    prompt: >
+      Legacy staged outline prep tool role.
+
+  outline_writer_agent:
+    kind: producer
+    lane: llm
+    # Normal opencode agent: writes only outline-changes.json, then runs the
+    # apply helper. No board-tool Python jobs and no show-file reads.
+    model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    agent: studio-writer
+    skill: outline-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/outline-writer/SKILL.md and write the episode outline.
+
+  scene_writer:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-writer
+    skill: scene-rewriter
+    temperature: 0.7
+    max_steps: 30
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/scene-rewriter/SKILL.md and rewrite the card's scene.
+
+  script_writer:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-writer
+    skill: script-writer
+    temperature: 0.8
+    max_steps: 80
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/script-writer/SKILL.md and write the episode screenplay.
+
+  showrunner:
+    kind: producer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    temperature: 0.8
+    max_steps: 24
+    timeout_s: 14400
+    tools: [read_card, read_show, generate_script, revise_script,
+            episode_status, add_note, attach_artifact]
+    prompt: >
+      Legacy board-tool screenplay path. Prefer the script_writer agent.
+
+  outline_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    agent: studio-reviewer
+    skill: outline-reviewer
+    temperature: 0.2
+    max_steps: 12
+    timeout_s: 1800
+    tools: []
+    prompt: >
+      Read .agents/skills/outline-reviewer/SKILL.md and review the plan.
+
+  script_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    agent: studio-script-reviewer
+    skill: script-reviewer
+    temperature: 0.2
+    max_steps: 20
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/script-reviewer/SKILL.md and review the screenplay.
+
+

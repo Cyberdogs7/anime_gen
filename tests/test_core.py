@@ -1,4 +1,4 @@
-"""M0 smoke tests: config, db, bus round-trip, duration grid, H3 prompt compiler."""
+"""M0 smoke tests: config, db, duration grid, H3 prompt compiler."""
 import sys
 from pathlib import Path
 
@@ -7,8 +7,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from studio.bus import InMemoryBroker
-from studio.bus.events import TEST, Event
 from studio.compile.durations import snap_duration, valid_durations
 from studio.compile.h3_prompt import compile_h3_prompt
 from studio.config import Config
@@ -17,7 +15,6 @@ from studio.config import Config
 def test_config_loads_defaults():
     cfg = Config(ROOT)
     assert cfg["pipeline"]["mode"] in ("overnight", "continuous", "hybrid")
-    assert cfg.get("bus", "provider", "") in ("memory", "redis")
 
 
 def test_gpu_manager_reentrant_acquire(tmp_path):
@@ -38,15 +35,6 @@ def test_gpu_manager_reentrant_acquire(tmp_path):
     order.append("done")
     assert order == ["outer", "nested", "done"]
     assert gm._holders == 0
-
-
-def test_broker_round_trip():
-    bus = InMemoryBroker("test")
-    got = []
-    bus.register("bus:system", "t", got.append)
-    bus.publish("bus:system", Event(type=TEST, payload={"ok": True}))
-    assert len(got) == 1 and got[0].type == TEST
-    assert bus.round_trip()
 
 
 def test_duration_grid():

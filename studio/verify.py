@@ -1,14 +1,13 @@
-"""`studio.py verify` - health-check every backend + a bus round-trip.
+"""`studio.py verify` - health-check every backend + the board store.
 
 Reports each check as ok / warn / fail without raising; a failed hard check
-(round-trip) makes the command exit non-zero.
+makes the command exit non-zero.
 """
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
 
-from .bus import make_broker
 from .clients import ComfyClient, LMStudioClient, NullTTS, ffmpeg_version
 from .config import get_config
 from .db import DB
@@ -48,18 +47,15 @@ def run_checks(cfg=None) -> list[Check]:
     except Exception as exc:
         checks.append(Check("db", False, str(exc), required=True))
 
-    # 3. Bus round-trip
+    # 3. Board store
     try:
-        bus = make_broker(cfg["bus"])
-        ok = bus.round_trip()
-        checks.append(Check(
-            f"bus ({cfg['bus'].get('provider')})", ok,
-            "emit -> consume -> ack OK" if ok else "round-trip failed",
-            required=True,
-        ))
-        bus.stop()
+        from .board.store import BoardSet
+        store = BoardSet(cfg)
+        cards = store.all()
+        checks.append(Check("board", True, f"{len(cards)} card(s)"))
+        store.close()
     except Exception as exc:
-        checks.append(Check("bus", False, str(exc), required=True))
+        checks.append(Check("board", False, str(exc), required=True))
 
     # 4. ComfyUI (both nodes)
     for node, nc in cfg["comfy"]["nodes"].items():
@@ -74,30 +70,6 @@ def run_checks(cfg=None) -> list[Check]:
     ok = client.health()
     checks.append(Check("lmstudio", ok,
                         f"{llm['base_url']} ({llm.get('model')})" if ok else "unreachable"))
-
-    # 5b. OpenCode Zen (remote-first text generation; optional, not required).
-    zen = llm.get("zen", {}) or {}
-    from .config import resolve_zen_api_key
-    zen_key = resolve_zen_api_key(cfg)
-    if not zen.get("enabled"):
-        checks.append(Check("zen", True, "disabled in config (local-only mode)"))
-    elif not zen_key:
-        checks.append(Check(
-            "zen", True,
-            "enabled but no key found in the opencode auth.json — local-only "
-            "until set; sign in with `opencode auth login`"))
-    else:
-        import httpx as _httpx
-        try:
-            r = _httpx.Client(timeout=10.0).get(
-                f"{zen.get('base_url', '').rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {zen_key}"})
-            reachable = r.status_code == 200
-        except Exception:
-            reachable = False
-        checks.append(Check("zen", reachable,
-                            f"{zen.get('base_url')} (model={zen.get('model')})"
-                            if reachable else "unreachable (check key/network)"))
 
     # 6. TTS (null adapter always works; real engine reports at M1)
     tts = NullTTS()

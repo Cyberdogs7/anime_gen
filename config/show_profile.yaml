@@ -3,5 +3,7 @@
 # each show's bible.yaml (e.g. `baseline: <show-title>`) instead of here.
 genre: ["romantic-comedy", "martial-arts"]
 tone: ["warm", "comedic", "heartfelt"]
-maturity: "mature"
+# Maturity is a PER-SHOW fact (bible content_policy). Leave this unset to let each
+# show decide; set it only if the studio wants one default level for new shows.
+# maturity: ""
 runtime_target_s: 1320     # 22:00

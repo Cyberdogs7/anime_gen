@@ -290,12 +290,7 @@ def _character_identity(show: Show, name: str) -> str:
     for cid in show.list_characters():
         c = show.read_character(cid)
         if c.get("name") == name:
-            ident = (c.get("identity_canonical") or "").strip()
-            if ident:
-                return ident
-            # Legacy sheets: strip the " Wears <wardrobe>" clause off the blob.
-            app = (c.get("appearance_canonical") or "").strip()
-            return app.split(" Wears ")[0].strip()
+            return (c.get("identity_canonical") or "").strip()
     return ""
 
 
@@ -544,7 +539,8 @@ def compile_shot_prompt(show: Show | None, script: dict[str, Any],
                      "The shot carries no dialogue.")
     shot_txt = " ".join(p for p in parts if p)
 
-    style = (script.get("style_guide") or "").strip()
+    style = (show.render_style() if show is not None
+             else (script.get("style_guide") or "").strip())
     detailed = ((f"{style}\n" if style else "")
                 + f"[Shot 1] {placed_txt}. {shot_txt}").strip()
 
@@ -625,7 +621,8 @@ def compile_shot_prompt_guide(show: Show | None, script: dict[str, Any],
         if not raw_initial:
             raw_initial = (script.get("summary") or "One cinematic shot.").strip()
         initial_prompt = _sanitize_initial_prompt(raw_initial)
-        visual_style = (script.get("style_guide") or "").strip()
+        visual_style = (show.render_style() if show is not None
+                        else (script.get("style_guide") or "").strip())
         soundscape = (shot.get("soundscape") or "").strip()
         music = (shot.get("music") or "N/A").strip()
         # snap duration for native grid validation

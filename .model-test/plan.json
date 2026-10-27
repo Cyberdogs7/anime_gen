@@ -1,0 +1,8 @@
+﻿{
+  "episode": 1,
+  "title": "Model test",
+  "scenes": [
+    {"id": "s01", "summary": "old one", "characters": ["A"], "beats": ["Setup: a", "Change: b", "Consequence: c"]},
+    {"id": "s02", "summary": "old two", "characters": ["B"], "beats": ["Setup: d", "Change: e", "Consequence: f"]}
+  ]
+}

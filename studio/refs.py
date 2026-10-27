@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import re
 from pathlib import Path
 from typing import Any
 
@@ -140,23 +139,14 @@ def wants_nude_first(show: Show, cid: str, char: dict[str, Any] | None = None) -
 def identity_canonical(char: dict[str, Any]) -> str:
     """The character's garmentless BODY description (identity root).
 
-    Prefers an explicit ``identity_canonical``; falls back to stripping a trailing
-    outfit clause from ``appearance_canonical`` so older sheets still render a sane
-    body.
+    Reads the structured field only. Legacy sheets are split once by the LLM
+    (``_backfill_identity``) instead of parsing ``appearance_canonical``.
     """
-    ident = (char.get("identity_canonical") or "").strip()
-    if ident:
-        return ident
-    canon = (char.get("appearance_canonical") or "").strip()
-    body = re.split(
-        r",?\s*(?:\bwears?\b|\bwearing\b|\bis wearing\b|\bwore\b|dressed in|clad in|"
-        r"outfitted in|in (?:a|an|his|her|their|the)\b)",
-        canon, maxsplit=1, flags=re.IGNORECASE)[0]
-    return (body or canon).strip().rstrip(" ,.")
+    return (char.get("identity_canonical") or "").strip()
 
 
 def _style(show: Show) -> str:
-    return ((show.read_bible() or {}).get("style_guide") or "").strip().rstrip(".")
+    return show.render_style()
 
 
 def _style_anchor_arg(show: Show) -> str:
@@ -272,7 +262,8 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
 # Step 1 — the nude identity root (Krea 2)
 # ---------------------------------------------------------------------------
 def ensure_nude_ref(show: Show, cid: str, name: str, cfg=None,
-                    force: bool = False, llm=None, model: str = "") -> str | None:
+                    force: bool = False, llm=None, model: str = "",
+                    notes: str = "") -> str | None:
     """Garmentless "nude" identity root, rendered by Krea 2 from the body
     description — the FIRST image of the character. Cached by a hash of the body
     text (staleness = a body tweak). Registers ``variants["nude"]`` (unapproved);
@@ -281,7 +272,8 @@ def ensure_nude_ref(show: Show, cid: str, name: str, cfg=None,
     cfg = cfg or get_config()
     rd = show.character_refs_dir(cid)
     prior = load_refs(show, cid)
-    identity = identity_canonical(show.read_character(cid))
+    char = show.read_character(cid)
+    identity = identity_canonical(char)
     if not identity:
         return None
     ident_hash = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
@@ -290,7 +282,10 @@ def ensure_nude_ref(show: Show, cid: str, name: str, cfg=None,
             and prior.get("nude_identity") == ident_hash):
         return str(rd / nude_fn)
     out = rd / f"{cid}_{NUDE_LABEL}.png"
-    prompt = prompts.nude_ref_prompt(name, identity, _style(show), show.ref_medium())
+    prompt = prompts.nude_ref_prompt(name, identity, _style(show), show.ref_medium(),
+                                     gender=char.get("gender") or "")
+    if notes.strip():
+        prompt = prompt.rstrip() + " Director's revision: " + notes.strip()
 
     def _render() -> bool:
         return _render_costume_via_krea2(show, name, prompt, NUDE_LABEL, str(out),
@@ -347,22 +342,21 @@ def _revise_identity(llm, model: str, name: str, current: str, notes: str,
     """LLM rewrites ONLY the BODY (identity_canonical) from rejection feedback."""
     world = (f"Series bible (world, tone, style): {json.dumps(bible, ensure_ascii=False)}\n"
              if bible else "")
-    text = llm.chat([
-        {"role": "user", "content":
-         f"Revise this character's BODY-ONLY identity description to address the "
-         f"director's feedback (body, gender, face, hair, build — no clothing). "
-         f"Keep everything the feedback did not ask to change.\n"
-         f"CHARACTER: {name}\n"
-         f"{world}"
-         + (f"Visual style guide: {style}\n" if style else "")
-         + f"CURRENT BODY:\n{current or '(none)'}\n"
-         f"DIRECTOR'S FEEDBACK:\n{notes}\n"
-         + prompts.identity_canonical_rules() + "\n"
-         'Reply with ONLY JSON: {"identity_canonical": "..."}'},
-    ], model=model, role="showrunner", temperature=0.6, max_tokens=1000)
     try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return (json.loads(s).get("identity_canonical") or "").strip()
+        data = llm.chat_json([
+            {"role": "user", "content":
+             f"Revise this character's BODY-ONLY identity description to address the "
+             f"director's feedback (body, gender, face, hair, build — no clothing). "
+             f"Keep everything the feedback did not ask to change.\n"
+             f"CHARACTER: {name}\n"
+             f"{world}"
+             + (f"Visual style guide: {style}\n" if style else "")
+             + f"CURRENT BODY:\n{current or '(none)'}\n"
+             f"DIRECTOR'S FEEDBACK:\n{notes}\n"
+             + prompts.identity_canonical_rules() + "\n"
+             'Reply with ONLY JSON: {"identity_canonical": "..."}'},
+        ], model=model, role="showrunner", temperature=0.6, max_tokens=1000)
+        return (data.get("identity_canonical") or "").strip()
     except Exception:
         return ""
 
@@ -379,16 +373,18 @@ def _backfill_identity(show: Show, char: dict[str, Any], llm, cfg) -> dict[str, 
     model = (cfg.get("llm", "roles", {}).get("showrunner")
              or cfg.get("llm", "model") or "")
     try:
-        text = llm.chat([{"role": "user",
-                          "content": prompts.identity_backfill_prompt(name, canon)}],
-                        model=model, role="showrunner", temperature=0.4, max_tokens=800)
-        s = text[text.find("{"): text.rfind("}") + 1]
-        data = json.loads(s)
+        data = llm.chat_json([{"role": "user",
+                               "content": prompts.identity_backfill_prompt(name, canon)}],
+                             model=model, role="showrunner", temperature=0.4,
+                             max_tokens=800)
         out: dict[str, str] = {}
         if (data.get("identity_canonical") or "").strip():
             out["identity_canonical"] = data["identity_canonical"].strip()
         if (data.get("wardrobe_canonical") or "").strip():
             out["wardrobe_canonical"] = data["wardrobe_canonical"].strip()
+        gender = str(data.get("gender") or "").strip().lower()
+        if gender in ("female", "male", "nonbinary", "none"):
+            out["gender"] = gender
         return out
     except Exception:
         return {}
@@ -416,20 +412,19 @@ def _revise_wardrobe(llm, model: str, name: str, current: str, notes: str,
                      bible: dict[str, Any] | None = None, style: str = "") -> str:
     """LLM rewrites ONLY the outfit (wardrobe_canonical) from rejection feedback."""
     world = (f"Series bible: {json.dumps(bible, ensure_ascii=False)}\n" if bible else "")
-    text = llm.chat([
-        {"role": "user", "content":
-         f"Revise this character's DEFAULT OUTFIT description to address the "
-         f"director's feedback. Keep everything the feedback did not ask to change.\n"
-         f"CHARACTER: {name}\n{world}"
-         + (f"Visual style guide: {style}\n" if style else "")
-         + f"CURRENT OUTFIT:\n{current or '(none)'}\n"
-         f"DIRECTOR'S FEEDBACK:\n{notes}\n"
-         + prompts.wardrobe_canonical_rules() + "\n"
-         'Reply with ONLY JSON: {"wardrobe_canonical": "..."}'},
-    ], model=model, role="showrunner", temperature=0.6, max_tokens=800)
     try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return (json.loads(s).get("wardrobe_canonical") or "").strip()
+        data = llm.chat_json([
+            {"role": "user", "content":
+             f"Revise this character's DEFAULT OUTFIT description to address the "
+             f"director's feedback. Keep everything the feedback did not ask to change.\n"
+             f"CHARACTER: {name}\n{world}"
+             + (f"Visual style guide: {style}\n" if style else "")
+             + f"CURRENT OUTFIT:\n{current or '(none)'}\n"
+             f"DIRECTOR'S FEEDBACK:\n{notes}\n"
+             + prompts.wardrobe_canonical_rules() + "\n"
+             'Reply with ONLY JSON: {"wardrobe_canonical": "..."}'},
+        ], model=model, role="showrunner", temperature=0.6, max_tokens=800)
+        return (data.get("wardrobe_canonical") or "").strip()
     except Exception:
         return ""
 
@@ -445,11 +440,11 @@ def _backfill_is_person(show: Show, char: dict[str, Any], llm, cfg) -> bool | No
     model = (cfg.get("llm", "roles", {}).get("showrunner")
              or cfg.get("llm", "model") or "")
     try:
-        text = llm.chat([{"role": "user",
-                          "content": prompts.is_person_backfill_prompt(name, canon)}],
-                        model=model, role="showrunner", temperature=0.0, max_tokens=64)
-        s = text[text.find("{"): text.rfind("}") + 1]
-        v = json.loads(s).get("is_person")
+        data = llm.chat_json([{"role": "user",
+                               "content": prompts.is_person_backfill_prompt(name, canon)}],
+                             model=model, role="showrunner", temperature=0.0,
+                             max_tokens=64)
+        v = data.get("is_person")
         return bool(v) if isinstance(v, bool) else None
     except Exception:
         return None
@@ -480,8 +475,18 @@ def _generate_plain_ref(show: Show, cid: str, char: dict[str, Any], name: str,
                 show.write_character(char)
         except Exception:
             pass
-    canon = (char.get("appearance_canonical") or "").strip() or name
-    prompt = prompts.character_ref_prompt(name, canon, _style(show), show.ref_medium())
+    identity = (char.get("identity_canonical") or "").strip()
+    if not identity:
+        identity = (char.get("appearance_canonical") or "").strip()
+    if not (char.get("gender") or "").strip() and char.get("is_person", True):
+        parts = _backfill_identity(show, char, llm, cfg)
+        if isinstance(parts, dict) and parts.get("gender"):
+            char["gender"] = parts["gender"]
+            show.write_character(char)
+    prompt = prompts.character_ref_prompt(
+        name, identity, (char.get("wardrobe_canonical") or "") if char.get("is_person") else "",
+        _style(show), show.ref_medium(), gender=char.get("gender") or "",
+        is_person=bool(char.get("is_person", True)))
     out = refs_dir / f"{cid}_ref_01.png"
 
     def _render() -> bool:
@@ -536,11 +541,12 @@ def generate_refs(show: Show, cid: str, char: dict[str, Any] | None = None,
     if not nude_first:
         return _generate_plain_ref(show, cid, char, name, cfg, llm, notes)
 
-    # Ensure the unbundled BODY + OUTFIT exist (older sheets predate the fields).
-    # Fill only what's MISSING so a user-edited body isn't clobbered; recombine the
-    # full look so legacy readers stay consistent.
+    # Ensure the unbundled BODY + OUTFIT + gender exist (older sheets predate
+    # the fields). Fill only what's MISSING so a user-edited body isn't
+    # clobbered; recombine the full look so legacy readers stay consistent.
     if (not (char.get("identity_canonical") or "").strip()
-            or not (char.get("wardrobe_canonical") or "").strip()) and not notes.strip():
+            or not (char.get("wardrobe_canonical") or "").strip()
+            or not (char.get("gender") or "").strip()) and not notes.strip():
         parts = _backfill_identity(show, char, llm, cfg)
         if parts:
             changed = False
@@ -549,6 +555,9 @@ def generate_refs(show: Show, cid: str, char: dict[str, Any] | None = None,
                 changed = True
             if not (char.get("wardrobe_canonical") or "").strip() and parts.get("wardrobe_canonical"):
                 char["wardrobe_canonical"] = parts["wardrobe_canonical"]
+                changed = True
+            if not (char.get("gender") or "").strip() and parts.get("gender"):
+                char["gender"] = parts["gender"]
                 changed = True
             if changed:
                 _recombine(char)
@@ -644,9 +653,14 @@ def ensure_ref(show: Show, char: dict[str, Any], cfg=None, llm=None,
     data = load_refs(show, cid)
     base = (data.get("variants") or {}).get("base") or next(
         iter(data.get("refs") or []), None)
+    has_base = bool(base and (rd / base).exists())
+    has_nude = bool((data.get("variants") or {}).get(NUDE_LABEL))
+    # Nude-first characters are NOT done just because a (legacy) base exists: the
+    # nude identity root must exist too. An absent is_person flag is unknown, so
+    # attempt the backfill/nude path rather than assuming a plain ref is enough.
+    needs_nude = ("is_person" not in char) or wants_nude_first(show, cid, char)
     if not force and data.get("status") == "real" and (
-            (base and (rd / base).exists())
-            or (data.get("variants") or {}).get(NUDE_LABEL)):
+            has_nude or (has_base and not needs_nude)):
         return "real"
     krea2 = cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
     if not krea2.get("url"):
@@ -741,13 +755,15 @@ def regenerate_base(show: Show, cid: str, char: dict[str, Any], cfg=None, llm=No
     refs_dir = show.character_refs_dir(cid)
     out = refs_dir / f"{cid}_ref_01.png"
     outfit = wardrobe(char) or name
+    prompt = prompts.costume_edit_prompt(outfit)
+    if notes.strip() and llm is None:
+        prompt = prompt.rstrip() + " Director's revision: " + notes.strip()
     if not _render_costume_via_qwen_edit(show, str(refs_dir / nude), name,
-                                         prompts.costume_edit_prompt(outfit),
-                                         "base", str(out), cfg, seed=0):
+                                         prompt, "base", str(out), cfg, seed=0):
         return False
     data.setdefault("variants", {})["base"] = out.name
     data.setdefault("modes", {})["base"] = "edit"
-    data.setdefault("prompts", {})["base"] = prompts.costume_edit_prompt(outfit)
+    data.setdefault("prompts", {})["base"] = prompt
     save_refs(show, cid, data)
     return True
 
@@ -762,8 +778,12 @@ def rebuild_missing(show: Show, cfg=None, llm=None) -> list[str]:
         data = load_refs(show, cid)
         base = (data.get("variants") or {}).get("base") or next(
             iter(data.get("refs") or []), None)
-        if data.get("status") == "real" and base and (show.character_refs_dir(cid) / base).exists():
-            continue  # already has a real base ref
+        has_base = (data.get("status") == "real" and base
+                    and (show.character_refs_dir(cid) / base).exists())
+        has_nude = bool((data.get("variants") or {}).get(NUDE_LABEL))
+        needs_nude = ("is_person" not in ch) or wants_nude_first(show, cid, ch)
+        if has_base and (has_nude or not needs_nude):
+            continue  # nude-first characters also need the nude root
         if ensure_ref(show, ch, cfg=cfg, llm=llm) == "real":
             done.append(ch.get("name") or cid)
     return done

@@ -194,7 +194,7 @@ Note: the audio line carries **no `(Sx)`** here — the `(Sx)` appears only in
 `subject_definitions` and `detailed_description`.
 
 ### 5.4 `detailed_description`
-Style opening line, then the shot beat:
+Rendering/linework style opening line, then the shot beat:
 
 ```
 {style_guide}
@@ -202,6 +202,10 @@ Style opening line, then the shot beat:
 looks over the district. wide establishing, slow push-in. <Subject 1> (S1) says, using
 the voice timbre referenced from <Audio 1>, <d>[English] The package. Where is it?</d>
 ```
+
+- The opening carries ONLY the bible's `style_guide` (its dedicated
+  rendering/linework field). `art_direction` — camera, lighting, palette — is
+  bible reference and must never be copied into a generation prompt.
 
 - Composition: `action` then `camera`, joined.
 - **Every spoken line lives inside `<d>[English] …</d>`.** Never put dialogue words

@@ -24,8 +24,16 @@ from studio.storyboard import (_approved_costume_labels, _approved_object_slugs,
 
 def _show(tmp_path) -> Show:
     show = Show("demo", root=tmp_path)
-    show.write_character({"id": "blade", "name": "Blade", "appearance_canonical": "x"})
-    show.write_character({"id": "lily", "name": "Lily", "appearance_canonical": "y"})
+    show.write_character({"id": "blade", "name": "Blade", "gender": "male",
+                          "identity_canonical": "tall lean man with dark hair",
+                          "wardrobe_canonical": "black armor",
+                          "appearance_canonical": "tall lean man with dark hair. "
+                                                  "Wears black armor."})
+    show.write_character({"id": "lily", "name": "Lily", "gender": "female",
+                          "identity_canonical": "young woman with red hair",
+                          "wardrobe_canonical": "green dress",
+                          "appearance_canonical": "young woman with red hair. "
+                                                  "Wears green dress."})
     rd = show.character_refs_dir("blade")
     rd.mkdir(parents=True, exist_ok=True)
     (rd / "refs.json").write_text(json.dumps({
@@ -161,6 +169,7 @@ def test_approve_step_refs_records_base_for_supporting_char(tmp_path, monkeypatc
     """Approving a base ref for a character with NO bootstrap roster entry must
     succeed and persist, instead of raising "no character ... in bootstrap state"."""
     import studio.approval as approval
+    import studio.bootstrap as bootstrap
     import studio.config as _cfg
 
     class FakeChain:
@@ -173,7 +182,7 @@ def test_approve_step_refs_records_base_for_supporting_char(tmp_path, monkeypatc
         def advance(self, *a, **k):
             return []
 
-    monkeypatch.setattr(approval, "BootstrapChain", FakeChain)
+    monkeypatch.setattr(bootstrap, "BootstrapChain", FakeChain)
     # approve_step builds Show(show_id) from the process config, so root the
     # config at tmp_path to keep the write local to the test.
     monkeypatch.setattr(_cfg, "_default", _cfg.Config(tmp_path))
@@ -188,33 +197,6 @@ def test_approve_step_refs_records_base_for_supporting_char(tmp_path, monkeypatc
     assert show.bootstrap_state().get("characters", []) == []
     approval.approve_step("demo", "refs", char="Lily")
     assert is_base_ref_approved(show, "lily") is True
-
-
-def test_episode_cast_marks_approved_base(tmp_path, monkeypatch):
-    """The episode cast payload (the 'Episode cast (character refs)' card) shows
-    a bootstrap-approved base ref as approved, not permanently unapproved."""
-    import studio.config as _cfg
-    from studio.dashboard import episode_payload
-    monkeypatch.setattr(_cfg, "_default", _cfg.Config(tmp_path))
-    show = Show("demo")
-    show.write_character({"id": "blade", "name": "Blade", "appearance_canonical": "x"})
-    rd = show.character_refs_dir("blade")
-    rd.mkdir(parents=True, exist_ok=True)
-    (rd / "refs.json").write_text(json.dumps({
-        "status": "real", "refs": ["blade_ref_01.png"],
-        "variants": {"base": "blade_ref_01.png"}}), encoding="utf-8")
-    (rd / "blade_ref_01.png").write_bytes(b"x")
-    show.set_bootstrap_state({"characters": [
-        {"name": "Blade", "proposal": "approved", "refs": "approved",
-         "voice": "approved"}]})
-    d = show.dir / "runs" / "EP01"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "script.r1.json").write_text(json.dumps({"cast": ["Blade"], "scenes": []}),
-                                      encoding="utf-8")
-    cast = episode_payload("demo", "EP01")["cast"]
-    base = next(v for c in cast if c["name"] == "Blade"
-                for v in c["variants"] if v["label"] == "base")
-    assert base["approved"] is True
 
 
 def test_regen_object_persists_and_revises_prompt(tmp_path, monkeypatch):
@@ -253,6 +235,10 @@ def test_regen_object_persists_and_revises_prompt(tmp_path, monkeypatch):
             fb = content.split("DIRECTOR'S FEEDBACK:")[-1].strip()
             return '{"prompt": "the antique circuit board alone flat on a plain background, ' + \
                    fb + ', anime style, no hands no feet no people"}'
+
+        def chat_json(self, messages, **kwargs):
+            import json
+            return json.loads(self.chat(messages, **kwargs))
 
     # First regen with feedback -> LLM-revised prompt persisted.
     assert sb.regenerate_object_ref(show, 1, "antique-circuit-board",
@@ -348,8 +334,7 @@ def test_shot_character_ref_anchors_on_nude_when_approved(tmp_path, monkeypatch)
 
 
 def test_nude_ref_states_gender(tmp_path, monkeypatch):
-    """The nude-root prompt must carry the subject's gender (from the body-only
-    identity description) — otherwise male characters render female anatomy."""
+    """The nude-root prompt must carry the subject's structured gender."""
     import studio.storyboard as sb
     seen: dict[str, str] = {}
 
@@ -370,14 +355,12 @@ def test_nude_ref_states_gender(tmp_path, monkeypatch):
         (rd / f"{cid}_ref_01.png").write_bytes(b"x")
         return show
 
-    show = _char("ren", name="Ren",
+    show = _char("ren", name="Ren", gender="male",
                  identity_canonical="21-year-old lean man, dark hair, scar")
     assert sb.ensure_nude_ref(show, "ren", "Ren")
-    assert "man" in seen["prompt"]
+    assert "one man" in seen["prompt"]
 
-    # No identity_canonical: falls back to the body clause of appearance_canonical.
-    show = _char("sam", name="Sam",
+    # Without the structured identity field there is no nude root and no parsing.
+    show = _char("sam", name="Sam", gender="male",
                  appearance_canonical="tall, buzzed hair, a man wearing a gray suit")
-    assert sb.ensure_nude_ref(show, "sam", "Sam")
-    assert "man" in seen["prompt"]
-
+    assert not sb.ensure_nude_ref(show, "sam", "Sam")

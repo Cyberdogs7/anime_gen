@@ -31,7 +31,10 @@ multishot:
   remote_encoder: false
 
 pause_storyboard: false  # debug: stop reconciler from generating storyboards
-auto_start_episode: true   # hands-free: reconciler starts the next episode once the season is approved
+# The agent board (studio/board/) now owns episode advancement. Leave these off
+# so the legacy reconciler never starts or advances an episode behind its back.
+auto_start_episode: false
+legacy_reconciler: false
 stale_job_s: 1800        # storyboard/render job with no progress this long is declared hung and restarted
 
 

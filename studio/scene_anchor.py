@@ -166,7 +166,7 @@ def _brief_cache(show, episode: int, key: str) -> Path:
 
 
 CONTINUITY_PROMPT = (
-    "You are the continuity supervisor for an anime episode. This image is the "
+    "You are the continuity supervisor for a show episode. This image is the "
     "reference for one SET (a single location). The shot takes place at: \"{spot}\" "
     "within \"{place}\".\n"
     "Extract ONLY the fixed physical facts of THIS set that must stay consistent "

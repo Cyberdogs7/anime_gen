@@ -296,7 +296,7 @@ def _develop_from_season(show: Show, episode: int, season_no: int,
     roles = cfg.get("llm", "roles", {})
     model = roles.get("showrunner") or cfg.get("llm", "model")
     profile = show.style_profile(cfg)
-    system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
+    system = prompts.showrunner_system(profile, bible.get("content_policy") or "",
                                        profile.get("baseline", ""))
     episode_type = str(entry.get("episode_type", "character")).lower()
     episode_type = "battle" if episode_type == "battle" else "character"
@@ -367,7 +367,7 @@ def _develop_legacy(show: Show, episode: int, llm=None, cfg=None, notes: str = "
     roles = cfg.get("llm", "roles", {})
     model = roles.get("showrunner") or cfg.get("llm", "model")
     profile = show.style_profile(cfg)
-    system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
+    system = prompts.showrunner_system(profile, bible.get("content_policy") or "",
                                        profile.get("baseline", ""))
     cadence = int(cfg.get("growth", "plotline_cadence_episodes", 3) or 3)
     battle_cadence = int(cfg.get("growth", "battle_cadence_episodes", 3) or 3)

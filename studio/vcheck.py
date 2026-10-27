@@ -45,7 +45,7 @@ from .config import get_config
 from .show import Show
 
 VCHECK_PROMPT = (
-    "You are a STRICT post-render video reviewer for an anime production.\n"
+    "You are a STRICT post-render video reviewer for a show production.\n"
     "You receive reference images of the CHARACTERS a shot is supposed to "
     "depict (each labeled by name), a description of the shot's SCRIPTED ACTION "
     "and camera, and sequential FRAMES sampled from the rendered video.\n\n"
@@ -101,14 +101,6 @@ def _frame_fractions(n: int) -> tuple[float, ...]:
     if n == 1:
         return (0.5,)
     return tuple(i / n for i in range(n))
-
-
-def _extract_json(text: str) -> dict[str, Any] | None:
-    try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return json.loads(s) if s else None
-    except Exception:
-        return None
 
 
 def _data_uri(path: Path) -> str:
@@ -256,9 +248,8 @@ def review_video_native(llm, model: str, names: list[str], ref_paths: list[Path]
 
 
 def _call_and_parse(llm, model: str, content: list[dict], max_refs: int) -> dict[str, Any]:
-    text = llm.chat([{"role": "user", "content": content}], model=model,
-                    temperature=0.2, max_tokens=3500, retries=2, role="describer")
-    data = _extract_json(text) or {}
+    data = llm.chat_json([{"role": "user", "content": content}], model=model,
+                         temperature=0.2, max_tokens=3500, retries=2, role="describer")
     issues = list(data.get("issues") or [])
     chars = data.get("characters") or []
     for c in chars:
@@ -452,8 +443,8 @@ def run_shot_vcheck(show: Show, episode: int, clip_path: Path, shot: dict[str, A
 # ---------------------------------------------------------------------------
 
 OBJECT_VCHECK_PROMPT = (
-    "You are a strict visual QA checker for anime reference images.\n"
-    "You receive a reference image of a PROPS / OBJECT used in an anime "
+    "You are a strict visual QA checker for show reference images.\n"
+    "You receive a reference image of a PROPS / OBJECT used in a show "
     "production. The image MUST depict ONLY the object itself, isolated on a "
     "plain or studio background.\n\n"
     "Examine the image and answer ONE question:\n"
@@ -527,9 +518,9 @@ def run_object_vcheck(show: Show, episode: int, image_path: Path, slug: str,
         content = [{"type": "text", "text": OBJECT_VCHECK_PROMPT},
                    {"type": "image_url",
                     "image_url": {"url": _data_uri(_downscale(image_path))}}]
-        text = llm.chat([{"role": "user", "content": content}], model=model,
-                        temperature=0.2, max_tokens=1500, retries=2, role="describer")
-        data = _extract_json(text) or {}
+        data = llm.chat_json([{"role": "user", "content": content}], model=model,
+                             temperature=0.2, max_tokens=1500, retries=2,
+                             role="describer")
         issues = list(data.get("issues") or [])
         has_people = bool(data.get("has_people", False))
         has_text = bool(data.get("has_text", False))

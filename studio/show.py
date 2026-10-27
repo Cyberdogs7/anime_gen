@@ -1,7 +1,7 @@
-"""Show model: read/write the per-show canon under shows/<show_id>/ (DESIGN.md §8).
+﻿"""Show model: read/write the per-show canon under shows/<show_id>/ (DESIGN.md Â§8).
 
 Everything here is AI-generated + approved through the bootstrap chain; these
-loaders are how stages read the canon. Paths follow DESIGN.md §8 layout.
+loaders are how stages read the canon. Paths follow DESIGN.md Â§8 layout.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from . import fsutil
 from .config import get_config
 
 
@@ -60,8 +61,7 @@ class Show:
 
     def write_season(self, data: dict[str, Any], season: int = 1) -> Path:
         p = self.season_path(season)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        fsutil.write_json(p, data)
         return p
 
     def list_seasons(self) -> list[int]:
@@ -96,6 +96,21 @@ class Show:
         )
         return self.bible_path
 
+    def render_style(self) -> str:
+        """The generation style line from the bible, or '' when unset.
+
+        Only a structured bible (``style_guide`` split from ``art_direction``)
+        qualifies. A legacy free-form style guide stays bible reference and is
+        not sent to a generation model until the style is regenerated.
+        """
+        bible = self.read_bible() or {}
+        series = bible.get("series")
+        series = series if isinstance(series, dict) else {}
+        for block in (bible, series):
+            if "art_direction" in block:
+                return str(block.get("style_guide") or "").strip().rstrip(".")
+        return ""
+
     # ---- style profile (per-show) ----
     def style_profile(self, cfg=None) -> dict[str, Any]:
         """Effective style profile for THIS show.
@@ -118,12 +133,17 @@ class Show:
                    or (series.get("quality_baseline") if key == "baseline" else None))
             if val:
                 prof[key] = val
+        # Maturity is a per-show fact too: a show that has approved a bible
+        # policy uses it; the bootstrap profile is only the pre-bible default.
+        maturity = bible.get("content_policy") or series.get("content_policy")
+        if maturity:
+            prof["maturity"] = maturity
         self._style_cache = (cfg, prof)
         return dict(prof)
 
     def ref_medium(self) -> str:
         """Per-show art medium for reference images (bible.yaml ``medium``), or ''
-        when the show declares none — the code imposes no art style of its own."""
+        when the show declares none â€” the code imposes no art style of its own."""
         return str((self.read_bible() or {}).get("medium") or "").strip()
 
     # ---- concept ----
@@ -132,12 +152,10 @@ class Show:
         return self.dir / "concept.json"
 
     def read_concept(self) -> dict[str, Any]:
-        if not self.concept_path.exists():
-            return {}
-        return json.loads(self.concept_path.read_text(encoding="utf-8"))
+        return fsutil.read_json(self.concept_path, {})
 
     def write_concept(self, data: dict[str, Any]) -> Path:
-        self.concept_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fsutil.write_json(self.concept_path, data)
         return self.concept_path
 
     # ---- characters ----
@@ -191,23 +209,23 @@ class Show:
 
     # ---- bootstrap state ----
     def bootstrap_state(self) -> dict[str, Any]:
-        if not self.bootstrap_path.exists():
-            return {"concept": {}, "bible": {}, "characters": [], "scenes": {}, "complete": False}
-        return json.loads(self.bootstrap_path.read_text(encoding="utf-8"))
+        return fsutil.read_json(
+            self.bootstrap_path,
+            {"concept": {}, "bible": {}, "characters": [], "scenes": {},
+             "complete": False})
 
     def set_bootstrap_state(self, state: dict[str, Any]) -> None:
-        self.bootstrap_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        fsutil.write_json(self.bootstrap_path, state)
 
     # ---- continuity ----
     def read_continuity(self) -> dict[str, Any]:
-        if not self.continuity_path.exists():
-            return {"episode": 0, "world": {}, "characters": {}, "plotlines": [],
-                    "unresolved_threads": [], "continuity_rules": []}
-        return json.loads(self.continuity_path.read_text(encoding="utf-8"))
+        return fsutil.read_json(
+            self.continuity_path,
+            {"episode": 0, "world": {}, "characters": {}, "plotlines": [],
+             "unresolved_threads": [], "continuity_rules": []})
 
     def write_continuity(self, state: dict[str, Any]) -> None:
-        self.continuity_path.parent.mkdir(parents=True, exist_ok=True)
-        self.continuity_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        fsutil.write_json(self.continuity_path, state)
 
 
 def open_show(show_id: str) -> Show:

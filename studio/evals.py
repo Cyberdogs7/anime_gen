@@ -16,7 +16,7 @@ Design
   BEFORE EVERY run. So every run sees byte-identical inputs and the ONLY variable
   is the model's sampling — exactly the thing under test. Any state the stage
   mutates (continuity, season, plan) is discarded and reset between runs.
-* The real client runs (local/zen routing, real temperature) so the measurement
+* The real client runs (local routing, real temperature) so the measurement
   reflects production. ``--temperature`` overrides the sampler WITHOUT editing the
   stage code, for temperature sweeps.
 * Metrics: variance (pairwise text similarity across runs), quality (the

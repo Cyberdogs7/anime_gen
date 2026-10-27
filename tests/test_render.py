@@ -56,7 +56,7 @@ def test_compile_shot_prompt_includes_action_subjects_dialogue():
 
 
 def test_dialogue_is_d_token_speech():
-    """Dialogue is written as <d>[English] …</d> tokens bound to <Subject N> (Sx),
+    """Dialogue is written as <d>[English] â€¦</d> tokens bound to <Subject N> (Sx),
     per the guide's speaker rules."""
     from studio.render import compile_shot_prompt
     script = {"summary": "They fight."}
@@ -77,7 +77,7 @@ def test_shot_places_character_appearance_in_frame():
     from studio.render import compile_shot_prompt
     show = _show(Path(tempfile.mkdtemp()))
     c = show.read_character("blade")
-    c["appearance_canonical"] = "a tall man with slicked-back dark hair and amber eyes"
+    c["identity_canonical"] = "a tall man with slicked-back dark hair and amber eyes"
     show.write_character(c)
     shot = {"id": "s01_sh01", "action": "he draws his sword",
             "dialogue": [{"char": "Blade", "line": "Hold it."}]}
@@ -138,10 +138,10 @@ def test_shot_ref_paths_and_voice_resolution(tmp_path):
     vp.write_bytes(b"x")
     assert _voice_sample_path(show, "Blade") == vp
     assert _voice_sample_path(show, "Nope") is None
-    # character ref resolves to the approved portrait (for the timeline slot)…
+    # character ref resolves to the approved portrait (for the timeline slot)â€¦
     crefs = _shot_character_ref(show, "Blade")
     assert crefs and "blade_ref_01.png" in crefs
-    # …but _shot_ref_paths carries ONLY non-character anchors (keyframe).
+    # â€¦but _shot_ref_paths carries ONLY non-character anchors (keyframe).
     shot = {"id": "s01_sh01", "action": "Blade fights",
             "references": {"characters": ["Blade"]}}
     kf = show.dir / "runs" / "EP01" / "storyboard"
@@ -153,7 +153,7 @@ def test_shot_ref_paths_and_voice_resolution(tmp_path):
 
 
 def test_silent_shot_is_explicit():
-    """A shot with no dialogue must state silence explicitly — H3 otherwise
+    """A shot with no dialogue must state silence explicitly â€” H3 otherwise
     invents gibberish speech on the joint audio track."""
     script = {"summary": "They fight."}
     scene = {"summary": "Blade vs Lily."}
@@ -165,7 +165,7 @@ def test_silent_shot_is_explicit():
     assert "No one speaks; all characters remain silent." in prompt
     assert "The shot carries no dialogue." in prompt
     assert "<d>" not in prompt
-    # overall_soundscape N/A means complete silence — it may only appear for
+    # overall_soundscape N/A means complete silence â€” it may only appear for
     # a silent shot, and here the compiler writes the silence out explicitly.
     assert "Complete silence" in prompt
     assert "all characters remain silent" in prompt
@@ -212,7 +212,7 @@ def test_delivery_note_goes_outside_the_token():
 
 
 def test_stage_direction_line_is_not_speech():
-    """A parenthetical stage direction must never become a <d> token — it would
+    """A parenthetical stage direction must never become a <d> token â€” it would
     be synthesized as gibberish speech."""
     script = {"summary": "A reaction."}
     scene = {"summary": "Blade reacts."}
@@ -222,3 +222,108 @@ def test_stage_direction_line_is_not_speech():
     assert "all characters remain silent" in prompt
     assert "<d>" not in prompt
     assert "(Grunting)" not in prompt
+
+STYLE = "Modern anime rendering with crisp cel-shaded linework"
+
+
+def test_video_prompt_includes_style_guide_verbatim():
+    script = {"summary": "A warning.", "style_guide": STYLE}
+    scene = {"summary": "Blade warns."}
+    shot = {"id": "s01_sh01", "action": "Blade leans in"}
+    prompt = compile_shot_prompt(None, script, scene, shot, ["Blade"])
+    assert STYLE in prompt
+
+
+def test_keyframe_prompt_includes_style_guide_verbatim():
+    from studio.storyboard import _keyframe_prompt
+    prompt = _keyframe_prompt(
+        {"action": "Blade leans in", "camera": "medium shot"},
+        {"summary": "A dim room", "location": "dim room"},
+        ["Blade"], style_guide=STYLE)
+    assert STYLE in prompt
+
+
+def test_h3_llm_prompt_includes_style_guide_verbatim():
+    from studio.prompts import h3_llm_generate_prompt
+
+    class _LLM:
+        user = ""
+
+        def chat(self, messages, **kwargs):
+            self.user = messages[-1]["content"]
+            return ("subject_definitions:\ndetailed_description:\n"
+                    "overall_soundscape:")
+
+    llm = _LLM()
+    h3_llm_generate_prompt(llm, {"style_guide": STYLE,
+                                 "art_direction": {"camera": "handheld"}},
+                           {"summary": "Blade warns."},
+                           {"id": "s01_sh01", "action": "Blade leans in"},
+                           [], ["Blade"])
+    assert STYLE in llm.user
+    assert "handheld" not in llm.user.lower()
+
+
+def test_h3_llm_prompt_ignores_legacy_freeform_style():
+    from studio.prompts import h3_llm_generate_prompt
+
+    class _LLM:
+        user = ""
+
+        def chat(self, messages, **kwargs):
+            self.user = messages[-1]["content"]
+            return ("subject_definitions:\ndetailed_description:\n"
+                    "overall_soundscape:")
+
+    llm = _LLM()
+    legacy = "rim lighting, handheld camera, shallow focus"
+    h3_llm_generate_prompt(llm, {"style_guide": legacy},
+                           {"summary": "Blade warns."},
+                           {"id": "s01_sh01", "action": "Blade leans in"},
+                           [], ["Blade"])
+    assert legacy not in llm.user
+
+
+def test_show_render_style_requires_structured_bible(tmp_path):
+    show = Show("demo", root=tmp_path)
+    show.write_bible({"style_guide": "legacy freeform camera lighting"})
+    assert show.render_style() == ""
+    show.write_bible({"style_guide": STYLE,
+                      "art_direction": {"camera": "handheld",
+                                        "lighting": "neon",
+                                        "palette": "magenta"}})
+    assert show.render_style() == STYLE
+
+
+def test_style_revise_writes_structured_bible_fields(tmp_path):
+    from studio import style
+
+    show = Show("demo", root=tmp_path)
+    show.write_bible({"style_guide": "legacy freeform camera lighting"})
+
+    class _Cfg:
+        def get(self, *args):
+            if args[:2] == ("llm", "roles"):
+                return {"showrunner": "m"}
+            if args[:2] == ("llm", "model"):
+                return "m"
+            return {}
+
+    class _LLM:
+        def chat(self, messages, **kwargs):
+            return ('{"style_guide": "' + STYLE + '", "art_direction": '
+                    '{"camera": "handheld", "lighting": "neon", '
+                    '"palette": "magenta"}}')
+
+        def chat_json(self, messages, **kwargs):
+            import json
+            return json.loads(self.chat(messages, **kwargs))
+
+    assert style.revise(show, llm=_LLM(), cfg=_Cfg()) == STYLE
+    bible = show.read_bible()
+    assert bible["style_guide"] == STYLE
+    assert bible["art_direction"] == {"camera": "handheld",
+                                      "lighting": "neon",
+                                      "palette": "magenta"}
+    assert show.render_style() == STYLE
+

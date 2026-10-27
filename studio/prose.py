@@ -196,7 +196,7 @@ def generate_episode_prose(show: Show, episode: int, llm=None, cfg=None,
     text = promptlog.logged_chat(
         llm, show, episode, "prose-draft",
         [{"role": "system", "content": prompts.showrunner_system(
-            show.style_profile(cfg), bible.get("content_policy", "mature"),
+            show.style_profile(cfg), bible.get("content_policy") or "",
             show.style_profile(cfg).get("baseline", ""))},
          {"role": "user", "content": prompts.episode_prose_prompt(
              bible, skeleton, characters, continuity, _target(show),
@@ -258,7 +258,7 @@ def revise_episode_prose(prose: str, reviews: dict[str, Any],
     text = promptlog.logged_chat(
         llm, show, episode, "prose-revise",
         [{"role": "system", "content": prompts.showrunner_system(
-            show.style_profile(cfg), (show.read_bible() or {}).get("content_policy", "mature"),
+            show.style_profile(cfg), (show.read_bible() or {}).get("content_policy") or "",
             show.style_profile(cfg).get("baseline", ""))},
          {"role": "user", "content": prompts.prose_revision_prompt(
              prose, review_notes_text(reviews))}],

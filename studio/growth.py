@@ -50,7 +50,7 @@ def review_new_plotline(show: Show, proposal: dict[str, Any], episode: int,
             if c.get("name")] or (bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("growth_reviewer") or roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy") or "",
                                        show.style_profile(cfg).get("baseline", ""))
     user = prompts.new_plotline_review_prompt(bible, existing, cast, proposal, episode)
     data = llm.chat_json([{"role": "system", "content": system},
@@ -78,7 +78,7 @@ def review_new_character(show: Show, name: str, plotline: dict[str, Any],
             if c.get("name")] or (bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("growth_reviewer") or roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy") or "",
                                        show.style_profile(cfg).get("baseline", ""))
     user = prompts.new_character_review_prompt(bible, cast, name, plotline, episode)
     data = llm.chat_json([{"role": "system", "content": system},
@@ -138,7 +138,7 @@ def generate_new_character(show: Show, name: str, plotline: dict[str, Any],
         bible.get("cast") and [c.get("name") for c in bible["cast"]] or [])
     roles = cfg.get("llm", "roles", {})
     model = roles.get("showrunner") or cfg.get("llm", "model")
-    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy", "mature"),
+    system = prompts.showrunner_system(show.style_profile(cfg), bible.get("content_policy") or "",
                                        show.style_profile(cfg).get("baseline", ""))
     ACTIVITY[show.show_id] = {"detail": f"Growth: proposing new character {name}…",
                               "ts": time.time()}
@@ -164,7 +164,7 @@ def generate_new_character(show: Show, name: str, plotline: dict[str, Any],
     proposal.setdefault("appearance_canonical", "")
     proposal.setdefault("personality", [])
     proposal.setdefault("traits_for_llm", "")
-    proposal["voice"] = {"mode": "manual", "speaker": None,
+    proposal["voice"] = {"mode": "designed", "speaker": None,
                          "voice_description": (proposal.get("voice") or {}).get(
                              "voice_description", "")}
     show.write_character(proposal)

@@ -206,19 +206,17 @@ def _shot_ref_weights(shot: dict[str, Any], names: list[str],
 
 
 def _show_style(show: Show) -> str:
-    """The show's visual style guide (from the bible) for image/video prompts.
+    """The show's generation style (bible ``style_guide``), or '' when unset.
 
-    Every ref/keyframe prompt must carry this so the whole series renders in the
-    SAME look — without it the model falls back to its own default look.
+    This is the structured rendering/linework field only. Camera, lighting and
+    palette live in ``art_direction`` and are never sent to an image or video
+    model.
     """
-    try:
-        return ((show.read_bible() or {}).get("style_guide") or "").strip().rstrip(".")
-    except Exception:
-        return ""
+    return show.render_style()
 
 
 def _ensure_style(prompt: str, style: str) -> str:
-    """Append the show style guide to a prompt unless it already carries it.
+    """Append the show style to a prompt unless it already carries it.
 
     Prompts persisted in refs.json / objects/prompts.json before the style guide
     was threaded through would otherwise keep rendering off-style forever — this
@@ -613,8 +611,11 @@ def generate_costume_variant(show: Show, cid: str, name: str, label: str,
                 label, name, personality)
             prompt = prompts.costume_edit_prompt(description or label)
         else:
-            prompt = prompts.costume_ref_prompt(name, label, canon,
-                                                _show_style(show), show.ref_medium())
+            c = show.read_character(cid)
+            identity = (c.get("identity_canonical") or canon or "").strip()
+            prompt = prompts.costume_ref_prompt(
+                name, label, identity, _show_style(show), show.ref_medium(),
+                gender=c.get("gender") or "")
     if mode == "edit":
         # Source the edit from the garmentless construction ref when available:
         # with no garments in the source, the edit cannot carry over the base
@@ -878,7 +879,7 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
     if stored and not _is_stale_object_prompt(stored):
         current = _ensure_style(stored, style)
     else:
-        desc = _describe_object(show, episode, name, cfg)
+        desc = _describe_object(show, episode, name, cfg, llm=llm)
         current = _base_object_prompt(name, style, desc, show.ref_medium())
     prompt = current
     if notes.strip():
@@ -886,15 +887,12 @@ def regenerate_object_ref(show: Show, episode: int, slug: str, notes: str = "",
         model = cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model")
         try:
             llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
-            text = llm.chat([
+            parsed = llm.chat_json([
                 {"role": "system", "content": prompts.showrunner_system(
-                    show.style_profile(cfg), (show.read_bible() or {}).get("content_policy", "mature"),
+                    show.style_profile(cfg), (show.read_bible() or {}).get("content_policy") or "",
                     show.style_profile(cfg).get("baseline", ""))},
                 {"role": "user", "content": prompts.revise_object_prompt(current, notes)},
             ], model=model, role="showrunner", temperature=0.4, max_tokens=900)
-            revised = text[text.find("{"): text.rfind("}") + 1] or ""
-            import json as _json
-            parsed = _json.loads(revised)
             candidate = (parsed.get("prompt") or "").strip()
             if candidate:
                 prompt = _ensure_style(candidate, style)
@@ -1093,12 +1091,16 @@ def _object_context(show: Show, episode: int, name: str) -> str:
     return " || ".join(parts)
 
 
-def _describe_object(show: Show, episode: int, name: str, cfg=None) -> str:
-    """LLM visual description of a recurring object (best effort; '' on error)."""
+def _describe_object(show: Show, episode: int, name: str, cfg=None, llm=None) -> str:
+    """LLM visual description of a recurring object (best effort; '' on error).
+
+    ``llm`` is threaded through so a caller that already has a client (or a test
+    stub) never triggers a second, hidden connection.
+    """
     try:
         from .bootstrap import BootstrapChain
         ctx = _object_context(show, episode, name)
-        return BootstrapChain(show, cfg=cfg).describe_object(name, ctx)
+        return BootstrapChain(show, cfg=cfg, llm=llm).describe_object(name, ctx)
     except Exception:
         log.warning("object description failed for %s", name, exc_info=True)
         return ""

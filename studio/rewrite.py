@@ -2,17 +2,16 @@
 
 When a script is stuck in a full-fail state, the automatic fix loops only ever
 run with the configured local role model. This lets a human fire a SINGLE rewrite
-pass with a hand-picked model (e.g. a pricier remote one) to see whether a
-stronger model clears the writers' room — without changing the pipeline config or
-re-running the whole episode.
+pass with a hand-picked model to see whether a stronger model clears the writers'
+room — without changing the pipeline config or re-running the whole episode.
 
 It is one rewrite + one re-review, then it stops and hands back to the normal
 gate. It is NOT a loop: nothing auto-retries, so it can only cost one call on the
 chosen model per invocation.
 
 Dashboard: GET the model list from the show payload (``models``) and POST
-``/api/show/<id>/rewrite`` {episode, model, remote}. CLI:
-``python studio.py rewrite --show <id> --episode 1 --model <id> [--remote]``.
+``/api/show/<id>/rewrite`` {episode, model}. CLI:
+``python studio.py rewrite --show <id> --episode 1 --model <id>``.
 """
 from __future__ import annotations
 
@@ -41,42 +40,24 @@ _MODELS_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 
 
 def pickable_models(cfg=None, ttl: float = 60.0) -> dict[str, list[str]]:
-    """Models offered for a manual rewrite, read LIVE from the providers.
+    """Models offered for a manual rewrite, read LIVE from LM Studio.
 
-    Local ids come from the LM Studio ``/models`` endpoint; remote ids from the
-    Zen/GO ``/models`` endpoint (the configured ``zen.pickable_models`` list is
-    only a fallback when the endpoint is unreachable). Cached for ``ttl`` seconds
-    so the dashboard's frequent show-payload polls never re-hit the network.
-    ``ttl=0`` forces a fresh read (tests).
+    Ids come from the local LM Studio ``/models`` endpoint, with the configured
+    role/model names as a fallback when the endpoint is unreachable. Cached for
+    ``ttl`` seconds so the dashboard's frequent show-payload polls never re-hit
+    the network. ``ttl=0`` forces a fresh read (tests).
     """
     cfg = cfg or get_config()
     now = time.time()
     if _MODELS_CACHE["data"] is not None and ttl > 0 and now - _MODELS_CACHE["ts"] < ttl:
         return _MODELS_CACHE["data"]
 
-    # Fallbacks from config (used only when a provider cannot be reached).
-    zen = cfg.get("llm", "zen", {}) or {}
-    cfg_remote = [str(m) for m in (zen.get("pickable_models") or []) if str(m).strip()]
     local_fallback: list[str] = []
     seen: set[str] = set()
     for m in list((cfg.get("llm", "roles", {}) or {}).values()) + [cfg.get("llm", "model")]:
         if m and str(m) not in seen:
             seen.add(str(m))
             local_fallback.append(str(m))
-
-    remote: list[str] = []
-    base = str(zen.get("base_url") or "").rstrip("/")
-    if base:
-        try:
-            from .config import resolve_zen_api_key
-            key = resolve_zen_api_key(cfg)
-            if key:
-                remote = _http_model_ids(base + "/models",
-                                         {"Authorization": f"Bearer {key}"})
-        except Exception:
-            remote = []
-    if not remote:
-        remote = cfg_remote
 
     local: list[str] = []
     lbase = str(cfg.get("llm", "base_url") or "").rstrip("/")
@@ -88,7 +69,7 @@ def pickable_models(cfg=None, ttl: float = 60.0) -> dict[str, list[str]]:
     if not local:
         local = local_fallback
 
-    data = {"remote": list(dict.fromkeys(remote)), "local": list(dict.fromkeys(local))}
+    data = {"local": list(dict.fromkeys(local))}
     _MODELS_CACHE["ts"] = now
     _MODELS_CACHE["data"] = data
     return data
@@ -107,7 +88,7 @@ def _notes_text(review: dict[str, Any]) -> str:
     return review_notes_text(revs) if isinstance(revs, dict) else ""
 
 
-def rewrite_script_once(show: Show, episode: int, model: str, remote: bool = False,
+def rewrite_script_once(show: Show, episode: int, model: str,
                         cfg=None, llm=None, notes: str = "") -> dict[str, Any]:
     """Run ONE rewrite of the latest script with ``model``, then re-review once.
 
@@ -125,10 +106,6 @@ def rewrite_script_once(show: Show, episode: int, model: str, remote: bool = Fal
     if not str(model or "").strip():
         raise ValueError("a model id is required for a manual rewrite")
     llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
-    if remote and not (getattr(llm, "_zen_settings", lambda: None)()):
-        raise RuntimeError(
-            f"model {model!r} is remote but Zen is not configured/reachable — "
-            "check llm.zen (enabled + auth key) or pick a local model")
 
     path = _latest_script_path(show, episode)
     if path is None:
@@ -147,9 +124,7 @@ def rewrite_script_once(show: Show, episode: int, model: str, remote: bool = Fal
     bible = show.read_bible()
     style = show.style_profile(cfg)
     system = prompts.showrunner_system(
-        style, bible.get("content_policy", "mature"), style.get("baseline", ""))
-    local_model = (cfg.get("llm", "roles", {}).get("showrunner")
-                   or cfg.get("llm", "model"))
+        style, bible.get("content_policy") or "", style.get("baseline", ""))
     show_id = show.show_id
     ACTIVITY[show_id] = {"detail": f"Episode {episode}: one-shot rewrite with "
                          f"{model}…", "ts": time.time()}
@@ -159,9 +134,7 @@ def rewrite_script_once(show: Show, episode: int, model: str, remote: bool = Fal
             [{"role": "system", "content": system},
              {"role": "user", "content": prompts.revision_prompt(
                  script, notes_text, outline=read_episode_plan(show, episode))}],
-            model=(local_model if remote else model),
-            remote_model=(model if remote else None),
-            prefer_local=(not remote),
+            model=model,
             role="showrunner", temperature=0.6, max_tokens=65536,
             on_progress=lambda n, t: ACTIVITY.update({show_id: {
                 "detail": f"Episode {episode}: rewriting with {model} ({n} tokens…)",
@@ -201,7 +174,7 @@ def rewrite_script_once(show: Show, episode: int, model: str, remote: bool = Fal
     return script
 
 
-def regenerate_outline_once(show: Show, episode: int, model: str, remote: bool = False,
+def regenerate_outline_once(show: Show, episode: int, model: str,
                             cfg=None, llm=None, notes: str = "") -> dict[str, Any]:
     """Regenerate the episode OUTLINE once with ``model``, then re-run its review.
 
@@ -218,15 +191,5 @@ def regenerate_outline_once(show: Show, episode: int, model: str, remote: bool =
     if not str(model or "").strip():
         raise ValueError("a model id is required for a manual outline regeneration")
     base = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=600)
-    if remote and not (getattr(base, "_zen_settings", lambda: None)()):
-        raise RuntimeError(
-            f"model {model!r} is remote but Zen is not configured/reachable — "
-            "check llm.zen (enabled + auth key) or pick a local model")
-    local_model = (cfg.get("llm", "roles", {}).get("showrunner")
-                   or cfg.get("llm", "model"))
-    wrapped = _ModelOverride(
-        base,
-        model=(local_model if remote else model),
-        remote_model=(model if remote else None),
-        prefer_local=(not remote))
+    wrapped = _ModelOverride(base, model=model)
     return generate_episode_plan(show, episode, llm=wrapped, cfg=cfg, notes=notes)

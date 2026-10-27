@@ -64,18 +64,6 @@ def run_setup(cfg=None, create_venv: bool = False, install_deps: bool = False) -
                         ok_tree,
                         str(bat) if ok_tree else (inst.get("dir") or "not configured in env.yaml")))
 
-    # Broker
-    provider = cfg.get("bus", "provider", "memory")
-    if provider == "redis":
-        import socket
-        port = 6379
-        with socket.socket() as s:
-            s.settimeout(1.0)
-            checks.append(Check("broker(redis)", s.connect_ex(("127.0.0.1", port)) == 0,
-                                "redis :6379 reachable"))
-    else:
-        checks.append(Check("broker", True, "memory (no broker needed)"))
-
     # Shows
     checks.append(Check("shows", True, f"{len(cfg.list_shows())} show(s)"))
 

@@ -6,8 +6,6 @@ the bible, and rebuild the house style-anchor image from it.
 """
 from __future__ import annotations
 
-import json
-
 from . import prompts
 from .config import get_config
 from .show import Show
@@ -18,23 +16,36 @@ def current(show: Show) -> str:
 
 
 def revise(show: Show, feedback: str = "", cfg=None, llm=None) -> str:
-    """LLM-rewrite ONLY ``style_guide`` from feedback (pure art direction) and write
-    it back to the bible. Returns the new guide ('' on failure)."""
+    """LLM-rewrite the show's art direction as separate bible fields.
+
+    ``style_guide`` becomes the rendering/linework line that generation prompts
+    use verbatim; ``art_direction`` holds camera/lighting/palette as bible
+    reference only. Returns the new ``style_guide`` ('' on failure).
+    """
     cfg = cfg or get_config()
     if llm is None:
         from .clients.lmstudio import LMStudioClient
         llm = LMStudioClient(cfg.get("llm", "base_url"), timeout=240)
     model = (cfg.get("llm", "roles", {}).get("showrunner") or cfg.get("llm", "model"))
     bible = show.read_bible() or {}
-    text = llm.chat(
+    data = llm.chat_json(
         [{"role": "user",
-          "content": prompts.style_guide_prompt(current(show), feedback, bible)}],
+          "content": prompts.art_direction_prompt(bible, feedback)}],
         model=model, role="showrunner", temperature=0.7, max_tokens=400)
-    s = text[text.find("{"): text.rfind("}") + 1]
-    new = (json.loads(s).get("style_guide") or "").strip()
-    if new:
-        bible["style_guide"] = new
-        show.write_bible(bible)
+    new = (data.get("style_guide") or "").strip()
+    art = data.get("art_direction")
+    if not new:
+        return ""
+    bible["style_guide"] = new
+    prior = bible.get("art_direction")
+    merged = dict(prior) if isinstance(prior, dict) else {}
+    if isinstance(art, dict):
+        for key in ("camera", "lighting", "palette"):
+            val = str(art.get(key) or "").strip()
+            if val:
+                merged[key] = val
+    bible["art_direction"] = merged
+    show.write_bible(bible)
     return new
 
 

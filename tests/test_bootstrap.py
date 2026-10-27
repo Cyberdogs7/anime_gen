@@ -21,7 +21,7 @@ class FakeLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
-        if "Propose an anime series concept" in user:
+        if "Propose a show series concept" in user:
             return self.script.get("concept", {"title": "T", "logline": "L",
                                                "genre": ["martial-arts"],
                                                "tone": ["warm"], "maturity": "mature"})
@@ -55,7 +55,7 @@ def _make_chain(tmp_path) -> BootstrapChain:
     cfg = Config(tmp_path)
     show = Show("demo", root=tmp_path)
     show.write_concept({"title": "Demo"})
-    return BootstrapChain(show, cfg=cfg, llm=FakeLLM({}), bus=None)
+    return BootstrapChain(show, cfg=cfg, llm=FakeLLM({}))
 
 
 def test_bootstrap_auto_completes(tmp_path):
@@ -181,19 +181,6 @@ def test_resume_picks_up_orphaned_character(tmp_path):
     assert akane["refs"] in ("approved", "stub")
 
 
-def test_needs_reconcile_detects_stall(tmp_path):
-    from studio.bootstrap import needs_reconcile
-    chain = _interrupted_show(tmp_path)
-    # Incomplete + nothing pending + work stranded on disk -> needs reconcile.
-    assert needs_reconcile("demo", show=chain.show) is True
-    # Once a gate is pending, it is awaiting the human, not stalled.
-    chain._auto_override = True
-    chain.advance()
-    st = chain.show.bootstrap_state()
-    assert st["complete"] is True
-    assert needs_reconcile("demo", show=chain.show) is False
-
-
 def test_write_through_survives_mid_character(tmp_path):
     """After refs/voice write-through, a second advance() does NOT regenerate
     the already-generated asset from scratch (idempotent resume)."""
@@ -211,3 +198,17 @@ def test_write_through_survives_mid_character(tmp_path):
     log = chain.advance()
     st2 = chain.show.bootstrap_state()
     assert st2["complete"] is True
+
+
+def test_bootstrap_state_survives_empty_or_corrupt_file(tmp_path):
+    """A concurrent dashboard read must never crash on a half-written file."""
+    from studio.show import Show
+    show = Show("demo", root=tmp_path)
+    show.dir.mkdir(parents=True, exist_ok=True)
+    show.bootstrap_path.write_text("", encoding="utf-8")
+    assert show.bootstrap_state()["complete"] is False
+    show.bootstrap_path.write_text("{not json", encoding="utf-8")
+    assert show.bootstrap_state()["characters"] == []
+    show.set_bootstrap_state({"complete": True})
+    assert show.bootstrap_state()["complete"] is True
+    assert not list(show.dir.glob("bootstrap.json.*.tmp"))

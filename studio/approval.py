@@ -1,4 +1,4 @@
-"""Human approval actions shared by the CLI and the dashboard (DESIGN §9.5).
+"""Human approval actions shared by the CLI and the board (DESIGN §9.5).
 
 Every gate is an artifact review with an approve/reject action. State lives in
 the show's files (bootstrap.json for Gate 0, runs/EP##/story.approval.json for
@@ -13,16 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from . import fsutil
-from .bootstrap import ACTIVITY, BootstrapChain
+from . import bootstrap
 from .config import get_config
-from .bus.events import (
+from .events import (
     BIBLE_APPROVED, BIBLE_PENDING, BIBLE_REJECTED, CHAR_PROPOSAL_APPROVED,
     CHAR_PROPOSAL_PENDING, CHAR_PROPOSAL_REJECTED, CHAR_REFS_APPROVED,
     CHAR_REFS_PENDING, CHAR_REFS_REJECTED, CONCEPT_APPROVED, CONCEPT_PENDING,
     CONCEPT_REJECTED, COSTUME_APPROVED, COSTUME_REJECTED, OBJECT_REF_APPROVED,
     OBJECT_REF_REJECTED, SCENE_REGISTRY_APPROVED, SCENE_REGISTRY_PENDING,
     SCENE_REGISTRY_REJECTED, SCRIPT_APPROVED, SCRIPT_REJECTED, VOICE_APPROVED,
-    VOICE_REJECTED, new_event,
+    VOICE_REJECTED, new_event, record,
 )
 from .show import Show
 
@@ -30,8 +30,7 @@ GATE_STEPS = ("concept", "bible", "character", "refs", "voice", "scenes")
 
 
 def _emit(show: Show, event_type: str, payload: dict[str, Any] | None = None) -> None:
-    chain = BootstrapChain(show)
-    chain._emit(new_event(event_type, show_id=show.show_id, payload=payload or {}))
+    record(new_event(event_type, show_id=show.show_id, payload=payload or {}), show.dir)
 
 
 def _find_char(st: dict, name: str) -> dict | None:
@@ -102,7 +101,8 @@ def _clear_voice(show: Show, char_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
-                 costume: str = "", slug: str = "", episode: int | str = "") -> list[str]:
+                 costume: str = "", slug: str = "", episode: int | str = "",
+                 advance: bool = True) -> list[str]:
     show = Show(show_id)
     st = show.bootstrap_state()
     payload = {"manual": True, "notes": notes}
@@ -191,7 +191,8 @@ def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
             _emit(show, VOICE_APPROVED, {**payload, "char": char})
     elif step == "scenes":
         st["scenes"]["status"] = "approved"
-        st["complete"] = True
+        if advance:
+            st["complete"] = True
         # Approving the registry accepts the current scene refs: clear any
         # per-scene REJECTED markers so the UI stops flagging them.
         try:
@@ -211,16 +212,31 @@ def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
     # Approving a gate unlocks the next one: advance the chain so the next stage
     # generates (and lands pending for review). Manual mode stops at the next gate.
     messages = [f"{step} approved"]
-    try:
-        for line in BootstrapChain(show).advance():
-            messages.append(line)
-    except Exception as exc:
-        raise ValueError(
-            f"{step} approved, but generating the next stage failed ({exc}). "
-            f"The approval is recorded - retry and it will regenerate.") from exc
-    finally:
-        ACTIVITY.pop(show_id, None)
+    if advance:
+        try:
+            for line in bootstrap.BootstrapChain(show).advance():
+                messages.append(line)
+        except Exception as exc:
+            raise ValueError(
+                f"{step} approved, but generating the next stage failed ({exc}). "
+                f"The approval is recorded - retry and it will regenerate.") from exc
+        finally:
+            bootstrap.ACTIVITY.pop(show_id, None)
     return messages
+
+
+def approve_proposal(show_id: str, char: str, notes: str = "") -> list[str]:
+    """Approve only a character's text proposal (Gate 0 plan card)."""
+    show = Show(show_id)
+    st = show.bootstrap_state()
+    entry = next((c for c in st.get("characters", []) if c.get("name") == char), None)
+    if entry is None:
+        raise ValueError(f"no character named '{char}'")
+    entry["proposal"] = "approved"
+    show.set_bootstrap_state(st)
+    _emit(show, CHAR_PROPOSAL_APPROVED,
+          {"char": char, "manual": True, "notes": notes})
+    return [f"{char} proposal approved"]
 
 
 def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes",
@@ -235,7 +251,7 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
     """
 
     show = Show(show_id)
-    chain = BootstrapChain(show)
+    chain = bootstrap.BootstrapChain(show)
     st = show.bootstrap_state()
     payload = {"manual": True, "notes": notes}
     label = "bible" if step == "bible" else step
@@ -458,7 +474,7 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
                 # stored prompt would leave the variant stuck on whatever it was
                 # originally generated with.
                 try:
-                    desc = BootstrapChain(show).describe_costume(
+                    desc = bootstrap.BootstrapChain(show).describe_costume(
                         label, name, personality, feedback=notes)
                 except Exception:
                     desc = ""
@@ -487,7 +503,7 @@ def reject_step(show_id: str, step: str, char: str = "", notes: str = "no notes"
         else:
             raise ValueError(f"unknown step '{step}' ({'|'.join(GATE_STEPS)})")
     finally:
-        ACTIVITY.pop(show_id, None)
+        bootstrap.ACTIVITY.pop(show_id, None)
     if step == "scene":
         return [f"scene {char} image rejected; regenerating from your notes"]
     if step == "costume":
@@ -743,19 +759,15 @@ def reject_shot(show: "Show | str", episode: int | str, shot_id: str,
             llm = llm or LMStudioClient(cfg.get("llm", "base_url"), timeout=60)
             model = (cfg.get("llm", "roles", {}).get("showrunner")
                      or cfg.get("llm", "model"))
-            text = llm.chat([
+            parsed = llm.chat_json([
                 {"role": "system", "content": (
-                    "You revise video-generation prompts for an anime production "
+                    "You revise video-generation prompts for a show production "
                     "from the director's rejection notes.")},
                 {"role": "user", "content": revise_shot_prompt(current, notes)},
             ], model=model, role="showrunner", temperature=0.4, max_tokens=1600, retries=1)
-            import re
-            m = re.search(r"\{.*\}", text or "", re.S)
-            if m:
-                parsed = json.loads(m.group(0))
-                candidate = (parsed.get("prompt") or "").strip()
-                if len(candidate) > 40:
-                    revised = candidate
+            candidate = (parsed.get("prompt") or "").strip()
+            if len(candidate) > 40:
+                revised = candidate
         except Exception:
             pass  # keep the current prompt; still re-render from it
 

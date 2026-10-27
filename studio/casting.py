@@ -116,24 +116,23 @@ def _revise_appearance(llm, model: str, name: str, current: str, notes: str,
     """LLM rewrites ONLY the appearance_canonical from rejection feedback."""
     world = (f"Series bible (world, tone, style): {json.dumps(bible, ensure_ascii=False)}\n"
              if bible else "")
-    text = llm.chat([
-        {"role": "user", "content":
-         f"Revise this anime entity's canonical appearance description to address "
-         f"the director's feedback. Keep everything the feedback did not ask to change.\n"
-         f"Subject: {name}\n"
-         f"{world}"
-         + (f"Visual style guide: {style}\n" if style else "")
-         + f"CURRENT APPEARANCE:\n{current}\n"
-         f"DIRECTOR'S FEEDBACK:\n{notes}\n"
-         "If the feedback indicates the subject is NOT what it was (e.g. it is a "
-         "group or squadron rather than one person, or a machine rather than a human), "
-         "correct the subject itself, not just its details.\n"
-         + prompts.appearance_canonical_rules() + "\n"
-         'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
-    ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
     try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return (json.loads(s).get("appearance_canonical") or "").strip()
+        data = llm.chat_json([
+            {"role": "user", "content":
+             f"Revise this shows entity's canonical appearance description to address "
+             f"the director's feedback. Keep everything the feedback did not ask to change.\n"
+             f"Subject: {name}\n"
+             f"{world}"
+             + (f"Visual style guide: {style}\n" if style else "")
+             + f"CURRENT APPEARANCE:\n{current}\n"
+             f"DIRECTOR'S FEEDBACK:\n{notes}\n"
+             "If the feedback indicates the subject is NOT what it was (e.g. it is a "
+             "group or squadron rather than one person, or a machine rather than a human), "
+             "correct the subject itself, not just its details.\n"
+             + prompts.appearance_canonical_rules() + "\n"
+             'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
+        ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
+        return (data.get("appearance_canonical") or "").strip()
     except Exception:
         return ""
 
@@ -172,29 +171,28 @@ def _ask_appearance(llm, model: str, name: str, context: str,
     show, with no human default. Same appearance discipline the main cast uses.
     """
     world = json.dumps(bible, ensure_ascii=False) if bible else "(no bible provided)"
-    text = llm.chat([
-        {"role": "user", "content":
-         f"Design the canonical on-screen look of ONE visual subject for an anime "
-         f"reference image.\n"
-         f"SUBJECT NAME: {name}\n"
-         f"ROLE: {role or 'supporting entity'}\n"
-         f"HOW THE EPISODE DEPICTS IT: {context or '(not described in the script)'}\n\n"
-         "From the name, the world and the depiction above, decide what this subject "
-         "ACTUALLY is — a person, a machine/mech/vehicle, a creature, a group or "
-         "squadron of units, a faction, or a prop — and describe THAT. Do not assume a "
-         "human, and do not turn a group/squadron/faction into one person.\n\n"
-         f"Series bible (world, tone, style): {world}\n"
-         + (f"Visual style guide: {style}\n" if style else "")
-         + "\n" + prompts.appearance_canonical_rules() + "\n\n"
-         "MANDATORY: name the SINGLE canonical subject the reference image must show, "
-         "matching what the entity really is in this world. A person is described in "
-         "one outfit; a non-person is described as itself (form, materials, colors, "
-         "markings, scale).\n\n"
-         'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
-    ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
     try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return (json.loads(s).get("appearance_canonical") or "").strip()
+        data = llm.chat_json([
+            {"role": "user", "content":
+             f"Design the canonical on-screen look of ONE visual subject for a show "
+             f"reference image.\n"
+             f"SUBJECT NAME: {name}\n"
+             f"ROLE: {role or 'supporting entity'}\n"
+             f"HOW THE EPISODE DEPICTS IT: {context or '(not described in the script)'}\n\n"
+             "From the name, the world and the depiction above, decide what this subject "
+             "ACTUALLY is — a person, a machine/mech/vehicle, a creature, a group or "
+             "squadron of units, a faction, or a prop — and describe THAT. Do not assume a "
+             "human, and do not turn a group/squadron/faction into one person.\n\n"
+             f"Series bible (world, tone, style): {world}\n"
+             + (f"Visual style guide: {style}\n" if style else "")
+             + "\n" + prompts.appearance_canonical_rules() + "\n\n"
+             "MANDATORY: name the SINGLE canonical subject the reference image must show, "
+             "matching what the entity really is in this world. A person is described in "
+             "one outfit; a non-person is described as itself (form, materials, colors, "
+             "markings, scale).\n\n"
+             'Reply with ONLY JSON: {"appearance_canonical": "..."}'},
+        ], model=model, role="showrunner", temperature=0.6, max_tokens=1200)
+        return (data.get("appearance_canonical") or "").strip()
     except Exception:
         return ""
 

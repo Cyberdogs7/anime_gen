@@ -22,13 +22,9 @@ from .show import Show
 #: without this they judge material that does not exist yet (voice, wardrobe,
 #: shot polish) and fail the outline for stage-inappropriate reasons.
 OUTLINE_REVIEW_CONTEXT = (
-    "STAGE NOTE: what you are reviewing is an EPISODE OUTLINE — a plot plus scene "
-    "summaries and Setup/Change/Consequence beats ONLY. Dialogue, line wording, voice, "
-    "shot-level action, camera, clothing/wardrobe and staging do NOT exist yet and must "
-    "NOT be judged or reported. Judge only outline-level concerns: plot and "
-    "cause-and-effect, act structure and pacing, protagonist agency, stakes, location "
-    "variety, serial progression, continuity of ESTABLISHED facts, and whether required "
-    "content (e.g. mature/fan-service) is STAGED in the beats.\n\n"
+    "STAGE NOTE: you are reviewing an EPISODE OUTLINE — a plot, scene summaries and "
+    "Setup/Change/Consequence beats. Dialogue, line wording, voice, shot action, camera, "
+    "wardrobe and staging come later, so judge this material at outline level.\n\n"
 )
 
 
@@ -78,7 +74,9 @@ def _prior_episode_summaries(show: Show, episode: int) -> list[dict[str, Any]]:
 
 def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
                        cfg=None, llm=None, episode: int = 0, round_no: int = 1,
-                       notes_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+                       notes_dir: Path | None = None,
+                       step_prefix: str = "review-plan-structure",
+                       cancel=None) -> dict[str, dict[str, Any]]:
     """Run plan-level reviewers over an episode OUTLINE (not a script).
 
     Currently a single 'structure' reviewer that catches outline-level incoherence
@@ -106,10 +104,12 @@ def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
     for reviewer in roles:
         if reviewer != "structure":
             continue
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("review canceled")
         user = prompts.plan_structure_review_prompt(plan, bible, episode, cast=cast)
         system = prompts.plan_reviewer_system(reviewer, baseline)
         data = promptlog.logged_chat_json(
-            llm, show, episode, f"review-plan-structure-r{round_no}",
+            llm, show, episode, f"{step_prefix}-r{round_no}",
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             model=model, temperature=0.2, max_tokens=4096,
@@ -119,8 +119,9 @@ def run_plan_reviewers(plan: dict[str, Any], show: Show | None = None,
         results[reviewer] = {"grade": "Pass" if passed else "Fail",
                              "pass": passed,
                              "review": str(data.get("review") or "").strip()}
-        _write_review(notes_dir or (cfg.root / "runs" / f"EP{episode:02d}" / "reviews"),
-                      reviewer, round_no, results[reviewer])
+        base = notes_dir or (((show.dir if show is not None else cfg.root))
+                             / "runs" / f"EP{episode:02d}" / "reviews")
+        _write_review(base, reviewer, round_no, results[reviewer])
     return results
 
 
@@ -164,17 +165,19 @@ def plan_pseudo_script(plan: dict[str, Any],
         "cast": plan.get("cast") or plan.get("characters") or [],
         "_review_note": (
             "This is an EPISODE OUTLINE (scene summaries + Setup/Change/Consequence "
-            "beats only; no dialogue or shot detail exists yet). Review plot, act "
-            "structure, pacing/length, protagonist agency, stakes, location variety, "
-            "serial progression, and mature/fan-service delivery. Do NOT flag dialogue "
-            "wording, line count, or shot-level polish that does not exist at this stage."),
+            "beats). Review it at outline level: plot, act structure, pacing/length, "
+            "protagonist agency, stakes, location variety, serial progression, and "
+            "mature/fan-service delivery."),
         "scenes": out_scenes,
     }
 
 
 def run_plan_room_reviewers(plan: dict[str, Any], show: Show | None = None,
                             cfg=None, llm=None, episode: int = 0, round_no: int = 1,
-                            notes_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+                            notes_dir: Path | None = None,
+                            step_prefix: str = "plan-review",
+                            notes_prefix: str = "plan-",
+                            cancel=None) -> dict[str, dict[str, Any]]:
     """Run the writers'-room reviewers over the episode OUTLINE.
 
     The outline decides length, locations, fan-service placement, and the beat
@@ -194,8 +197,8 @@ def run_plan_room_reviewers(plan: dict[str, Any], show: Show | None = None,
     pseudo = plan_pseudo_script(plan, target)
     return run_reviewers(pseudo, show=show, cfg=cfg, llm=llm, episode=episode,
                          round_no=round_no, notes_dir=notes_dir,
-                         step_prefix="plan-review", notes_prefix="plan-",
-                         roles_override=roles, outline=True)
+                         step_prefix=step_prefix, notes_prefix=notes_prefix,
+                         roles_override=roles, outline=True, cancel=cancel)
 
 
 def run_reviewers(script: dict[str, Any], show: Show | None = None,
@@ -203,7 +206,8 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
                   notes_dir: Path | None = None,
                   step_prefix: str = "review", notes_prefix: str = "",
                   roles_override: list[str] | None = None,
-                  outline: bool = False) -> dict[str, dict[str, Any]]:
+                  outline: bool = False,
+                  cancel=None) -> dict[str, dict[str, Any]]:
     """Run all configured reviewers over a script. Returns {reviewer: verdict}.
 
     Each reviewer: {score, notes: [{scene, item/note, ...}], pass}.
@@ -228,7 +232,13 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
 
     results: dict[str, dict[str, Any]] = {}
     prior = _prior_episode_summaries(show, episode) if show else []
-    for reviewer in roles:
+    base_dir = notes_dir or (((show.dir if show is not None else cfg.root))
+                             / "runs" / f"EP{episode:02d}" / "reviews")
+
+    def run_one(reviewer: str) -> dict[str, Any] | None:
+        """Run one reviewer. Returns its verdict, or None for an unknown role."""
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("review canceled")
         if reviewer == "repetition":
             # Deterministic (no LLM): catches an episode that replays the same
             # scene/beat again and again, which is the root of quip-only dialogue.
@@ -238,10 +248,8 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
                                      min_cluster=int(thresholds.get(
                                          "repetition_min_cluster", 3)),
                                      content=not outline)
-            results[reviewer] = data
-            _write_review(notes_dir or (cfg.root / "runs" / f"EP{episode:02d}" / "reviews"),
-                          f"{notes_prefix}{reviewer}", round_no, data)
-            continue
+            _write_review(base_dir, f"{notes_prefix}{reviewer}", round_no, data)
+            return data
         if reviewer == "slop":
             user = prompts.slop_review_prompt(script)
         elif reviewer == "continuity":
@@ -273,7 +281,7 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
         elif reviewer == "serial":
             user = prompts.serial_review_prompt(script, continuity, characters, prior)
         else:
-            continue
+            return None
         if outline:
             user = OUTLINE_REVIEW_CONTEXT + user
         system = prompts.reviewer_system(reviewer, style.get("baseline", ""))
@@ -288,15 +296,42 @@ def run_reviewers(script: dict[str, Any], show: Show | None = None,
         # is simply grade == "Pass"; there is no score/severity to reconcile.
         grade = str(data.get("grade", "")).strip().lower()
         passed = grade == "pass"
-        results[reviewer] = {"grade": "Pass" if passed else "Fail",
-                             "pass": passed,
-                             "review": str(data.get("review") or "").strip()}
+        result = {"grade": "Pass" if passed else "Fail",
+                  "pass": passed,
+                  "review": str(data.get("review") or "").strip()}
 
         # separate review file per reviewer
-        base = notes_dir or (cfg.root / "runs" / f"EP{episode:02d}" / "reviews")
-        _write_review(base, f"{notes_prefix}{reviewer}", round_no, results[reviewer])
+        _write_review(base_dir, f"{notes_prefix}{reviewer}", round_no, result)
+        return result
 
-    return results
+    # Reviewers are independent. Run the room concurrently (bounded by the LLM
+    # concurrency budget) so nine small-model reviews cost one review's wall
+    # time instead of nine. Fall back to sequential when there is no client.
+    parallel = (bool(cfg.get("reviewers", "parallel", True))
+                and llm is not None and len(roles) > 1)
+    if parallel:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        limit = max(1, min(len(roles),
+                           int(cfg.get("llm", "concurrency_limit", 4) or 4)))
+        with ThreadPoolExecutor(max_workers=limit,
+                                thread_name_prefix="review") as pool:
+            futures = {pool.submit(run_one, r): r for r in roles}
+            for fut in as_completed(futures):
+                reviewer = futures[fut]
+                try:
+                    out = fut.result()
+                except Exception as exc:
+                    out = {"grade": "Fail", "pass": False,
+                           "review": f"reviewer error: {type(exc).__name__}: {exc}"}
+                if out is not None:
+                    results[reviewer] = out
+    else:
+        for reviewer in roles:
+            out = run_one(reviewer)
+            if out is not None:
+                results[reviewer] = out
+
+    return {r: results[r] for r in roles if r in results}
 
 
 def _scene_words(s: dict[str, Any]) -> list[str]:

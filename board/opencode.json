@@ -1,0 +1,267 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["C:\\Users\\Chad\\PycharmProjects\\anime\\board\\AGENTS.md"],
+  "small_model": "lm_studio_local/qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp",
+  "mcp": {
+    "higgsfield": { "enabled": false },
+    "playwright": { "enabled": false }
+  },
+  "skills": {
+    "allowed": [],
+    "enable_local_discovery": false
+  },
+  "permission": {
+    "bash": {
+      "*": "deny",
+      "python* *studio.py* board-tool *": "allow",
+      "python* *studio.py* board-wait *": "allow",
+      "python* *studio.py* board-finish *": "allow"
+    },
+    "edit": "deny",
+    "write": "deny",
+    "patch": "deny",
+    "webfetch": "deny",
+    "task": "deny",
+    "question": "deny",
+    "read": "deny",
+    "grep": "deny",
+    "glob": "deny",
+    "list": "deny",
+    "external_directory": {
+      "*": "deny",
+      "C:\\Users\\Chad\\PycharmProjects\\anime\\shows\\*": "allow"
+    },
+    "codesearch": "deny",
+    "websearch": "deny"
+  },
+  "agent": {
+    "studio": {
+      "mode": "primary",
+      "description": "Studio board card worker (legacy board-tool roles)",
+      "prompt": "You are a studio board worker. The user message has the card, run id, and the board tools allowed for this role. Do the work only through the board CLI, then finish with the verdict command.",
+      "permission": {
+        "bash": {
+          "*": "deny",
+          "python* *studio.py* board-tool *": "allow",
+          "python* *studio.py* board-wait *": "allow",
+          "python* *studio.py* board-finish *": "allow"
+        },
+        "edit": "deny",
+        "write": "deny",
+        "patch": "deny",
+        "webfetch": "deny",
+        "task": "deny",
+        "question": "deny",
+        "read": "deny",
+        "grep": "deny",
+        "glob": "deny",
+        "list": "deny",
+        "codesearch": "deny",
+        "websearch": "deny"
+      },
+      "tools": {
+        "bash": true,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "studio-writer": {
+      "mode": "primary",
+      "description": "Studio outline/scene writer; changes file only",
+      "prompt": "You are a studio writer. The skill, canon, plan, and card are already in the user message. Do NOT read, glob, grep, or list any file. Write ONLY the artifact files named in the task, run its helper command, then run the board-finish command.",
+      "permission": {
+        "read": "deny",
+        "edit": "allow",
+        "write": "allow",
+        "patch": "deny",
+        "grep": "deny",
+        "glob": "deny",
+        "list": "deny",
+        "external_directory": "allow",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "task": "deny",
+        "question": "deny",
+        "todowrite": "deny",
+        "skill": "deny",
+        "bash": {
+          "*": "deny",
+          "python* *apply_outline_changes.py*": "allow",
+          "python* *assemble_script.py*": "allow",
+          "python* *apply_voice_sample.py*": "allow",
+          "python* *apply_object_prompts.py*": "allow",
+          "python* *apply_show_bootstrap.py*": "allow",
+          "python* -c *": "allow",
+          "python* *studio.py* board-finish *": "allow",
+          "git push*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git clean*": "deny",
+          "git commit*": "deny",
+          "rm *": "deny",
+          "rmdir *": "deny",
+          "del *": "deny",
+          "Remove-Item *": "deny"
+        }
+      },
+      "tools": {
+        "read": false,
+        "write": true,
+        "edit": false,
+        "bash": true,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "studio-reviewer": {
+      "mode": "primary",
+      "description": "Studio outline reviewer; review file only",
+      "prompt": "You are a studio reviewer. The skill and current plan are already in the user message. Do NOT read, glob, grep, or list any file. Write ONLY the review JSON file named in the task, run its record command, then run the board-finish verdict command.",
+      "permission": {
+        "read": "deny",
+        "edit": "allow",
+        "write": "allow",
+        "patch": "deny",
+        "grep": "deny",
+        "glob": "deny",
+        "list": "deny",
+        "external_directory": "allow",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "task": "deny",
+        "question": "deny",
+        "todowrite": "deny",
+        "skill": "deny",
+        "bash": {
+          "*": "deny",
+          "python* *record_outline_review.py*": "allow",
+          "python* -c *": "allow",
+          "python* *studio.py* board-finish *": "allow",
+          "git push*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git clean*": "deny",
+          "git commit*": "deny",
+          "rm *": "deny",
+          "rmdir *": "deny",
+          "del *": "deny",
+          "Remove-Item *": "deny"
+        }
+      },
+      "tools": {
+        "read": false,
+        "write": true,
+        "edit": false,
+        "bash": true,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "studio-script-reviewer": {
+      "mode": "primary",
+      "description": "Studio screenplay reviewer; reads scene files and canon",
+      "prompt": "You are a studio script reviewer. The skill, scene file paths, and canon paths are in the user message. Read those files with the read tool. Do not use board-tool or board-wait. Write ONLY the review JSON named in the task, then run the board-finish verdict command.",
+      "permission": {
+        "read": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "patch": "deny",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "external_directory": {
+          "*": "deny",
+          "C:\\Users\\Chad\\PycharmProjects\\anime\\shows\\*": "allow"
+        },
+        "webfetch": "deny",
+        "websearch": "deny",
+        "task": "deny",
+        "question": "deny",
+        "todowrite": "deny",
+        "skill": "deny",
+        "bash": {
+          "*": "deny",
+          "python* -c *": "allow",
+          "python* *studio.py* board-finish *": "allow",
+          "git push*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git clean*": "deny",
+          "git commit*": "deny",
+          "rm *": "deny",
+          "rmdir *": "deny",
+          "del *": "deny",
+          "Remove-Item *": "deny"
+        }
+      },
+      "tools": {
+        "read": true,
+        "write": true,
+        "edit": false,
+        "bash": true,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "studio-fixer": {
+      "mode": "primary",
+      "description": "Studio QC fixer; edits failed shots and requeues renders",
+      "prompt": "You are a studio QC fixer. The skill, failed shot ids, and scene file paths are in the user message. Read those files, revise only the failed shots, write the scene files back, run the assembler and requeue helper, then finish.",
+      "permission": {
+        "read": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "patch": "deny",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "external_directory": {
+          "*": "deny",
+          "C:\\Users\\Chad\\PycharmProjects\\anime\\shows\\*": "allow"
+        },
+        "webfetch": "deny",
+        "websearch": "deny",
+        "task": "deny",
+        "question": "deny",
+        "todowrite": "deny",
+        "skill": "deny",
+        "bash": {
+          "*": "deny",
+          "python* *assemble_script.py*": "allow",
+          "python* *requeue_qc_fixes.py*": "allow",
+          "python* -c *": "allow",
+          "python* *studio.py* board-finish *": "allow",
+          "git push*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git clean*": "deny",
+          "git commit*": "deny",
+          "rm *": "deny",
+          "rmdir *": "deny",
+          "del *": "deny",
+          "Remove-Item *": "deny"
+        }
+      },
+      "tools": {
+        "read": true,
+        "write": true,
+        "edit": true,
+        "bash": true,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "todowrite": false,
+        "skill": false
+      }
+    }
+  }
+}

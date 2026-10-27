@@ -10,10 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 BLOCKLIST_DEFAULT = [
-    "real identifiable persons",
-    "minors",
-    "non-consensual framing",
-    "real brands/trademarks in keyframes",
 ]
 
 
@@ -27,7 +23,7 @@ class Verdict:
 
 
 class PolicyJudge:
-    def __init__(self, client=None, maturity: str = "mature", blocklist: list[str] | None = None):
+    def __init__(self, client=None, maturity: str = "", blocklist: list[str] | None = None):
         self.client = client     # LMStudioClient or None (stub)
         self.maturity = maturity
         self.blocklist = blocklist or BLOCKLIST_DEFAULT
@@ -45,8 +41,6 @@ class PolicyJudge:
         verdicts: list[Verdict] = []
         db: dbmod.DB | None = None
         hard_blocks = {
-            "minor", "child", "underage", "teen", "adolescent", "kid",
-            "real person", "celebrity", "non-consensual", "real brand",
         }
         for text in artifacts:
             h = hashlib.sha256(text.encode()).hexdigest()

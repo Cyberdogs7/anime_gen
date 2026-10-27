@@ -5,9 +5,12 @@ __pycache__/
 venv/
 .env
 studio.db
+studio.db-shm
+studio.db-wal
 cache/
 portable/
 shows/*/runs/
+board/runs/
 shows/*/assets/
 shows/*/archive/
 shows/*/characters/*/refs/*.png
@@ -26,6 +29,7 @@ config/remotes.yaml
 .trash/
 *.egg-info/
 runs/
+board/runs/
 /evals/
 .gpu-manager.lock
 *.log

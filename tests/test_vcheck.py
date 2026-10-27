@@ -32,6 +32,12 @@ class _FakeLLM:
         self.calls.append(messages)
         return json.dumps(self._payload)
 
+    def chat_json(self, messages, **kwargs):
+        if self._raise:
+            raise self._raise
+        self.calls.append(messages)
+        return self._payload
+
 
 def _show(tmp_path) -> Show:
     show = Show("demo", root=tmp_path)
@@ -172,10 +178,16 @@ def test_run_shot_vcheck_native_video_sends_clip(monkeypatch, tmp_path):
     _script(show)
     clip = _clip(show, "s01_sh01")
     captures = {}
+
     class _CaptureLLM(_FakeLLM):
         def chat(self, messages, **kwargs):
             captures["content"] = messages[0]["content"]
             return super().chat(messages, **kwargs)
+
+        def chat_json(self, messages, **kwargs):
+            captures["content"] = messages[0]["content"]
+            return super().chat_json(messages, **kwargs)
+
     llm = _CaptureLLM(_good_verdict())
     rep = run_shot_vcheck(show, 1, clip, {"id": "s01_sh01", "action": "x"},
                           cfg=_cfg("vllm"), llm=llm)

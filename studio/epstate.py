@@ -7,10 +7,10 @@ every module writes them the same way instead of copy-pasting
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from . import fsutil
 from .show import Show
 
 
@@ -19,18 +19,12 @@ def episode_dir(show: Show, episode: int) -> Path:
 
 
 def read_json(path: Path, default: Any = None) -> Any:
-    if not path.exists():
-        return {} if default is None else default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {} if default is None else default
+    return fsutil.read_json(path, default)
 
 
 def write_json(path: Path, data: Any) -> None:
     """The canonical persisted-state serializer for episode files."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    fsutil.write_json(path, data)
 
 
 # ---- path conventions ----

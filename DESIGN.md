@@ -7,6 +7,55 @@
 
 ---
 
+## 0. Agent-first board (current system)
+
+The pipeline is driven by a **board of cards** worked by scoped agents, not by
+stage consumers. Implementation: `studio/board/`.
+
+- **Card** = one unit of work (`<show>.ep12.outline`,
+  `<show>.ep12.shot.s01.render`, `<show>.ep12.qc`), with a role, an optional
+  reviewer, a lane, artifacts and attempts. Ids are show-scoped.
+- **Storage** = one board DB per show at `shows/<show_id>/board/board.db`
+  (`BoardSet` fans out across shows). A show folder carries its own cards,
+  history and runs; the legacy central board tables are migrated on open.
+- **Discovery** = when the board server runs, every `shows/<id>/` folder with a
+  bible or bootstrap state is adopted once: completed stages become `accepted`
+  cards, partial artifacts `blocked`, missing steps `planned`. Adoption is
+  file-only (no LLM) and marked in the board DB, so deleting a card later does
+  not resurrect it.
+- **State** = `inbox → planned → in_work → agent_verified → reviewing →
+  accepted`, plus `retake`, `blocked`, `deferred`. Only the daemon moves a card;
+  an agent finishes with a verdict and cannot accept its own work.
+- **Lane** = the resource a card consumes: `llm` (showrunner + reviewers),
+  `image` (Krea), `video` (H3), `audio` (TTS), `io` (assembly), `vision`
+  (Qwen3-VL). GPU lanes are mutually exclusive: one GPU service at a time.
+- **Two kinds of worker.** `producer`/`reviewer` roles spawn
+  `opencode run --agent studio` in `board/`; the agent's only allowed command is
+  the `studio.py board-tool` / `board-finish` bridge. `exec` roles run one
+  deterministic Python tool (ComfyUI render, VLM QC, ffmpeg assembly) with no
+  LLM, so a card never holds two GPU services.
+- **Roles and models** live in `config/agents.yaml`. Every role sets its own
+  `model` (falling back to `llm.roles.<role>` then `llm.model`), lane and tool
+  allowlist. LM Studio per-model load settings are the source of truth;
+  `preload_model()` only calls `lms load <model>` and keeps one LLM resident.
+- **Split render cards.** `render` is a milestone that expands into one
+  deterministic ComfyUI card per shot; `qc` is a separate VLM card. A failed
+  QC blocks the episode for a fix card/human rather than silently re-rendering.
+- **Proof** = artifacts attached by the producer (plan/script/clip/QC report).
+  The reviewer phase reads them and passes or sends the card back.
+- **Gate 0** is one `g0.<show>.bootstrap` card with `reviewer: human`; the
+  board's approve/reject buttons run the same `approval.approve_step` /
+  `reject_step` actions the old dashboard called.
+
+Run it with `python studio.py board` (API + daemon on `:8130`, board UI at
+`/`), or queue an episode with `python studio.py request-run --show <id>`.
+The worker root is `board/` with its own `opencode.json`; the repo root has no
+`.opencode`, so normal opencode sessions are unaffected.
+The stage spec in §9 remains the reference for the executors each tool calls
+(`planner`, `storyboard`, `render`, `qc`, `vcheck`, `ffmpeg`).
+
+---
+
 ## 1. Executive summary
 
 The system is a pipeline of autonomous "studio departments" that mirrors a real anime production:
@@ -21,7 +70,7 @@ The system is a pipeline of autonomous "studio departments" that mirrors a real 
 | Sound designer | H3 joint audio + TTS dialogue mux |
 | Editor / conform | **ffmpeg** assembler |
 | QC | Automated QC + retake loop (H3 Retake Stitch) |
-| Studio manager | **Run controller + event bus** + registry |
+| Studio manager | **Board daemon + lanes** (cards, roles, model per role) |
 | Studio records | **SQLite** (continuity DB, asset registry, run reports) |
 
 All generative models run **locally**. No hosted API is in the generative path, which is what makes the content-policy requirement viable: prompts the user flags as "mature" never leave the machine.
@@ -308,6 +357,7 @@ shows/<show_id>/
 ├── voices/<id>.yaml …
 ├── scenes/<location>.yaml …
 ├── continuity/state.json         # per-show; episode counter lives here
+├── board/board.db                # board cards, history and runs for this show
 ├── runs/EP##/…                   # plans, scripts, reviews, reports (per-show numbering)
 ├── assets/EP##/…                 # keyframes, shots, dialogue
 └── archive/EP##/                 # delivered episodes + feed.json
@@ -326,9 +376,11 @@ series:
   resolution: [1344, 768]            # 16:9 native (768 short edge)
   fps: 24
   language: "en"                     # English only (dialogue, narration, subs config) — §12
-  style_guide: "line-art over painted bg; ..."   # THE style lever — injected into every image prompt.
-                                              # Krea 2 renders cel / 3D / 2.5D / 80s / 90s anime looks;
-                                              # this string (AI-proposed at Gate 0, user-approved) picks the show's look.
+  style_guide: "modern anime, crisp cel-shaded linework"   # rendering/linework ONLY — used verbatim in generation prompts.
+  art_direction:                     # bible reference only; NEVER pasted into a prompt.
+    camera: "intimate handheld, shallow focus, slight tilt"
+    lighting: "high-contrast neon rim light, soft bloom"
+    palette: "saturated magenta-cyan neon-noir"
   quality_baseline: "ranma-1-2"      # benchmark reference: 1990s martial-arts romcom anime — the show's
                                               # production-quality and tonal bar (used in reviewer rubrics, §9 Stage 2a)
 world:
@@ -892,9 +944,6 @@ Adapter contract: `synthesize(text, voice_cfg) -> wav + duration_s`. Output is c
   ```yaml
   maturity: mature            # clean | mature
   always_block:
-    - "real identifiable persons"
-    - "minors"
-    - "non-consensual framing"
     - "real brands/trademarks in keyframes"
   judge_model: local_judge
   scan_points: [script, keyframe_prompts, h3_prompts, dialogue]
@@ -932,7 +981,7 @@ Because H3's identity fidelity tracks the quality of the refs it's given, the pi
   - Character face large, **near-front-facing**, sharp, evenly lit; no occlusion (hair strand over eye, shadows across face).
   - Neutral or mild expression; no heavy distortion from pose.
   - Matches `appearance_canonical` (verified by the `describer` vision model against the description).
-  - **Style-consistent with the show** — refs are generated with the same Krea 2 style_guide the keyframes use, so H3 sees the character *in the show's look*, not a divergent sheet.
+  - **Style-consistent with the show** — refs are generated with the bible's `style_guide` (rendering/linework only; `art_direction` is never pasted into a prompt), so H3 sees the character *in the show's look*, not a divergent sheet.
   - Resolution ≥ keyframe resolution (1344×768 or better); aspect 16:9 (or a square face-crop variant).
   - **Internal consistency:** all refs for one character agree with each other (judge compares pairwise); a bad ref is rejected, not promoted.
 - **Self-reinforcing ref bank (in-show stills).** The seed refs come from Krea 2. As the show renders, **QC-verified frames of a character on screen become additional refs** (promoted to `ref_images`): a sharp frame from a rendered shot is *already in the show's lighting/style/outfit*, which is exactly what H3 conditions best on. Promotion rules:

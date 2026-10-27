@@ -68,12 +68,7 @@ def _prompt_blocks_for_scene_llm(
             if c.get("name"):
                 characters.append(c)
     show_bible = show.read_bible() if show and hasattr(show, "read_bible") else None
-    if show_bible and isinstance(show_bible, dict) and "series" not in show_bible:
-        # read_bible() may return raw yaml dict with 'series'
-        show_bible = show_bible
-    style_guide = ""
-    if show_bible and isinstance(show_bible, dict):
-        style_guide = show_bible.get("style_guide") or show_bible.get("series", {}).get("style_guide", "")
+    style_guide = show.render_style() if show else ""
     # LLM client (LM Studio, local, OpenAI-compatible)
     base_url = cfg.get("llm", "base_url") or "http://127.0.0.1:1234/v1"
     llm = LMStudioClient(base_url, timeout=600)

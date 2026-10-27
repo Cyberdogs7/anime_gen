@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -21,20 +22,46 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VoiceConfig:
-    """Mirror of shows/<id>/voices/<id>.yaml (§8.3)."""
+    """Mirror of shows/<id>/voices/<id>.yaml (§8.3).
+
+    ``mode``:
+      designed -> VoiceDesign from ``voice_description`` (creates a voice ONCE)
+      clone    -> Base model, cloning the approved ``clone_ref`` sample; this is
+                  the per-line mode (a fixed identity, no re-design)
+      preset   -> CustomVoice named speaker (legacy/fallback)
+    """
 
     id: str
     engine: str = "qwen3_tts"
-    mode: str = "designed"          # preset | designed
-    speaker: str | None = None      # preset: one of the Qwen3-TTS speaker pool
-    voice_description: str = ""     # designed: free-text voice spec
+    mode: str = "designed"
+    speaker: str | None = None
+    voice_description: str = ""
+    clone_ref: str = ""             # approved reference WAV
+    clone_text: str = ""            # exact transcript of that WAV (ICL)
+    clone_cache: str = ""           # persisted clone prompt (.pt)
     speed: float = 1.0
     pitch: float = 0.0
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "VoiceConfig":
+        """Load a voice YAML; relative clone paths resolve against the SHOW dir."""
+        import yaml
+
+        p = Path(path).resolve()
+        d = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        show_dir = p.parent.parent
+        for key in ("clone_ref", "clone_cache"):
+            val = d.get(key) or ""
+            if val and not Path(val).is_absolute():
+                d[key] = str(show_dir / val)
+        fields = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in d.items() if k in fields})
 
     @property
     def fingerprint(self) -> str:
         return hashlib.sha256(
-            f"{self.speaker}|{self.voice_description}".encode()
+            f"{self.mode}|{self.speaker}|{self.voice_description}|{self.clone_ref}"
+            f"|{self.clone_text}".encode()
         ).hexdigest()
 
 
@@ -58,28 +85,107 @@ class Qwen3TTSAdapter:
         self.runner = runner
         self.python = python
         self.config = config
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
 
     def health(self) -> bool:
         cfg = self.config or get_config()
         return bool(cfg.get("env", "tts", {}).get("venv", ""))
+
+    def _worker(self, python: str, runner: Path, env_tts: dict) -> subprocess.Popen:
+        """The RESIDENT Base-model worker (loads once, serves many lines)."""
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+        base = (env_tts.get("models", {}) or {}).get("base", "")
+        if not base:
+            raise RuntimeError("no TTS base model configured (env.yaml tts.models.base)")
+        design = (env_tts.get("models", {}) or {}).get("voice_design", "")
+        cmd = [python, str(runner), "--serve", "--base-model", base]
+        if design:
+            cmd += ["--design-model", design]
+        idle = env_tts.get("idle_timeout_s", 300)
+        try:
+            cmd += ["--idle-timeout", str(int(idle))]
+        except (TypeError, ValueError):
+            cmd += ["--idle-timeout", "300"]
+        if env_tts.get("sox"):
+            cmd += ["--sox-dir", env_tts["sox"]]
+        self._proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1)
+        return self._proc
+
+    def _request(self, req: dict, python: str, runner: Path, env_tts: dict) -> float:
+        with self._lock:
+            proc = self._worker(python, runner, env_tts)
+            proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+            # Startup warnings may be printed to stdout; skip anything that is not
+            # a protocol reply.
+            resp = None
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    raise RuntimeError("TTS worker exited")
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(obj, dict) and "ok" in obj:
+                    resp = obj
+                    break
+        if resp is None:
+            raise RuntimeError("TTS worker gave no reply")
+        if not resp.get("ok"):
+            raise RuntimeError(resp.get("error") or "tts failed")
+        return float(resp.get("duration") or 0.0)
+
+    def _clone(self, text: str, voice: VoiceConfig, out_path: Path,
+               python: str, runner: Path, env_tts: dict) -> float:
+        req = {"op": "clone", "text": text, "language": "English",
+               "out": str(out_path), "ref_audio": voice.clone_ref,
+               "ref_text": voice.clone_text, "cache": voice.clone_cache or "",
+               "model": (env_tts.get("models", {}) or {}).get("base", "")}
+        return self._request(req, python, runner, env_tts)
+
+    def _design(self, text: str, voice: VoiceConfig, out_path: Path,
+                python: str, runner: Path, env_tts: dict) -> float:
+        req = {"op": "design", "text": text, "language": "English",
+               "instruct": voice.voice_description or "", "out": str(out_path)}
+        return self._request(req, python, runner, env_tts)
 
     def synthesize(self, text: str, voice: VoiceConfig, out_path: Path) -> float:
         cfg = self.config or get_config()
         env_tts = cfg.get("env", "tts", {}) or {}
         python = self.python or env_tts.get("venv", "") or ""
         runner = Path(__file__).resolve().parent.parent / self.runner
-        model = (env_tts.get("models", {}) or {}).get(
-            "voice_design" if voice.mode == "designed" else "custom_voice", "")
-        sox = env_tts.get("sox", "")
         if not python:
             # No TTS venv configured (tests / isolated config): stay silent.
             logger.info("no tts venv configured; writing silent sample for %s", voice.id)
             return NullTTS().synthesize(text, voice, out_path)
-        cmd = [python, str(runner), "--text", text, "--out", str(out_path)]
+
+        # Per-line path: clone the approved identity on the resident Base model.
+        if voice.mode == "clone" and voice.clone_ref:
+            try:
+                return self._clone(text, voice, out_path, python, runner, env_tts)
+            except Exception as exc:
+                logger.warning("voice clone failed (%s); writing silent sample", exc)
+                return NullTTS().synthesize(text, voice, out_path)
+
+        # Voice creation: one resident VoiceDesign session designs the whole cast
+        # (the model is loaded once and reused across characters).
         if voice.mode == "designed":
-            cmd += ["--voice-description", voice.voice_description or ""]
-        else:
-            cmd += ["--speaker", voice.speaker or ""]
+            try:
+                return self._design(text, voice, out_path, python, runner, env_tts)
+            except Exception as exc:
+                logger.warning("voice design failed (%s); writing silent sample", exc)
+                return NullTTS().synthesize(text, voice, out_path)
+
+        # Legacy preset (one-shot CustomVoice).
+        model = (env_tts.get("models", {}) or {}).get("custom_voice", "")
+        sox = env_tts.get("sox", "")
+        cmd = [python, str(runner), "--text", text, "--out", str(out_path),
+               "--speaker", voice.speaker or ""]
         if model:
             cmd += ["--model", model]
         if sox:

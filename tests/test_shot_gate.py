@@ -27,6 +27,11 @@ class _FakeLLM:
             raise self._raise
         return self._text
 
+    def chat_json(self, messages, **kwargs):
+        if self._raise:
+            raise self._raise
+        return json.loads(self._text)
+
 
 def _show(tmp_path) -> Show:
     show = Show("demo", root=tmp_path)
@@ -56,7 +61,7 @@ def test_approve_shot_records_state(tmp_path):
     approve_shot(show, 1, "s01_sh01", notes="looks good")
     assert shot_state(show, 1, "s01_sh01")["status"] == "approved"
     assert shot_state(show, 1, "s01_sh01")["notes"] == "looks good"
-    assert shot_approval_path("demo", 1).exists()
+    assert shot_approval_path(show, 1).exists()
     # untouched shots stay pending
     assert shot_state(show, 1, "s99_sh99")["status"] == "pending"
 

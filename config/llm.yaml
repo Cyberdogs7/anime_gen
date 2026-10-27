@@ -14,7 +14,13 @@ gpu_guard_urls:
   - "http://127.0.0.1:8188"
   - "http://127.0.0.1:8189"
 model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-context: 131072
+# The 27B is 14.4 GB on a 16 GB card. LM Studio's per-model default (82k across
+# 4 slots) left ~0.5 GB free and generation fell to ~4 tokens/sec. One slot at a
+# working context is what actually makes outline steps finish in minutes.
+context: 32768
+parallel: 1
+# Safety net for a non-streaming call that never returns; not a speed target.
+request_timeout_s: 3600
 
 # Output-token cap. max_output_tokens / max_tokens are OPTIONAL on both APIs, and
 # every model/server already caps its own output; unused budget is free (billing is
@@ -25,87 +31,26 @@ context: 131072
 max_output_tokens: 0
 
 # Role -> model assignment. Model names must be loaded in LM Studio's catalog.
-# Text-only roles use dolphin; vision roles (describer) use Qwen3-VL.
 roles:
   showrunner: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
   bible: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
   script: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
   judge: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  slop_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  continuity_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  fan_service_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  growth_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  structure_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  voice_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  exposition_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  pacing_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  stakes_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  visual_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  agency_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  serial_reviewer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+  # Reviewers judge a fixed artifact against a rubric and return one verdict, so
+  # an 8B model is enough - and nine of them finish in minutes instead of hours.
+  slop_reviewer: "dolphin3.0-llama3.1-8b"
+  continuity_reviewer: "dolphin3.0-llama3.1-8b"
+  fan_service_reviewer: "dolphin3.0-llama3.1-8b"
+  growth_reviewer: "dolphin3.0-llama3.1-8b"
+  structure_reviewer: "dolphin3.0-llama3.1-8b"
+  voice_reviewer: "dolphin3.0-llama3.1-8b"
+  exposition_reviewer: "dolphin3.0-llama3.1-8b"
+  pacing_reviewer: "dolphin3.0-llama3.1-8b"
+  stakes_reviewer: "dolphin3.0-llama3.1-8b"
+  visual_reviewer: "dolphin3.0-llama3.1-8b"
+  agency_reviewer: "dolphin3.0-llama3.1-8b"
+  serial_reviewer: "dolphin3.0-llama3.1-8b"
   describer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"   # also handles vision (frame/image analysis)
 
 gpu_offload: true          # if false, LLM runs on CPU during render phases
 evict_before_render: true  # unload LLM before Krea 2 / H3 renders (per-node GPU manager)
-
-# OpenCode GO remote models (https://opencode.ai/docs/go — $10/mo, key at
-# https://opencode.ai/auth). Text prompts go remote-first and fall back to
-# local LM Studio on transport errors AND on content-policy refusals — local
-# dolphin stays for the highly explicit scenes remote models won't write.
-# The key is read from the opencode auth.json (account "opencode-go"); the
-# environment variable is NOT consulted. Without a key the studio is exactly
-# today's local-only setup.
-#
-# GO vs Zen are separate namespaces: GO is .../zen/go/v1 (subscription limits
-# below); Zen is .../zen/v1 (pure pay-as-you-go). This section defaults to GO.
-# Non-GO users: point base_url at https://opencode.ai/zen/v1 and pick a Zen
-# model (e.g. kimi-k2.5, deepseek-v4-flash, glm-5.3-flash, minimax-m3).
-zen:
-  enabled: true
-  base_url: "https://opencode.ai/zen/go/v1"
-  # Key is ALWAYS read from the opencode auth.json (account "opencode-go" by
-  # default) — the environment is never consulted. auth_file empty = the
-  # standard ~/.local/share/opencode/auth.json; $OPENCODE_AUTH_FILE overrides
-  # the path.
-  auth_file: ""
-  auth_account: "opencode-go"
-  # Default remote model for every text role. Muse Spark 1.3 Contributor lives
-  # on GO's /responses endpoint ($0.10/$0.20 per 1M, $60/mo cap) and takes
-  # image + video inputs natively. Chat-style alternatives (auto-selected per
-  # model): kimi-k2.6, kimi-k3, deepseek-v4-pro ($15/mo caps — a few episodes
-  # per month at pipeline token volumes), mimo-v2.6-flash / deepseek-v4-flash
-  # (cheapest workhorses). NOTE: claude-*/qwen* /messages-only models are not
-  # spoken by this client (calls fall back local with a warning).
-  # Full GO list: https://opencode.ai/docs/go/#endpoints
-  model: "muse-spark-1.3-contributor"
-  # Endpoint routing per model (fnmatch): /responses vs /chat/completions.
-  responses_models: ["muse-spark-*", "gpt-*", "grok-*"]
-  # Optional per-role override: {"<local model name>": "<zen model>"}.
-  # Callers keep passing local role model names; these map to remote ones.
-  model_map: {}
-  # REMOTE MODEL SELECTION per llm role name. Example: give the heavy creative
-  # writing to kimi-k3 while cheap flash models do review duty:
-  #   roles:
-  #     showrunner: "kimi-k3"
-  #     script: "kimi-k3"
-  #     slop_reviewer: "mimo-v2.6-flash"
-  #     continuity_reviewer: "deepseek-v4-flash"
-  # Calls carrying role= use it directly; other calls reverse-match their
-  # local model name to a uniquely configured role. Empty = model/model_map.
-  roles: {}
-  # Models offered for a manual ONE-OFF script rewrite (dashboard dropdown / CLI
-  # --model). Any id is accepted; these are just the offered ones. Higher-tier GO
-  # models cost more per call — a rewrite is ONE call on the chosen model, then a
-  # normal re-review with the cheap role models.
-  pickable_models: ["kimi-k3", "kimi-k2.6", "deepseek-v4-pro", "minimax-m3",
-                    "deepseek-v4-flash", "mimo-v2.6-flash"]
-  # Remote vision. Responses-style models (Spark) take image + video natively;
-  # chat-style vision models (e.g. deepseek-v4-flash-vision-exp) get video
-  # resampled to still frames first. Undecodable clips or disabled vision
-  # fall back local.
-  vision:
-    enabled: true
-    model: "muse-spark-1.3-contributor"
-    frames_per_video: 6     # chat-style vision models only
-    frame_dim: 512          # chat-style vision models only
-  timeout: 180              # seconds per remote attempt

@@ -23,68 +23,49 @@ def _assert_clean(p: str) -> None:
         assert w not in low, f"banned token {w!r} in prompt: {p[:120]}"
 
 
+def test_ref_style_clause_appends_style_guide_verbatim():
+    # style_guide is already the structured rendering/linework field; refs use
+    # it exactly as stored, with no parsing.
+    style = "Modern anime rendering with crisp cel-shaded linework"
+    assert prompts.ref_style_clause(style) == style + "."
+    p = prompts.character_ref_prompt("Riku", "16-year-old lean pilot",
+                                     style_guide=style, gender="male")
+    assert p.endswith(style + ".")
+    assert prompts.ref_style_clause("") == ""
+
+
 def test_character_ref_prompt_is_positive_only():
     p = prompts.character_ref_prompt(
         "Sable Voss",
-        "23-year-old woman, 175cm sprinter-duelist build, black barbell in her left ear.")
+        "23-year-old tall sprinter-duelist build, black barbell in her left ear",
+        gender="female")
     _assert_clean(p)
     assert p.startswith("Solo full-body portrait of one woman, Sable Voss,")
-    assert "23-year-old woman" in p  # canon kept verbatim
+    assert "23-year-old tall sprinter-duelist build" in p
 
 
 def test_character_ref_prompt_gender_forms():
-    assert "one woman" in prompts.character_ref_prompt("A", "tall athletic woman")
-    assert "one man" in prompts.character_ref_prompt("B", "lean 5-foot-10 man")
-    # pronouns in the canon must not decide gender; no noun -> person
-    assert "one person" in prompts.character_ref_prompt("C", "grease in her knuckles")
-    assert "one person" in prompts.character_ref_prompt("D", "")
+    assert "one woman" in prompts.character_ref_prompt("A", gender="female")
+    assert "one man" in prompts.character_ref_prompt("B", gender="male")
+    # No structured gender -> neutral wording, never inferred from prose.
+    assert "one person" in prompts.character_ref_prompt("C", gender="")
+    assert "one person" in prompts.character_ref_prompt("D", gender="none")
 
 
 def test_costume_ref_prompt_is_positive_only():
     p = prompts.costume_ref_prompt("Mira Kaine", "battle armor",
-                                   "27-year-old tall athletic woman, warm tan skin.")
+                                   "27-year-old tall athletic woman, warm tan skin",
+                                   gender="female")
     _assert_clean(p)
     assert "battle armor" in p
     assert "one woman" in p
 
 
-def test_clean_canon_rewrites_hedged_wardrobe():
-    # "usually wears X" / "signature look is Y" describe several outfits ->
-    # several figures. They must collapse to ONE present-tense outfit.
-    c1 = prompts._clean_canon_for_image(
-        "21-year-old lean man, usually in an unzipped oversized navy plug suit.")
-    assert "usually" not in c1.lower()
-    assert "wearing an unzipped oversized navy plug suit" in c1
-
-    c2 = prompts._clean_canon_for_image(
-        "23-year-old woman, signature look is a cut-down crimson plug suit.")
-    assert "signature" not in c2.lower()
-    assert "wearing a cut-down crimson plug suit" in c2
-
-
-def test_clean_canon_drops_alternate_outfit_clause():
-    canon = ("She normally wears the standard-issue Vixen Flight suit: sleek "
-             "black leather. When not in uniform, she opts for casual attire, "
-             "flaunting low-cut tops, paired with denim jeans or shorts.")
-    out = prompts._clean_canon_for_image(canon)
-    low = out.lower()
-    assert "wearing the standard-issue vixen flight suit" in low
-    # the second, alternate outfit is gone
-    assert "when not in uniform" not in low
-    assert "casual attire" not in low
-    assert "denim" not in low
-    # no leftover subject pronoun before the rewritten verb
-    assert "she wearing" not in low
-
-
-def test_ref_prompt_has_no_wardrobe_words():
-    canon = ("A woman, usually in a black plug suit. When not in uniform, she "
-             "opts for casual attire, low-cut tops and denim.")
-    p = prompts.character_ref_prompt("Sable", canon)
-    low = p.lower()
-    for w in ("usually", "signature look", "when not in uniform", "casual attire"):
-        assert w not in low, f"{w!r} survived into the image prompt: {p}"
-    assert "wearing a black plug suit" in low
+def test_ref_prompt_uses_structured_body_and_wardrobe():
+    p = prompts.character_ref_prompt("Sable", "black bob, amber eyes",
+                                     "black plug suit", gender="female")
+    assert "black bob, amber eyes" in p
+    assert "wearing black plug suit" in p
 
 
 class _FakeLLM:
@@ -97,6 +78,12 @@ class _FakeLLM:
         if self.explode:
             raise RuntimeError("VLM down")
         return '{"figures": %d, "detail": "test"}' % self.figures
+
+    def chat_json(self, messages, **kwargs):
+        assert kwargs.get("role") == "describer"
+        if self.explode:
+            raise RuntimeError("VLM down")
+        return {"figures": self.figures, "detail": "test"}
 
 
 def _img(tmp_path: Path) -> Path:

@@ -91,7 +91,7 @@ def generate_season_plan(show: Show, season: int = 1, num_episodes: int = 0,
         dir_notes = []
 
     system = prompts.showrunner_system(
-        profile, bible.get("content_policy", "mature"),
+        profile, bible.get("content_policy") or "",
         profile.get("baseline", ""))
 
     if feedback.strip() and show.read_season(season).get("episodes"):

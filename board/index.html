@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STUDIO — agent production</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171a21'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='%23ff7ab6' font-family='sans-serif' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/board.css?v=37">
+  <script defer src="/board.js?v=37"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <a class="brand" href="#/board"><span class="mark">S</span><span>STUDIO<small>agent production</small></span></a>
+    <div class="rail-label">WORK</div>
+    <nav id="nav">
+      <button data-route="#/board"><span>01</span>Board</button>
+      <button data-route="#/shows"><span>02</span>Shows</button>
+      <button data-route="#/roles"><span>03</span>Roles &amp; models</button>
+      <button data-route="#/runs"><span>04</span>Runs</button>
+      <button data-route="#/done"><span>05</span>Done</button>
+    </nav>
+    <div class="rail-note">
+      <span id="daemon-dot" class="dot"></span><span id="daemon-state">daemon</span>
+      <p>inbox → planned → in_work → verified → review → accepted</p>
+    </div>
+    <div class="rail-links">
+      <button id="theme" class="link" type="button">Theme: dark</button>
+      <button id="toggle-daemon" class="link" type="button">Stop daemon</button>
+    </div>
+  </aside>
+  <main>
+    <header class="topline"><span id="crumb">STUDIO / BOARD</span><span id="live" class="pill">local</span></header>
+    <div id="page"></div>
+    <footer>Board writes go through the daemon. Human cards accept only here.</footer>
+  </main>
+</div>
+<div id="modal" class="overlay hidden"><div class="modal" id="modal-body"></div></div>
+<div id="toast" class="toast hidden"></div>
+</body>
+</html>

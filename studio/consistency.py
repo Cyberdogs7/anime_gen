@@ -25,7 +25,7 @@ from .storyboard import (_char_appearances, _keyframe_prompt, _latest_script,
                          _shot_characters, _shot_object_refs, _shot_ref_weights,
                          _shot_refs, _show_style)
 REVIEW_PROMPT = (
-    "You are a STRICT character-consistency reviewer for an anime production.\n"
+    "You are a STRICT character-consistency reviewer for a show production.\n"
     "You receive a storyboard keyframe and a set of EXPECTED characters, each with an "
     "APPROVED reference image (labeled by character name).\n\n"
     "Examine the keyframe and:\n"
@@ -84,16 +84,8 @@ def _data_uri(path: Path) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode()
 
 
-def _extract_json(text: str) -> dict[str, Any] | None:
-    try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        return json.loads(s) if s else None
-    except Exception:
-        return None
-
-
 SINGLE_FIGURE_PROMPT = (
-    "You are checking an anime character portrait for a production pipeline.\n"
+    "You are checking a show character portrait for a production pipeline.\n"
     "Look at the image and count DISTINCT human figures — every separate head, "
     "body or torso counts, including partial figures and reflections that read "
     "as a second person. A turnaround (a front view plus a back view of the "
@@ -119,9 +111,8 @@ def ref_figure_count(llm, model: str, image_path: Path | str) -> dict[str, Any]:
             {"type": "text", "text": SINGLE_FIGURE_PROMPT},
             {"type": "image_url", "image_url": {"url": _data_uri(_downscale(path))}},
         ]
-        text = llm.chat([{"role": "user", "content": content}], model=model,
-                         temperature=0.0, max_tokens=200, role="describer")
-        data = _extract_json(text or "") or {}
+        data = llm.chat_json([{"role": "user", "content": content}], model=model,
+                             temperature=0.0, max_tokens=200, role="describer")
         n = int(data.get("figures", 1))
         return {"verdict": "single" if n <= 1 else "multi",
                 "figures": n, "detail": str(data.get("detail", ""))}
@@ -199,10 +190,8 @@ def review_shot(llm, model: str, names: list[str], ref_paths: list[Path],
                         "text": f"Ref {i + 1}: {names[i]}" if i < len(names) else ""})
         content.append({"type": "image_url", "image_url": {"url": _data_uri(_downscale(ref))}})
     content.append({"type": "image_url", "image_url": {"url": _data_uri(kf)}})
-    text = llm.chat([{"role": "user", "content": content}], model=model,
-                    temperature=0.2, max_tokens=3000, role="describer")
-    return _extract_json(text) or {"pass": True, "issue": "unparseable",
-                                   "prompt_fix": ""}
+    return llm.chat_json([{"role": "user", "content": content}], model=model,
+                         temperature=0.2, max_tokens=3000, role="describer")
 
 
 def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) -> str:
@@ -210,7 +199,7 @@ def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) 
     the whole keyframe prompt. Appending fixes doesn't work; a coherent rewrite does.
     """
     revision = (
-        "You are an anime storyboard prompt engineer. Rewrite the keyframe prompt below "
+        "You are a show storyboard prompt engineer. Rewrite the keyframe prompt below "
         "to fully incorporate the reviewer's corrections.\n"
         "KEEP the scene's action, camera, setting and mood intact. CHANGE the character "
         "design details the reviewer flagged so they match the approved character "
@@ -222,11 +211,10 @@ def revise_keyframe_prompt(llm, model: str, prompt: str, issues: str, fix: str) 
         f"CURRENT PROMPT:\n{prompt}\n\n"
         f"REVIEWER CORRECTIONS:\n{issues}\n{fix}"
     )
-    text = llm.chat([{"role": "user", "content": revision}], model=model,
-                    temperature=0.6, max_tokens=1500, role="describer")
     try:
-        s = text[text.find("{"): text.rfind("}") + 1]
-        out = (json.loads(s).get("prompt") or "").strip()
+        data = llm.chat_json([{"role": "user", "content": revision}], model=model,
+                             temperature=0.6, max_tokens=1500, role="describer")
+        out = (data.get("prompt") or "").strip()
         return out if len(out) > 40 else prompt
     except Exception:
         return prompt

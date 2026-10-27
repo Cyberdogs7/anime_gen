@@ -116,7 +116,8 @@ def test_create_missing_character_refs_fills_sheet_without_ref(tmp_path, monkeyp
 
     monkeypatch.setattr(refs, "_render_costume_via_krea2", fake_krea2)
     monkeypatch.setattr(refs, "_render_costume_via_qwen_edit", fake_qwen)
-    # No LLM in tests: identity backfill must not call out.
+    # No LLM in tests: person and identity backfill must not call out.
+    monkeypatch.setattr(refs, "_backfill_is_person", lambda *a, **k: False)
     monkeypatch.setattr(refs, "_backfill_identity", lambda *a, **k: "")
     # No VLM server in tests: the nude-root figure-count gate must not call out.
     monkeypatch.setattr(cons, "ref_figure_count",
@@ -200,6 +201,10 @@ def test_regenerate_character_ref_from_feedback(tmp_path, monkeypatch):
     class FakeLLM:
         def chat(self, messages, **kwargs):
             return '{"wardrobe_canonical": "a revised grey tank and shorts"}'
+
+        def chat_json(self, messages, **kwargs):
+            import json
+            return json.loads(self.chat(messages, **kwargs))
 
     ok = casting.regenerate_character_ref(show, "Test-734", "shorter shorts",
                                           cfg=Config(tmp_path), llm=FakeLLM())

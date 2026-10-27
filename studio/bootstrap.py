@@ -1,9 +1,9 @@
 """Bootstrap chain (Gate 0) - Concept -> Bible -> Characters (proposal/refs/voice) -> Scenes.
 
 Drives the iterative bootstrap (DESIGN.md §9.5a) with the Showrunner LLM.
-State lives in shows/<id>/bootstrap.json; approval events are published on the
-bus for the audit log / future dashboard. Reject-with-notes regenerates only
-the current step (approved steps stay locked).
+State lives in shows/<id>/bootstrap.json; approval events are appended to a
+local audit log. Reject-with-notes regenerates only the current step (approved
+steps stay locked).
 """
 from __future__ import annotations
 
@@ -15,12 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from . import prompts
-from .bus import make_broker
-from .bus.events import (
+from .events import (
     BIBLE_APPROVED, BIBLE_PENDING, BOOTSTRAP_COMPLETE, CHAR_PROPOSAL_APPROVED,
     CHAR_PROPOSAL_PENDING, CHAR_REFS_APPROVED, CHAR_REFS_PENDING, CONCEPT_APPROVED,
     CONCEPT_PENDING, SCENE_REGISTRY_APPROVED, SCENE_REGISTRY_PENDING, VOICE_APPROVED,
-    VOICE_SAMPLE_PENDING, Event, new_event,
+    VOICE_SAMPLE_PENDING, Event, new_event, record,
 )
 from .clients import LMStudioClient, TTSService
 from .clients.tts import VoiceConfig
@@ -32,17 +31,16 @@ log = logging.getLogger(__name__)
 
 STEPS = ("concept", "bible", "characters", "scenes")
 
-# Live progress for the dashboard: show_id -> {"detail": str, "ts": float}.
+# Live progress for the CLI: show_id -> {"detail": str, "ts": float}.
 # Written by BootstrapChain._report while a synchronous approve/reject request
 # is running; cleared by approval.py once the chain finishes.
 ACTIVITY: dict[str, dict[str, Any]] = {}
 
-# Per-show locks: the Gate-0 chain is resumable and self-healing, so
-# approve/reject clicks and background reconcile runs must never interleave.
-# RLock: run_show_locked() may wrap an advance() that itself re-acquires.
+# Per-show locks: approve/reject clicks and agent cards must never interleave
+# for the same show. RLock because advance() may be called from a caller that
+# already holds it.
 _show_locks: dict[str, threading.RLock] = {}
 _show_locks_guard = threading.Lock()
-_reconciling: set[str] = set()
 
 
 def _show_lock(show_id: str) -> threading.RLock:
@@ -54,118 +52,31 @@ def _show_lock(show_id: str) -> threading.RLock:
         return lock
 
 
-def run_show_locked(show_id: str, fn) -> Any:
-    """Run fn under the show's Gate-0 lock (blocks until free)."""
-    with _show_lock(show_id):
-        return fn()
-
-
-def _missing_scene_refs(show: Show) -> bool:
-    """True when any scene in the registry still lacks its location ref image.
-
-    Scene refs are non-gating asset work (they must land for the dashboard to
-    show locations while the registry awaits approval). A stub marker counts as
-    done so a missing krea2 instance can't cause an infinite retry loop.
-    """
-    for sid in show.list_scenes():
-        rd = show.scenes_dir / sid / "refs"
-        if (rd / f"{sid}_ref_01.png").exists():
-            continue
-        if (rd / "refs.json").exists():
-            continue
-        return True
-    return False
-
-
-def needs_reconcile(show_id: str, show: Show | None = None) -> bool:
-    """True when the show is incomplete but NOT waiting on a human gate.
-
-    Self-healing signal: if a previous advance() was interrupted (crash /
-    dashboard restart) it left the chain mid-work with no pending artifact.
-    This detects that stuck state so a caller can resume generation.
-    """
-    show = show or Show(show_id)
-    st = show.bootstrap_state()
-    if st.get("complete"):
-        return False
-    if (st.get("concept") or {}).get("status") == "pending":
-        return False
-    if (st.get("bible") or {}).get("status") == "pending":
-        return False
-    for ch in st.get("characters", []):
-        if ch.get("proposal") == "pending" or ch.get("voice") == "pending":
-            return False
-        # Refs gate independently: a generated ref ("real") awaits human
-        # approval before the chain can advance past it.
-        if ch.get("refs") not in ("approved", "", None):
-            return False
-    if (st.get("scenes") or {}).get("status") == "pending":
-        # The registry itself awaits the human, but its location ref images are
-        # non-gating asset work — if any are missing, resume generation so the
-        # dashboard can show them for review.
-        return _missing_scene_refs(show)
-    return True
-
-
-def reconcile_show(show_id: str, brief: str = "") -> list[str]:
-    """Resume the Gate-0 chain for a show, as far as approvals allow.
-
-    Idempotent: re-runs advance() from disk state. Steps that already produced
-    artifacts are skipped, interrupted work (e.g. a character whose proposal was
-    written but never registered in bootstrap.json) is picked up. Safe to call
-    on every dashboard load / poll; the per-show lock serializes against user
-    approve/reject actions.
-    """
-    log_ = run_show_locked(show_id, lambda: BootstrapChain(Show(show_id)).advance(brief=brief))
-    return log_
-
-
-def reconcile_if_stalled(show_id: str, brief: str = "") -> bool:
-    """Background self-healing: resume a stuck show, once per show.
-
-    Returns True when a reconcile thread was started. No-op when the show is
-    complete, awaiting a human gate, or already being reconciled.
-    """
-    if show_id in _reconciling:
-        return False
-    try:
-        if not needs_reconcile(show_id):
-            return False
-    except Exception:
-        log.exception("reconcile precheck failed for %s", show_id)
-        return False
-    _reconciling.add(show_id)
-
-    def _run() -> None:
-        try:
-            reconcile_show(show_id, brief)
-        except Exception:
-            log.exception("background reconcile failed for %s", show_id)
-        finally:
-            ACTIVITY.pop(show_id, None)
-            _reconciling.discard(show_id)
-
-    threading.Thread(target=_run, name=f"reconcile-{show_id}", daemon=True).start()
-    return True
-
-
-def is_bootstrap_reconciling(show_id: str) -> bool:
-    """True while a background Gate-0 reconcile thread for this show is alive.
-
-    Lets the dashboard treat an ACTIVITY detail as genuinely in-flight instead
-    of a stale string left behind by a finished/crashed job.
-    """
-    return show_id in _reconciling
+def _voice_sample_fallback(char: dict[str, Any], name: str) -> str:
+    role = str(char.get("role") or "").strip()
+    notes = str(char.get("appearance_notes") or "").strip()
+    traits = str(char.get("traits_for_llm") or "").strip()
+    personality = ", ".join(str(x) for x in (char.get("personality") or []))
+    lines = [f"This is {name}."]
+    if role:
+        lines.append(role)
+    if personality:
+        lines.append(f"People who know me would say I am {personality.lower()}.")
+    if notes:
+        lines.append(notes)
+    if traits:
+        lines.append(traits)
+    lines.append("That is who I am. Now tell me what you want.")
+    return " ".join(x for x in lines if x)
 
 
 class BootstrapChain:
     def __init__(self, show: Show, cfg=None, llm: LMStudioClient | None = None,
-                 tts: TTSService | None = None, bus=None):
+                 tts: TTSService | None = None):
         self.cfg = cfg or get_config()
         self.show = show
         self.llm = llm or LMStudioClient(self.cfg.get("llm", "base_url"))
         self.tts = tts or TTSService(self.cfg)
-        self.bus = bus or make_broker(self.cfg["bus"])
         self._auto_override = False
 
     def _report(self, detail: str) -> None:
@@ -192,20 +103,21 @@ class BootstrapChain:
 
     def _emit(self, event: Event) -> None:
         log.info("[bootstrap:%s] %s", self.show.show_id, event.type)
-        self.bus.publish("bus:approval", event)
+        record(event, self.show.dir)
 
     # ---- generation steps ----
 
     def generate_concept(self, brief: str = "", feedback: str = "") -> dict[str, Any]:
         self._report("Writing concept pitch…")
         profile = self.show.style_profile(self.cfg)
-        maturity = profile.get("maturity", "mature")
+        maturity = profile.get("maturity") or ""
         current = self.show.read_concept() if feedback.strip() else None
         _tag, user = prompts.concept_prompt(brief, profile, feedback=feedback,
                                             current_draft=current)
         system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
         concept = self._ask("showrunner", system, user, temperature=0.7)
-        concept["maturity"] = maturity  # enforce the approved level exactly
+        if maturity.strip():
+            concept["maturity"] = maturity  # enforce the approved level exactly
         self.show.write_concept(concept)
         return concept
 
@@ -213,13 +125,21 @@ class BootstrapChain:
         self._report("Writing series bible (showrunner LLM)…")
         concept = self.show.read_concept()
         profile = self.show.style_profile(self.cfg)
-        maturity = concept.get("maturity", profile.get("maturity", "mature"))
+        maturity = str(concept.get("maturity") or profile.get("maturity") or "").strip()
         system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
         current = self.show.read_bible() if feedback.strip() else None
         bible = self._ask("bible", system, prompts.bible_prompt(concept, profile,
                                                                 feedback=feedback,
                                                                 current_draft=current),
                           temperature=0.5, max_tokens=8192)
+        # The approved concept's maturity IS the show's content policy; persisting
+        # it here is what lets every later stage read the show's level instead of
+        # falling back to a code default.
+        if maturity:
+            bible["content_policy"] = maturity
+        # Keep the generation style field and its bible-only reference split even
+        # if the model omitted the empty reference block.
+        bible.setdefault("art_direction", {})
         bible.setdefault("runtime_target_s", profile.get("runtime_target_s", DEFAULT_RUNTIME_TARGET_S))
         self.show.write_bible(bible)
         return bible
@@ -231,7 +151,7 @@ class BootstrapChain:
         current = next((c for c in existing if c.get("name") == name), None) if feedback.strip() else None
         profile = self.show.style_profile(self.cfg)
         system = prompts.showrunner_system(profile,
-                                           bible.get("content_policy", "mature"),
+                                           bible.get("content_policy") or "",
                                            profile.get("baseline", ""))
         proposal = self._ask("showrunner", system,
                              prompts.character_prompt(bible, existing, name,
@@ -241,6 +161,13 @@ class BootstrapChain:
         proposal["name"] = name
         proposal["id"] = _slug(name)
         proposal.setdefault("h3_slot", f"@char{len(existing) + 1}")
+        if len(str(proposal.get("voice_sample_text") or "").split()) < 50:
+            extra = self._ask("showrunner", system,
+                              prompts.voice_sample_prompt(proposal, bible),
+                              temperature=0.8)
+            text = str(extra.get("voice_sample_text") or "").strip()
+            if text:
+                proposal["voice_sample_text"] = text
         self.show.write_character(proposal)
         return proposal
 
@@ -249,7 +176,7 @@ class BootstrapChain:
         import yaml
         bible = self.show.read_bible()
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, bible.get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, bible.get("content_policy") or "",
                                            profile.get("baseline", ""))
         current = None
         if feedback.strip():
@@ -274,7 +201,7 @@ class BootstrapChain:
         self._report(f"Revising {name}'s voice description…")
         current = ((char.get("voice", {}) or {}).get("voice_description", "")) or ""
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_voice_prompt(current, feedback))
@@ -289,7 +216,7 @@ class BootstrapChain:
         self._report(f"Revising {name}'s appearance for image gen…")
         current = (char.get("appearance_canonical") or "").strip()
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_appearance_prompt(current, feedback))
@@ -302,7 +229,7 @@ class BootstrapChain:
         """LLM rewrites ONLY a costume-variant generation prompt from feedback."""
         self._report(f"Revising {name}'s costume from your notes…")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_costume_prompt(current, feedback))
@@ -317,7 +244,7 @@ class BootstrapChain:
         """
         self._report(f"Designing costume '{label}' for {char_name}…")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.costume_description_prompt(label, char_name,
@@ -333,7 +260,7 @@ class BootstrapChain:
         """
         self._report(f"Designing prop '{name}'.")
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.object_description_prompt(name, context))
@@ -346,7 +273,7 @@ class BootstrapChain:
         self._report(f"Revising {name}'s setting prompt…")
         current = (scene.get("setting_prompt") or scene.get("description") or "").strip()
         profile = self.show.style_profile(self.cfg)
-        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy", "mature"),
+        system = prompts.showrunner_system(profile, (self.show.read_bible() or {}).get("content_policy") or "",
                                            profile.get("baseline", ""))
         out = self._ask("showrunner", system,
                         prompts.revise_scene_setting_prompt(current, feedback))
@@ -362,25 +289,51 @@ class BootstrapChain:
         voice = char.get("voice", {})
         name = char.get("name", "") or "character"
         voice_id = f"{char.get('id', 'char')}_voice"
+        # New characters are voice-DESIGNED from their sheet; 'preset' is kept only
+        # for legacy sheets that already chose a named speaker.
+        mode = str(voice.get("mode") or "designed").strip().lower()
+        if mode not in ("preset", "designed"):
+            mode = "designed"
         vd = voice.get("voice_description", "") or ""
+        if mode == "designed" and not vd.strip():
+            traits = ", ".join(char.get("personality") or []) or \
+                str(char.get("traits_for_llm") or "")
+            vd = (f"adult voice matching {name}'s character"
+                  + (f": {traits}" if traits else "") + ".")
         self.show.write_voice({
             "id": voice_id,
             "engine": "qwen3_tts",
-            "mode": voice.get("mode", "designed"),
-            "speaker": voice.get("speaker"),
+            "mode": mode,
+            "speaker": voice.get("speaker") if mode == "preset" else None,
             "voice_description": vd,
             "speed": 1.0,
             "pitch": 0.0,
         })
         vc = VoiceConfig(id=voice_id, engine="qwen3_tts",
-                         mode=voice.get("mode", "designed"),
-                         speaker=voice.get("speaker"),
+                         mode=mode,
+                         speaker=voice.get("speaker") if mode == "preset" else None,
                          voice_description=vd)
         out = self.show.dir / "assets" / "voice" / f"{voice_id}.wav"
+        sample_text = str(char.get("voice_sample_text") or "").strip()
+        if len(sample_text.split()) < 50:
+            sample_text = _voice_sample_fallback(char, name)
         self._report(f"Synthesizing voice sample for {name} (Qwen3-TTS)…")
-        self.tts.synthesize(
-            f"Hey, I'm {name}. Let's get to work.",
-            vc, out)
+        self.tts.synthesize(sample_text, vc, out)
+        # The designed sample becomes the character's reusable voice identity: from
+        # here every line CLONES this file (fixed timbre), never re-designs it.
+        if mode == "designed" and self.tts.health():
+            self.show.write_voice({
+                "id": voice_id,
+                "engine": "qwen3_tts",
+                "mode": "clone",
+                "speaker": None,
+                "voice_description": vd,
+                "clone_ref": f"assets/voice/{voice_id}.wav",
+                "clone_text": sample_text,
+                "clone_cache": f"voices/{voice_id}.pt",
+                "speed": 1.0,
+                "pitch": 0.0,
+            })
 
     # ---- state machine ----
 
@@ -422,6 +375,136 @@ class BootstrapChain:
 
     # Each _step_* returns True (did work), False (blocked on human gate), or None (idle).
     # State is loaded fresh, mutated, and persisted at the end of each step.
+
+    # ---- split Gate-0 passes (one GPU service per board card) ----
+
+    def advance_plan(self, brief: str = "") -> list[str]:
+        """Generate only the text artifacts: concept, bible, proposals, scenes."""
+        with _show_lock(self.show.show_id):
+            return self._advance_plan(brief)
+
+    def _advance_plan(self, brief: str) -> list[str]:
+        st = self.show.bootstrap_state()
+        log_: list[str] = []
+        concept = st.setdefault("concept", {"status": ""})
+        if concept.get("status") != "approved" and not concept.get("status"):
+            self.generate_concept(brief)
+            concept["status"] = "pending"
+            self._emit(new_event(CONCEPT_PENDING, show_id=self.show.show_id))
+            log_.append("concept: generated -> pending")
+            self.show.set_bootstrap_state(st)
+        bible = st.setdefault("bible", {"status": ""})
+        if bible.get("status") != "approved" and not bible.get("status"):
+            self.generate_bible()
+            bible["status"] = "pending"
+            self._emit(new_event(BIBLE_PENDING, show_id=self.show.show_id))
+            log_.append("bible: generated -> pending")
+            self.show.set_bootstrap_state(st)
+        roster = [c.get("name") for c in self.show.read_bible().get("cast", [])]
+        roster = [n for n in roster if n and looks_like_character_name(n)]
+        chars = st.setdefault("characters", [])
+        for name in roster:
+            entry = next((c for c in chars if c.get("name") == name), None)
+            if entry is None:
+                entry = {"name": name, "proposal": "", "refs": "", "voice": ""}
+                chars.append(entry)
+            if entry.get("proposal") != "approved" and not entry.get("proposal"):
+                existing = next((cid for cid in self.show.list_characters()
+                                 if self.show.read_character(cid).get("name") == name),
+                                None)
+                if not existing:
+                    self.generate_character_proposal(name)
+                entry["proposal"] = "pending"
+                self._emit(new_event(CHAR_PROPOSAL_PENDING, show_id=self.show.show_id,
+                                     payload={"char": _slug(name)}))
+                log_.append(f"character {name}: proposal -> pending")
+                self.show.set_bootstrap_state(st)
+        scenes = st.setdefault("scenes", {"status": ""})
+        if scenes.get("status") != "approved" and not scenes.get("status"):
+            self.generate_scenes()
+            scenes["status"] = "pending"
+            self._emit(new_event(SCENE_REGISTRY_PENDING, show_id=self.show.show_id))
+            log_.append("scenes: generated -> pending")
+            self.show.set_bootstrap_state(st)
+        self.show.set_bootstrap_state(st)
+        return log_
+
+    def advance_images(self) -> list[str]:
+        """Generate character and scene reference images only (ComfyUI)."""
+        with _show_lock(self.show.show_id):
+            return self._advance_images()
+
+    def _advance_images(self) -> list[str]:
+        from . import refs as _refs
+        st = self.show.bootstrap_state()
+        log_: list[str] = []
+        for entry in st.get("characters", []):
+            if entry.get("refs") not in ("", None, "stub"):
+                continue
+            name = entry.get("name") or ""
+            char = next((self.show.read_character(cid)
+                         for cid in self.show.list_characters()
+                         if self.show.read_character(cid).get("name") == name), None)
+            if not char:
+                continue
+            kind = _refs.ensure_ref(self.show, char, cfg=self.cfg, llm=None,
+                                    report=self._report)
+            entry["refs"] = kind
+            self.show.set_bootstrap_state(st)
+            log_.append(f"character {name}: refs ({kind})")
+            if kind == "real":
+                self._emit(new_event(CHAR_REFS_PENDING, show_id=self.show.show_id,
+                                     payload={"char": char.get("id")}))
+        self._step_scene_refs(log_)
+        self.show.set_bootstrap_state(st)
+        return log_
+
+    def advance_voices(self, char: str = "") -> list[str]:
+        """Generate voice samples only (TTS). Optionally one character."""
+        if isinstance(char, dict):
+            char = char.get("name") or char.get("id") or ""
+        with _show_lock(self.show.show_id):
+            return self._advance_voices(str(char or ""))
+
+    def _advance_voices(self, char: str = "") -> list[str]:
+        st = self.show.bootstrap_state()
+        if isinstance(char, dict):
+            char = char.get("name") or char.get("id") or ""
+        char_filter = str(char or "").strip().lower()
+        log_: list[str] = []
+        for entry in st.get("characters", []):
+            name = str(entry.get("name") or "")
+            if char_filter and name.lower() != char_filter:
+                continue
+            if entry.get("voice") not in ("", None):
+                continue
+            char_data = next((self.show.read_character(cid)
+                              for cid in self.show.list_characters()
+                              if self.show.read_character(cid).get("name") == name), None)
+            if not char_data:
+                continue
+            self.bootstrap_voice(char_data)
+            entry["voice"] = "pending"
+            self.show.set_bootstrap_state(st)
+            log_.append(f"character {name}: voice sample -> pending")
+            self._emit(new_event(VOICE_SAMPLE_PENDING, show_id=self.show.show_id,
+                                 payload={"char": char_data.get("id")}))
+        return log_
+
+    def check_complete(self) -> bool:
+        st = self.show.bootstrap_state()
+        ok = ((st.get("concept") or {}).get("status") == "approved"
+              and (st.get("bible") or {}).get("status") == "approved"
+              and (st.get("scenes") or {}).get("status") == "approved"
+              and all(c.get("proposal") == "approved"
+                      and c.get("refs") == "approved"
+                      and c.get("voice") == "approved"
+                      for c in st.get("characters", [])))
+        if ok and not st.get("complete"):
+            st["complete"] = True
+            self.show.set_bootstrap_state(st)
+            self._emit(new_event(BOOTSTRAP_COMPLETE, show_id=self.show.show_id))
+        return ok
 
     def _step_concept(self, brief: str, log_: list[str]) -> bool | None:
         st = self.show.bootstrap_state()

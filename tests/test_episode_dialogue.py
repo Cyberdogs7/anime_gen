@@ -1,9 +1,8 @@
 """Tests for the prose-first dialogue spine: dialogue is written inside the
-episode prose screenplay, parsed deterministically, and distributed verbatim
-into shots.
+episode prose screenplay and distributed verbatim into shots.
 
-These exercise the deterministic parts (no LLM): the text parser, the verbatim
-injection into shots, on-camera resolution, and the dialogue-aware pass chain.
+These exercise the deterministic parts (no LLM): verbatim injection into shots,
+on-camera resolution, and the dialogue-aware pass chain.
 """
 import sys
 from pathlib import Path
@@ -15,43 +14,8 @@ from studio import prompts
 from studio.config import Config
 from studio.planner import (_SCENE_PASSES, _finalize_on_camera, _inject_dialogue,
                             _scene_passes, generate_scene_shots,
-                            merge_nickname_ledger, parse_dialogue_script,
-                            parse_nickname_ledger)
+                            merge_nickname_ledger, parse_nickname_ledger)
 from studio.show import Show
-
-TEXT = """VOICE: Sable - clipped commands, never asks twice.
-VOICE: Ren - jokes when nervous.
-=== s01 ===
-SABLE: Quit staring at the suit and plug me in!
-REN: (flat) Buy me dinner first.
-SABLE: (through her teeth) Move, mechanic.
-=== s02 ===
-REN: Second girl in five minutes?
-MIRA (V.O.): You're on every feed, pit rat.
-=== s03 ===
-(silent)
-"""
-
-
-def test_parse_dialogue_script():
-    scenes = parse_dialogue_script(TEXT, ["Sable Voss", "Ren Tojo", "Mira Kaine"])
-    assert set(scenes) == {"s01", "s02", "s03"}
-    s1 = scenes["s01"]
-    assert [(d["char"], d["line"]) for d in s1] == [
-        ("Sable Voss", "Quit staring at the suit and plug me in!"),
-        ("Ren Tojo", "Buy me dinner first."),
-        ("Sable Voss", "Move, mechanic."),
-    ]
-    assert s1[1]["delivery"] == "flat"
-    assert s1[2]["delivery"] == "through her teeth"
-    assert scenes["s02"][1]["on_camera"] is False       # V.O. -> off-screen
-    assert scenes["s03"] == []                           # explicit silent scene
-
-
-def test_parse_maps_to_exact_cast_names():
-    scenes = parse_dialogue_script("=== s01 ===\nSABLE VOSS: Hold the line!\n",
-                                   ["Sable Voss"])
-    assert scenes["s01"][0]["char"] == "Sable Voss"
 
 
 def test_inject_dialogue_places_lines_verbatim():

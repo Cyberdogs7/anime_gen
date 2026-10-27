@@ -169,7 +169,8 @@ def save_refs(show: Show, sid: str, data: dict[str, Any]) -> None:
 
 
 def generate_ref(show: Show, scene: dict[str, Any], sid: str, cfg=None,
-                 report: Callable[[str], None] | None = None) -> bool:
+                 report: Callable[[str], None] | None = None,
+                 force: bool = False, notes: str = "") -> bool:
     """Render one location ref image (krea2).
 
     Returns True when an image landed; records a stub (and returns False) when no
@@ -178,8 +179,14 @@ def generate_ref(show: Show, scene: dict[str, Any], sid: str, cfg=None,
     cfg = cfg or get_config()
     rd = refs_dir(show, sid)
     rd.mkdir(parents=True, exist_ok=True)
-    if (rd / f"{sid}_ref_01.png").exists():
+    out = rd / f"{sid}_ref_01.png"
+    if out.exists() and not force:
         return True
+    if force and out.exists():
+        try:
+            out.unlink()
+        except OSError:
+            pass
     krea2 = cfg.get("env", "comfyui", {}).get("krea2", {}) or {}
     if not krea2.get("url"):
         save_refs(show, sid, {"status": "stub",
@@ -190,8 +197,11 @@ def generate_ref(show: Show, scene: dict[str, Any], sid: str, cfg=None,
     setting = (scene.get("setting_prompt") or scene.get("description") or "").strip()
     if report:
         report(f"Generating scene image: {name} (Krea 2)…")
-    style = ((show.read_bible() or {}).get("style_guide") or "").strip()
-    prompt = (f"Anime location concept art. {setting}".rstrip(" .")
+    style = show.render_style()
+    revision = (f" Director's revision: {notes.strip()}"
+                if notes.strip() else "")
+    prompt = (f"Show location concept art. {setting}".rstrip(" .")
+              + revision
               + ". Empty unpopulated establishing shot of the location itself, "
                 "cinematic composition. "
               + prompts.ref_style_clause(style, show.ref_medium()))

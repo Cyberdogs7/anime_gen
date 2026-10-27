@@ -10,6 +10,7 @@ Pattern adapted from LanguageLearner's gpu_manager.py. See DESIGN.md §15.4.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -51,10 +52,10 @@ def _port_open(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=20)
+                              encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         # A hung `lms`/launcher subprocess must not block a render or storyboard
         # thread forever (it holds the exclusive GPU lock while it waits).
@@ -62,6 +63,122 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(cmd, returncode=124, stdout="", stderr="timeout")
     except FileNotFoundError:
         return subprocess.CompletedProcess(cmd, returncode=127, stdout="", stderr="not found")
+
+
+_PRELOAD_LOCK = threading.Lock()
+_LLM_PIN = 0
+_PINNED_MODELS: set[str] = set()
+
+
+@contextmanager
+def hold_llm(model: str | None = None):
+    """Keep the resident agent LLM loaded while its tool models come and go."""
+    global _LLM_PIN
+    _LLM_PIN += 1
+    if model:
+        _PINNED_MODELS.add(model)
+    try:
+        yield
+    finally:
+        _LLM_PIN = max(0, _LLM_PIN - 1)
+        if _LLM_PIN == 0:
+            _PINNED_MODELS.clear()
+
+
+def _loaded_models(lms: str) -> list[dict]:
+    res = _run([lms, "ps", "--json"], timeout=20)
+    if res.returncode != 0 or not (res.stdout or "").strip():
+        return []
+    try:
+        data = json.loads(res.stdout)
+        return data if isinstance(data, list) else []
+    except ValueError:
+        return []
+
+
+def preload_model(cfg, model: str, strict_context: bool = True) -> bool:
+    """Make ``model`` resident, keeping any pinned agent model in place.
+
+    ``llm.context`` / ``llm.parallel`` (when set) override LM Studio's per-model
+    load config. A model pinned by a running agent (``hold_llm``) is never
+    evicted: the agent still needs it to emit its next tool command while a long
+    tool runs. ``strict_context=False`` keeps a pinned agent model even if its
+    opencode-loaded context differs from the config.
+    """
+    if not model:
+        return False
+    lms = cfg.lms_cli()
+    port = int(cfg.get("env", "lmstudio", {}).get("server_port", 1234))
+    with _PRELOAD_LOCK:
+        if not _port_open(port):
+            _run([lms, "server", "start", "--port", str(port), "--cors"],
+                 timeout=30)
+            time.sleep(2)
+        rows = _loaded_models(lms)
+        context = int(cfg.get("llm", "context", 0) or 0)
+        parallel = int(cfg.get("llm", "parallel", 0) or 0)
+
+        def _num(value) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        current = next((r for r in rows
+                        if r.get("identifier") == model or r.get("modelKey") == model),
+                       None)
+        if current:
+            same_ctx = (not context
+                        or _num(current.get("contextLength")) == context)
+            same_par = (not parallel
+                        or _num(current.get("parallel")) == parallel)
+            if (same_ctx and same_par) or (not strict_context
+                                            and model in _PINNED_MODELS):
+                log.info("[gpu] %s already loaded (ctx=%s, parallel=%s)",
+                         model, current.get("contextLength"), current.get("parallel"))
+                return True
+            log.info("[gpu] reloading %s (want ctx=%s parallel=%s; have ctx=%s "
+                     "parallel=%s)", model, context, parallel,
+                     current.get("contextLength"), current.get("parallel"))
+            for row in rows:
+                if row.get("type") != "llm":
+                    continue
+                ident = row.get("identifier") or row.get("modelKey")
+                if ident in _PINNED_MODELS and ident != model:
+                    log.info("[gpu] keeping pinned %s", ident)
+                    continue
+                _run([lms, "unload", ident], timeout=30)
+            rows = _loaded_models(lms)
+        for row in rows:
+            if row.get("type") == "llm":
+                ident = row.get("identifier") or row.get("modelKey")
+                if ident in _PINNED_MODELS and ident != model:
+                    log.info("[gpu] keeping pinned %s", ident)
+                    continue
+                log.info("[gpu] unloading %s before %s", ident, model)
+                _run([lms, "unload", ident], timeout=30)
+        cmd = [lms, "load", model]
+        # LM Studio's per-model 82k/4-slot config leaves ~0.5 GB free on a 16 GB
+        # card and drops the writer to a few tokens/sec. Pin one generation and a
+        # working context instead so a 4k-token answer takes minutes, not hours.
+        if context > 0:
+            cmd += ["-c", str(context)]
+        if parallel > 0:
+            cmd += ["--parallel", str(parallel)]
+        cmd.append("-y")
+        log.info("[gpu] loading %s (ctx=%s parallel=%s)", model, context, parallel)
+        res = _run(cmd, timeout=900)
+        if res.returncode != 0:
+            log.warning("[gpu] load failed for %s: %s", model,
+                        (res.stderr or res.stdout or "")[-500:])
+            return False
+        loaded = next((r for r in _loaded_models(lms)
+                       if r.get("identifier") == model or r.get("modelKey") == model),
+                      None)
+        if loaded:
+            log.info("[gpu] %s resident (ctx=%s, parallel=%s)",
+                     model, loaded.get("contextLength"), loaded.get("parallel"))
+        return True
 
 
 class _ProcessGpuLock:
@@ -169,46 +286,32 @@ class GPUManager:
                                 json={"unload_models": True, "free_memory": True})
             except Exception:
                 pass
-        lms = self.cfg.lms_cli()
-        port = self.cfg.get("env", "lmstudio", {}).get("server_port", 1234)
-        ctx = self.cfg.get("env", "lmstudio", {}).get("context", 32768)
-        ratio = self.cfg.get("env", "lmstudio", {}).get("gpu_ratio", "max")
-        gpu = "max" if ratio in (None, "", "max", "auto") else str(ratio)
-        if not _port_open(port):
-            _run([lms, "server", "start", "--port", str(port), "--cors"])
-            time.sleep(4)
         model = (model
                  or self.cfg.get("llm", "roles", {}).get("showrunner")
                  or self.cfg.get("llm", "model")
                  or self.cfg.get("env", "lmstudio", {}).get("models", {}).get("showrunner", ""))
         if model:
-            _run([lms, "unload", "--all"])
-            time.sleep(1)
-            subprocess.Popen([lms, "load", model, "--gpu", gpu, "-c", str(ctx),
-                              "--parallel", "1", "-y"])
-            # wait for the model to be resident: poll `lms ps` for the model id
-            # (port alone is insufficient — server is already listening while load at 0-34%)
-            for _ in range(60):
-                time.sleep(3)
-                if _port_open(port):
-                    cur = _run([lms, "ps"]).stdout or ""
-                    if model in cur and "Loading" not in cur:
-                        # extra settle: ensure /v1/models lists it
-                        try:
-                            import httpx
-                            with httpx.Client(timeout=3.0) as _c:
-                                if _c.get(f"http://127.0.0.1:{port}/v1/models").status_code == 200:
-                                    return
-                        except Exception:
-                            return
-                        return
-            log.warning("[gpu] LLM load: API open but model readiness not confirmed for %s", model)
+            if not preload_model(self.cfg, model):
+                log.warning("[gpu] LLM load failed for %s", model)
         else:
             log.info("[gpu] LLM: no showrunner model configured in env.yaml; using existing server")
 
     def _unload_llm(self) -> None:
-        _run([self.cfg.lms_cli(), "unload", "--all"])
-        self._wait_vram_released()
+        lms = self.cfg.lms_cli()
+        keep = set(_PINNED_MODELS)
+        if not keep:
+            _run([lms, "unload", "--all"])
+            self._wait_vram_released()
+            return
+        for row in _loaded_models(lms):
+            if row.get("type") != "llm":
+                continue
+            ident = row.get("identifier") or row.get("modelKey")
+            if ident in keep:
+                log.info("[gpu] LLM %s is pinned by an active agent; keeping it", ident)
+                continue
+            _run([lms, "unload", ident], timeout=30)
+        # The pinned agent model still occupies VRAM; skip the full-release wait.
 
     @staticmethod
     def _gpu_free_mib() -> int | None:
@@ -418,30 +521,26 @@ class GPUManager:
     # ---- ComfyUI (portable tree per role) ----
 
     def _comfy_cfg(self) -> dict:
-        which = "krea2" if not self.cfg.is_renderer() else "h3"
-        return self.cfg.comfy_instance(which)
+        # The board manages both instances explicitly: refs/keyframes use krea2
+        # through this default; render_shot calls ensure_h3()/unload_h3().
+        return self.cfg.comfy_instance("krea2")
 
-    def _load_comfyui(self) -> None:
-        # Safety eject: if a previous process or a manual load left an LLM
-        # model resident in LM Studio, evict it before ComfyUI claims VRAM.
-        self._unload_llm()
-        inst = self._comfy_cfg()
+    def _start_comfy_instance(self, inst: dict) -> bool:
         port = int(inst.get("port", 8188))
         if _port_open(port):
             log.info("[gpu] ComfyUI already up on :%s", port)
-            return
+            return True
         tree = inst.get("dir", "")
         run_script = inst.get("run", "run_nvidia_gpu.bat")
         if not tree:
             log.info("[gpu] ComfyUI: no portable tree configured in env.yaml (stub)")
-            return
-        import os
+            return False
         from pathlib import Path
         tree_p = Path(tree)
         bat = tree_p / run_script
         if not bat.exists():
             log.warning("[gpu] ComfyUI run script missing: %s", bat)
-            return
+            return False
         proc = subprocess.Popen(
             ["cmd", "/c", str(bat)],
             cwd=str(tree_p),
@@ -451,11 +550,31 @@ class GPUManager:
         for _ in range(int(self.cfg.get("comfy", "startup_retries", 30))):
             time.sleep(2)
             if _port_open(port):
-                return
+                return True
         log.warning("[gpu] ComfyUI startup on :%s not confirmed", port)
+        return False
 
-    def _unload_comfyui(self) -> None:
-        inst = self._comfy_cfg()
+    def _load_comfyui(self) -> None:
+        # Safety eject: if a previous process or a manual load left an LLM
+        # model resident in LM Studio, evict it before ComfyUI claims VRAM.
+        self._unload_llm()
+        self._start_comfy_instance(self._comfy_cfg())
+
+    def ensure_h3(self) -> bool:
+        """Start the H3 instance (video) even from the manager process."""
+        return self._start_comfy_instance(self.cfg.comfy_instance("h3"))
+
+    def unload_llm(self) -> None:
+        """Public eviction for cards that need the whole GPU (H3 render)."""
+        self._unload_llm()
+
+    def unload_comfy(self) -> None:
+        self._stop_comfy_instance(self._comfy_cfg())
+
+    def unload_h3(self) -> None:
+        self._stop_comfy_instance(self.cfg.comfy_instance("h3"))
+
+    def _stop_comfy_instance(self, inst: dict) -> None:
         port = int(inst.get("port", 8188))
         # First: tell ComfyUI to evict its models from VRAM. taskkill alone
         # doesn't reclaim GPU memory; the models stay leaked. POST /free
@@ -489,6 +608,9 @@ class GPUManager:
         time.sleep(1)
         # Wait for VRAM to actually be released (Comfy's VRAM lingers after taskkill)
         self._wait_vram_released(timeout=30, min_free_mib=4096)
+
+    def _unload_comfyui(self) -> None:
+        self._stop_comfy_instance(self._comfy_cfg())
 
     # ---- acquire / release ----
 

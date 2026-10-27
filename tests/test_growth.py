@@ -43,7 +43,7 @@ class GrowthLLM:
                                  "characters": ["Ryou", "Mira"], "summary": "a new mystery"}}
         if "Series-Growth reviewer" in user and "new supporting character" in user:
             return {"approved": True, "notes": ["distinct"]}
-        if "Flesh out a NEW supporting anime character" in user:
+        if "Flesh out a NEW supporting character" in user:
             return {"name": "Mira", "appearance_canonical": "short violet hair, grey eyes",
                     "personality": ["curious"], "traits_for_llm": "soft-spoken",
                     "voice": {"mode": "manual", "voice_description": "soft alto"}}
@@ -143,11 +143,11 @@ def test_process_new_plotline_approves_and_persists_to_bible(tmp_path):
     assert "new_thread" in ids, "approved plotline must land in the bible"
     cont = show.read_continuity()
     assert any(p.get("id") == "new_thread" for p in cont.get("plotlines", []))
-    # new character sheet created, voice = manual
+    # new character sheet created, voice is character-designed (never a preset)
     sheets = {c.get("name"): c for c in
               (show.read_character(cid) for cid in show.list_characters())}
     assert "Mira" in sheets
-    assert sheets["Mira"]["voice"]["mode"] == "manual"
+    assert sheets["Mira"]["voice"]["mode"] == "designed"
 
 
 def test_process_new_plotline_reject_does_not_touch_canon(tmp_path):

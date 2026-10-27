@@ -1,4 +1,4 @@
-"""Show lifecycle actions (create from a seed idea / delete) for the dashboard & CLI."""
+"""Show lifecycle actions (create from a seed idea / delete) for the board & CLI."""
 from __future__ import annotations
 
 import re
@@ -28,7 +28,8 @@ def _skeleton(show_id: str) -> None:
             "tone": cfg.get("show_profile", "tone", []),
             "language": "en",
             "runtime_target_s": cfg.get("show_profile", "runtime_target_s", DEFAULT_RUNTIME_TARGET_S),
-            "style_guide": "",  # filled by the Gate 0 bootstrap
+            "style_guide": "",  # rendering/linework only; filled by the Gate 0 bootstrap
+            "art_direction": {},  # camera/lighting/palette reference; never in prompts
             # Per-show style references (set these in the show's bible).
             "baseline": "",
             "fanservice_baseline": "",
@@ -39,7 +40,7 @@ def _skeleton(show_id: str) -> None:
         "arcs": [],
         "overall_plotline": None,
         "plotlines": [],
-        "content_policy": cfg.get("show_profile", "maturity", "mature"),
+        "content_policy": cfg.get("show_profile", "maturity") or "",
     }
     (show_dir / "bible.yaml").write_text(
         yaml.safe_dump(bible, sort_keys=False, allow_unicode=True), encoding="utf-8",
@@ -81,7 +82,7 @@ def create_show_from_proposal(proposal: dict, name: str = "") -> str:
     bible, which lands `pending` for review.
     """
     from .approval import _emit
-    from .bus.events import CONCEPT_APPROVED, new_event
+    from .events import CONCEPT_APPROVED, new_event
     from .bootstrap import BootstrapChain
 
     cfg = get_config()
@@ -95,7 +96,10 @@ def create_show_from_proposal(proposal: dict, name: str = "") -> str:
 
     show = Show(show_id)
     concept = dict(proposal)
-    concept["maturity"] = cfg.get("show_profile", "maturity", "mature")
+    # The selected proposal's rating IS the show's rating; the profile is only a
+    # fallback for proposals that carry none.
+    concept["maturity"] = str(proposal.get("maturity")
+                              or cfg.get("show_profile", "maturity") or "").strip()
     show.write_concept(concept)
     st = show.bootstrap_state()
     st["concept"] = {"status": "approved"}
@@ -126,6 +130,9 @@ def delete_show(show_id: str) -> None:
         raise ValueError(f"refusing to delete outside the shows dir: {target}")
     log.info("delete_show %s -> %s (db cleanup + move to trash)", show_id, target)
 
+    from .board.store import close_show_stores
+    close_show_stores(show_id)
+
     db = DB(cfg.db_path)
     con = db.conn
     try:
@@ -150,6 +157,13 @@ def delete_show(show_id: str) -> None:
         con.execute("DELETE FROM continuity WHERE show_id=?", (show_id,))
         con.execute("DELETE FROM policy_events WHERE show_id=?", (show_id,))
         con.execute("DELETE FROM events WHERE show_id=?", (show_id,))
+        card_ids = [r[0] for r in con.execute(
+            "SELECT id FROM board_cards WHERE show_id=?", (show_id,))]
+        if card_ids:
+            ph = _in(card_ids)
+            con.execute(f"DELETE FROM board_history WHERE card_id IN ({ph})", card_ids)
+            con.execute(f"DELETE FROM board_runs WHERE card_id IN ({ph})", card_ids)
+        con.execute("DELETE FROM board_cards WHERE show_id=?", (show_id,))
         con.commit()
     finally:
         db.close()
