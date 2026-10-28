@@ -326,7 +326,41 @@ def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
     show = Show(show_id)
     st = show.bootstrap_state()
     stamp = int(time.time())
-    if kind in ("plan", "concept", "bible", "scenes"):
+    if kind in ("ideas", "bible", "characters", "scenes"):
+        # Partitioned-stage rebuild: reset just that stage and mint a stamped
+        # card chained behind its parent stage. (Legacy "plan"/"concept"
+        # kinds below keep the old single-shot rebuild for pre-partition shows.)
+        parents = {"ideas": [], "bible": [f"g0.{show_id}.ideas"],
+                   "characters": [f"g0.{show_id}.bible"],
+                   "scenes": [f"g0.{show_id}.characters"]}
+        kinds = {"ideas": "gate0_ideas", "bible": "gate0_bible",
+                 "characters": "gate0_characters", "scenes": "gate0_scenes"}
+        titles = {"ideas": "Re-pitch show ideas off the brief",
+                  "bible": "Rewrite the series bible",
+                  "characters": "Re-propose the cast",
+                  "scenes": "Rebuild the scene registry"}
+        payload: dict[str, Any] = {"auto": False}
+        if kind == "ideas":
+            orig = store.get(f"g0.{show_id}.ideas") or {}
+            op = (orig.get("payload") or {})
+            payload = {"brief": str(op.get("brief") or ""),
+                       "n": int(op.get("n") or 5), "auto": False}
+        if kind == "bible":
+            st.setdefault("bible", {})["status"] = ""
+        if kind == "characters":
+            for entry in st.get("characters", []):
+                entry["proposal"] = ""
+        if kind == "scenes":
+            st.setdefault("scenes", {})["status"] = ""
+        st["complete"] = False
+        show.set_bootstrap_state(st)
+        card = new_card(f"g0.{show_id}.{kind}.r{stamp}", kind=kinds[kind],
+                        title=titles[kind], show_id=show_id, role=kinds[kind],
+                        reviewer="human", lane="llm", priority=9,
+                        max_attempts=3, payload=payload,
+                        depends_on=parents[kind])
+        return store.upsert(card)
+    if kind in ("plan", "concept"):
         if kind in ("plan", "concept"):
             st.setdefault("concept", {})["status"] = ""
         if kind in ("plan", "bible"):
@@ -339,11 +373,22 @@ def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
         st["complete"] = False
         show.set_bootstrap_state(st)
         cid = f"g0.{show_id}.plan.r{stamp}"
+        # Preserve the owner's original brief: a retry without it generates
+        # generic content (or nothing the owner recognizes). Fall back to ""
+        # only when no prior plan card carries a brief.
+        _orig = store.get(f"g0.{show_id}.plan") or {}
+        _brief = str(((_orig.get("payload") or {}).get("brief")) or "").strip()
+        if not _brief:
+            for _c in store.all(show_id=show_id):
+                if _c.get("kind") == "gate0_plan":
+                    _brief = str(((_c.get("payload") or {}).get("brief")) or "").strip()
+                    if _brief:
+                        break
         card = new_card(cid, kind="gate0_plan",
                         title="Rebuild the show bible, cast & scenes",
                         show_id=show_id, role="gate0_plan", reviewer="human",
-                        lane="llm", priority=9, max_attempts=1,
-                        payload={"brief": "", "auto": False})
+                        lane="llm", priority=9, max_attempts=3,
+                        payload={"brief": _brief, "auto": False})
     elif kind in ("refs", "voices", "voice_text"):
         if kind == "voice_text" and not char:
             raise ValueError("char is required for voice_text")
@@ -590,12 +635,24 @@ def _decide_retake(store, card: dict, action: str, notes: str):
 
 
 def _run_log(cfg, run_id: str) -> dict:
+    # Every file artifact a run produced, so the card view can show them
+    # inline: worker stdio (board/runs) plus prompt + tool trace
+    # (runs/agents). Legacy agent runs keep their prompt.md only there.
+    if not run_id or any(s in run_id for s in ("/", "\\", "..")):
+        raise ValueError(f"bad run id {run_id!r}")
     base = Path(cfg.root) / "board" / "runs" / run_id
+    agent_base = Path(cfg.root) / "runs" / "agents" / run_id
     out = {"id": run_id}
+
+    def _tail(path: Path) -> str:
+        return path.read_text(
+            encoding="utf-8", errors="replace")[-30000:] if path.exists() else ""
     for name in ("prompt.md", "stdout.log", "stderr.log"):
         path = base / name
-        out[name.split(".")[0]] = path.read_text(
-            encoding="utf-8", errors="replace")[-30000:] if path.exists() else ""
+        if not path.exists() and name == "prompt.md":
+            path = agent_base / name
+        out[name.split(".")[0]] = _tail(path)
+    out["trace"] = _tail(agent_base / "trace.json")
     return out
 
 
@@ -759,6 +816,7 @@ def _show_detail(cfg, store, sid: str) -> dict:
         "id": sid,
         "bible": bible,
         "concept": show.read_concept() or {},
+        "ideas": show.read_ideas() or {},
         "continuity": show.read_continuity() or {},
         "plotlines": plotlines,
         "seasons": seasons,
@@ -989,17 +1047,21 @@ class BoardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/show":
                 name = str(data.get("name") or "").strip()
                 brief = str(data.get("brief") or "").strip()
-                if not name:
-                    return _json(self, 400, {"error": "name is required"})
                 from ..shows import _skeleton
                 from .gate0 import bootstrap_cards
-                show_id = name.lower().replace(" ", "-")
+                # The name is optional: without one the show gets a provisional
+                # id and the picked pitch's slug becomes its real id.
+                auto_id = not name
+                show_id = (name.lower().replace(" ", "-")
+                           if name else f"show-{int(time.time())}")
                 if (Path(self.cfg.show_path(show_id)) / "bible.yaml").exists():
                     return _json(self, 409, {"error": f"show '{show_id}' exists"})
                 _skeleton(show_id)
                 cards = [self.store.upsert(c)
-                         for c in bootstrap_cards(show_id, brief=brief)]
-                return _json(self, 200, {"cards": cards})
+                         for c in bootstrap_cards(show_id, brief=brief,
+                                                  auto_id=auto_id)]
+                return _json(self, 200, {"cards": cards, "show_id": show_id,
+                                         "auto_id": auto_id})
             if parsed.path == "/api/show/episode":
                 sid = (q.get("show_id") or [""])[0]
                 ep = int((q.get("episode") or ["0"])[0] or 0)
@@ -1041,6 +1103,98 @@ class BoardHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     return _json(self, 400, {"error": str(exc)})
                 return _json(self, 200, {"card": card})
+            if parsed.path == "/api/show/reselect":
+                sid = str(data.get("show_id") or "")
+                pid = str(data.get("pitch_id") or "")
+                if not sid or not pid:
+                    return _json(self, 400, {"error": "show_id and pitch_id are required"})
+                from ..show import Show as _Show
+                from .cards import new_card as _new_card
+                from . import gate0 as _gate0
+                from ..bootstrap import BootstrapChain as _Chain
+                show = _Show(sid)
+                ideas = show.read_ideas() or {}
+                pitch = next((p for p in (ideas.get("pitches") or [])
+                              if str(p.get("id")) == pid), None)
+                if pitch is None:
+                    return _json(self, 404, {"error": f"no pitch {pid!r} in the archive"})
+                # A reselected pitch can also rename the show when it was
+                # created without a name (provisional id).
+                renamed = False
+                wanted = str(pitch.get("show_id") or "").strip()
+                if wanted and wanted != sid:
+                    from ..shows import rename_show as _rename_show
+                    from .store import valid_show_id as _valid_show_id
+                    if (_valid_show_id(wanted)
+                            and not Path(self.cfg.show_path(wanted)).exists()):
+                        _rename_show(sid, wanted)
+                        try:
+                            self.store.close_show(sid)
+                        except Exception:
+                            pass
+                        sid, renamed = wanted, True
+                        show = _Show(sid)
+                        ideas = show.read_ideas() or {}
+                        pitch = next((p for p in (ideas.get("pitches") or [])
+                                      if str(p.get("id")) == pid), pitch)
+                profile = self.cfg.get("show_profile") or {}
+                maturity = str(pitch.get("maturity")
+                               or profile.get("maturity") or "").strip()
+                show.write_concept({
+                    "title": str(pitch.get("title") or ""),
+                    "logline": str(pitch.get("logline") or ""),
+                    "premise": str(pitch.get("premise") or ""),
+                    "genre": list(pitch.get("genre") or []),
+                    "tone": list(pitch.get("tone") or []),
+                    "hook": str(pitch.get("hook") or ""),
+                    "maturity": maturity,
+                    "picked_from": pid,
+                    "picked_pitches": [pid],
+                })
+                now = int(time.time())
+                if pitch.get("status") != "selected":
+                    pitch["status"] = "selected"
+                    pitch["selected_at"] = now
+                ideas["active"] = pid
+                show.write_ideas(ideas)
+                # Rewind downstream stages; accepted stage cards stay as
+                # history and get stamped replacements, planned ones just run.
+                st = show.bootstrap_state() or {}
+                st["concept"] = {"status": "approved"}
+                st["bible"] = {"status": ""}
+                st["characters"] = []
+                st["scenes"] = {"status": ""}
+                st["complete"] = False
+                show.set_bootstrap_state(st)
+                from ..events import CONCEPT_APPROVED, new_event
+                from ..approval import _emit
+                _emit(show, CONCEPT_APPROVED,
+                      {"manual": True, "via": "reselect", "pitch": pid})
+                prev = f"g0.{sid}.ideas"
+                minted = []
+                for domain, kind, role, title in (
+                    ("bible", "gate0_bible", "gate0_bible", "Write the series bible"),
+                    ("characters", "gate0_characters", "gate0_characters",
+                     "Propose the cast from the approved bible"),
+                    ("scenes", "gate0_scenes", "gate0_scenes",
+                     "Build the scene registry from the approved bible"),
+                ):
+                    orig = self.store.get(f"g0.{sid}.{domain}")
+                    if orig is not None and str(orig.get("state")) != "accepted":
+                        prev = str(orig.get("id"))
+                        continue
+                    new = _new_card(f"g0.{sid}.{domain}.r{now}", kind=kind,
+                                    title=title, show_id=sid, role=role,
+                                    reviewer="human", lane="llm", priority=9,
+                                    max_attempts=3, payload={"auto": False},
+                                    depends_on=[prev])
+                    self.store.upsert(new)
+                    minted.append(new)
+                    prev = str(new.get("id"))
+                _Chain(show, cfg=self.cfg, llm=None).check_complete()
+                return _json(self, 200, {"concept": show.read_concept(),
+                    "cards": minted, "status": _gate0.status(show),
+                    "show_id": sid, "renamed": renamed})
             if parsed.path == "/api/episode":
                 show_id = str(data.get("show_id") or "")
                 episode = int(data.get("episode") or 0)
@@ -1134,8 +1288,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                 from ..bootstrap import BootstrapChain
                 from ..show import Show
                 from . import gate0
-                domain = {"gate0_plan": "plan", "gate0_images": "images",
-                          "gate0_voices": "voices"}.get(str(card.get("kind") or ""))
+                domain = gate0.KIND_DOMAINS.get(str(card.get("kind") or ""))
                 if not domain:
                     return _json(self, 400, {"error": "not a Gate 0 card"})
                 if action == "approve":
@@ -1151,20 +1304,119 @@ class BoardHandler(BaseHTTPRequestHandler):
                     pending = {"step": "voice", "char": card_char}
                 else:
                     pending = current.get("pending") or {}
-                if action == "reject" and domain == "plan":
+                if domain == "ideas" and action == "approve":
+                    picks = data.get("picks") or []
+                    if isinstance(picks, str):
+                        picks = [picks]
+                    picks = [str(p).strip() for p in picks if str(p).strip()]
+                    ideas = show.read_ideas() or {}
+                    pitches = ideas.get("pitches") or []
+                    if not pitches:
+                        return _json(self, 409, {"error":
+                            "no pitches archived yet; the ideas card has not run"})
+                    by_id = {str(p.get("id")): p for p in pitches if p.get("id")}
+                    unknown = [p for p in picks if p not in by_id]
+                    if unknown:
+                        return _json(self, 400, {"error":
+                            f"unknown pitch ids: {', '.join(unknown)}"})
+                    if not picks:
+                        return _json(self, 400, {"error":
+                            "select at least one pitch"})
+                    # The picked pitch supplies the show id: a provisional
+                    # show (created without a name) takes the first pick's
+                    # slug as its real id.
+                    old_sid = str(card.get("show_id") or "")
+                    wanted = str(by_id[picks[0]].get("show_id") or "").strip()
+                    renamed = False
+                    if ((card.get("payload") or {}).get("auto_id")
+                            and wanted and wanted != old_sid):
+                        from ..shows import rename_show as _rename_show
+                        from .store import valid_show_id as _valid_show_id
+                        if (_valid_show_id(wanted)
+                                and not Path(self.cfg.show_path(wanted)).exists()):
+                            _rename_show(old_sid, wanted)
+                            try:
+                                self.store.close_show(old_sid)
+                            except Exception:
+                                pass
+                            old_sid = wanted
+                            card_id = (f"g0.{wanted}.ideas"
+                                       if card_id == f"g0.{card.get('show_id')}.ideas"
+                                       else card_id.replace(
+                                           f"g0.{card.get('show_id')}.",
+                                           f"g0.{wanted}.", 1))
+                            renamed = True
+                            show = Show(old_sid)
+                            ideas = show.read_ideas() or {}
+                            pitches = ideas.get("pitches") or []
+                            by_id = {str(p.get("id")): p for p in pitches
+                                     if p.get("id")}
+                    now = int(time.time())
+                    for pid in picks:
+                        if by_id[pid].get("status") != "selected":
+                            by_id[pid]["status"] = "selected"
+                            by_id[pid]["selected_at"] = now
+                    ideas["active"] = picks[0]
+                    show.write_ideas(ideas)
+                    # Picking auto-approves: the first pick IS the concept.
+                    first = by_id[picks[0]]
+                    profile = self.cfg.get("show_profile") or {}
+                    maturity = str(first.get("maturity")
+                                   or profile.get("maturity") or "").strip()
+                    show.write_concept({
+                        "title": str(first.get("title") or ""),
+                        "logline": str(first.get("logline") or ""),
+                        "premise": str(first.get("premise") or ""),
+                        "genre": list(first.get("genre") or []),
+                        "tone": list(first.get("tone") or []),
+                        "hook": str(first.get("hook") or ""),
+                        "maturity": maturity,
+                        "picked_from": picks[0],
+                        "picked_pitches": picks,
+                    })
+                    bst = show.bootstrap_state() or {}
+                    bst.setdefault("concept", {})["status"] = "approved"
+                    show.set_bootstrap_state(bst)
+                    from ..events import CONCEPT_APPROVED, new_event
+                    from ..approval import _emit
+                    _emit(show, CONCEPT_APPROVED,
+                          {"manual": True, "via": "pitch-selection", "picks": picks})
+                    BootstrapChain(show, cfg=self.cfg, llm=None).check_complete()
+                    st = gate0.status(show, "ideas")
+                    self.store.update(card_id, result={**st, "picks": picks})
+                    try:
+                        self.store.advance(card_id, "accepted", "human",
+                            f"{len(picks)} pitch(es) selected; concept approved")
+                    except ValueError:
+                        pass
+                    return _json(self, 200, {"card": self.store.get(card_id),
+                        "status": st, "show_id": old_sid, "renamed": renamed,
+                        "messages": [f"concept approved from pitch {picks[0]}"]})
+                if action == "reject" and domain in ("plan", "ideas", "bible",
+                                                    "characters", "scenes"):
                     from .cards import new_card
+                    kind = str(card.get("kind") or "")
+                    role = str(card.get("role") or kind)
+                    titles = {
+                        "gate0_plan": "Revise the show bible, cast & scenes",
+                        "gate0_ideas": "Re-pitch show ideas off the brief",
+                        "gate0_bible": "Rewrite the series bible",
+                        "gate0_characters": "Re-propose the cast",
+                        "gate0_scenes": "Rebuild the scene registry",
+                    }
                     pending_reject = current.get("pending") or {}
                     self.store.update(card_id, result={
                         **current, "rejected": notes or "rejected"})
                     revision = new_card(
-                        f"g0.{show.show_id}.plan.r{int(time.time())}",
-                        kind="gate0_plan",
-                        title="Revise the show bible, cast & scenes",
-                        show_id=show.show_id, role="gate0_plan",
+                        f"g0.{show.show_id}.{domain}.r{int(time.time())}",
+                        kind=kind,
+                        title=titles.get(kind, f"Revise {domain}"),
+                        show_id=show.show_id, role=role,
                         reviewer="human", lane="llm", priority=9,
-                        max_attempts=1,
+                        max_attempts=3,
+                        depends_on=list((card.get("depends_on") or [])),
                         payload={
-                            "brief": (card.get("payload") or {}).get("brief", ""),
+                            **(card.get("payload") or {}),
                             "notes": notes or "rejected",
                             "step": pending_reject.get("step", ""),
                             "char": pending_reject.get("char", ""),

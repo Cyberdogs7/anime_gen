@@ -274,8 +274,8 @@ class OpenCodeAgent:
                     f"brief and the show profile.\nArtifact paths:\n{paths}"
                     "Write concept.json and bible.yaml, one character YAML per "
                     "cast member (3-5 total), and 5-8 location YAMLs. Use the "
-                    "SKILL schemas exactly. Every character is an adult (18+); "
-                    "never write minors. Use the profile's maturity as the "
+                    "SKILL schemas exactly."
+                    "Use the profile's maturity as the "
                     "content policy and the brief's premise as canon.\n"
                     f"Then run (bash): python \"{apply_boot_py}\" --card "
                     f"{self.card.get('id')}\n"
@@ -530,14 +530,20 @@ class OpenCodeAgent:
             if self.proc and self.proc.poll() is not None:
                 tail = self._tail()
                 self._cancel_jobs("worker exited without a verdict")
+                # A worker that exits without calling board-finish is an
+                # infrastructure failure (crash, model stall, OOM), not a
+                # content verdict. Return retake so the daemon retries up to
+                # max_attempts instead of dead-ending on the first failure.
+                # After the cap, _requeue_retakes parks it as blocked with
+                # "retake cap" and the tail stays in board_runs.error.
                 return AgentResult(
-                    status="blocked",
+                    status="retake",
                     error=f"opencode exited {self.proc.returncode} without a "
                           f"verdict. {tail}")
             time.sleep(0.5)
         self._stop()
         self._cancel_jobs("worker timed out")
-        return AgentResult(status="blocked", error="opencode run timed out")
+        return AgentResult(status="retake", error="opencode run timed out")
 
     def _cancel_jobs(self, reason: str) -> None:
         """Stop long jobs this card started; the worker will not collect them."""

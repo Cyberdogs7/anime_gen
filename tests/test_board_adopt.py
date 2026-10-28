@@ -64,7 +64,9 @@ def test_adopt_complete_folder_marks_everything_accepted(tmp_path):
     db = BoardStore(path / "board" / "board.db")
     assert db.meta_get(MARKER_KEY)
     db.close()
-    assert store.get("g0.alpha.plan")["state"] == "accepted"
+    for domain in ("ideas", "bible", "characters", "scenes",
+                   "images", "voices"):
+        assert store.get(f"g0.alpha.{domain}")["state"] == "accepted", domain
     for kind in ("outline", "script", "objects", "keyframes", "render",
                  "qc", "assemble"):
         assert store.get(f"alpha.ep01.{kind}")["state"] == "accepted", kind
@@ -93,7 +95,8 @@ def test_adopt_missing_bootstrap_queues_gate0_only(tmp_path):
     cards = store.all(show_id="alpha")
 
     assert {c["id"] for c in cards} == {
-        "g0.alpha.plan", "g0.alpha.images", "g0.alpha.voices"}
+        "g0.alpha.ideas", "g0.alpha.bible", "g0.alpha.characters",
+        "g0.alpha.scenes", "g0.alpha.images", "g0.alpha.voices"}
     assert all(c["state"] == "planned" for c in cards)
     store.close()
 

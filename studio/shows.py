@@ -110,6 +110,126 @@ def create_show_from_proposal(proposal: dict, name: str = "") -> str:
     return show_id
 
 
+def rename_show(old_id: str, new_id: str, cfg=None) -> str:
+    """Rename a show: folder plus every board reference embedding the old id.
+
+    Used when a picked pitch supplies the show id: the show was created under
+    a provisional id, and the pitch's slug becomes its real one. Card ids
+    (``g0.<show>.<domain>``), ``show_id`` columns, ``depends_on`` entries and
+    ``shows/<id>/``-prefixed artifact paths are all rewritten. Run ids and
+    their log dirs are history and stay as-is (still valid paths).
+    """
+    import logging
+    log = logging.getLogger("shows")
+    cfg = cfg or get_config()
+    old_id = (old_id or "").strip()
+    new_id = (new_id or "").strip()
+    if new_id == old_id:
+        return old_id
+    for label, sid in (("old", old_id), ("new", new_id)):
+        if not sid or "/" in sid or "\\" in sid or sid in (".", ".."):
+            raise ValueError(f"refusing to rename {label} show id {sid!r}")
+    from .board.store import valid_show_id
+    if not valid_show_id(new_id):
+        raise ValueError(f"refusing to rename to invalid show id {new_id!r}")
+    shows_root = cfg.shows_dir.resolve()
+    src = cfg.show_path(old_id).resolve()
+    dst = cfg.show_path(new_id).resolve()
+    for target in (src, dst):
+        if target == shows_root or not str(target).startswith(str(shows_root) + "\\"):
+            raise ValueError(f"refusing to rename outside the shows dir: {target}")
+    if not src.exists():
+        raise ValueError(f"no such show {old_id!r}")
+    if dst.exists():
+        raise ValueError(f"show '{new_id}' already exists")
+
+    from .board.store import close_show_stores
+    close_show_stores(old_id)
+
+    import sqlite3
+    shutil.move(str(src), str(dst))
+    log.info("rename_show %s -> %s", old_id, new_id)
+
+    old_card = f"g0.{old_id}."
+    new_card = f"g0.{new_id}."
+    old_ep = f"{old_id}."
+    new_ep = f"{new_id}."
+    old_art = f"shows/{old_id}/"
+    new_art = f"shows/{new_id}/"
+
+    def _swap_id(cid: str) -> str:
+        if cid.startswith(old_card):
+            return new_card + cid[len(old_card):]
+        if cid.startswith(old_ep):
+            return new_ep + cid[len(old_ep):]
+        return cid
+
+    import json as _json
+    db_path = dst / "board" / "board.db"
+    if db_path.exists():
+        con = sqlite3.connect(str(db_path))
+        try:
+            cards = con.execute(
+                "SELECT id, show_id, depends_on, artifacts, payload FROM board_cards"
+            ).fetchall()
+            for cid, sid, deps, arts, payload in cards:
+                nid = _swap_id(str(cid or ""))
+                try:
+                    dep_list = _json.loads(deps or "[]")
+                    dep_list = [_swap_id(str(d)) for d in dep_list]
+                    new_deps = _json.dumps(dep_list)
+                except Exception:
+                    new_deps = deps
+                try:
+                    art_list = _json.loads(arts or "[]")
+                    for a in art_list:
+                        p = str(a.get("path") or "")
+                        if p.startswith(old_art):
+                            a["path"] = new_art + p[len(old_art):]
+                    new_arts = _json.dumps(art_list)
+                except Exception:
+                    new_arts = arts
+                con.execute(
+                    "UPDATE board_cards SET id=?, show_id=?, depends_on=?, "
+                    "artifacts=? WHERE id=?", (nid, new_id, new_deps, new_arts, cid))
+                con.execute("UPDATE board_runs SET card_id=? WHERE card_id=?",
+                            (nid, cid))
+                con.execute("UPDATE board_history SET card_id=? WHERE card_id=?",
+                            (nid, cid))
+            con.commit()
+        finally:
+            con.close()
+
+    # Central studio.db rows that key on show_id move with the show.
+    db = DB(cfg.db_path)
+    con = db.conn
+    try:
+        for table in ("continuity", "policy_events", "events", "assets",
+                      "script_reviews", "runs", "shots"):
+            try:
+                con.execute(f"UPDATE {table} SET show_id=? WHERE show_id=?",
+                            (new_id, old_id))
+            except Exception:
+                pass
+        try:
+            rows = con.execute(
+                "SELECT id FROM board_cards WHERE show_id=?", (old_id,)).fetchall()
+            for (cid,) in rows:
+                nid = _swap_id(str(cid or ""))
+                con.execute("UPDATE board_cards SET id=?, show_id=? WHERE id=?",
+                            (nid, new_id, cid))
+                con.execute("UPDATE board_runs SET card_id=? WHERE card_id=?",
+                            (nid, cid))
+                con.execute("UPDATE board_history SET card_id=? WHERE card_id=?",
+                            (nid, cid))
+        except Exception:
+            pass
+        con.commit()
+    finally:
+        db.close()
+    return new_id
+
+
 def delete_show(show_id: str) -> None:
     """Delete a show: its DB rows (cascade order) and its folder under shows/.
 

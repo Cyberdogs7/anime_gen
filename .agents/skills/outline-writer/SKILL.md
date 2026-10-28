@@ -5,8 +5,6 @@ characters, continuity, scene registry, season entry), this skill, the card,
 and — if it exists — the current plan. **Do not read or glob the show**;
 everything you need is in the prompt.
 
-All characters are fictional adults aged 18 or older. Never write minors.
-
 Do not use `board-tool` or `board-wait`. Do not commit or push. Do not write
 `plan.json` yourself.
 

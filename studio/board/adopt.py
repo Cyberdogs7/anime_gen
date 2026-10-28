@@ -83,18 +83,40 @@ def _gate0_cards(show: Show) -> list[dict[str, Any]]:
     def any_status(key: str, value: str) -> bool:
         return any(str(c.get(key) or "") == value for c in chars)
 
-    plan_done = complete or (concept == "approved" and bible == "approved"
-                             and scenes == "approved" and all_status("proposal"))
-    plan_pending = (any(s == "pending" for s in (concept, bible, scenes))
-                    or any_status("proposal", "pending"))
-    images_done = complete or (plan_done and all_status("refs"))
+    try:
+        pitches = (show.read_ideas() or {}).get("pitches") or []
+    except Exception:
+        pitches = []
+    ideas_selected = any(str(p.get("status")) == "selected" for p in pitches)
+    ideas_any = bool(pitches)
+    bible_done = complete or bible == "approved"
+    bible_pending = bible == "pending"
+    chars_done = complete or (chars and all_status("proposal"))
+    chars_pending = any_status("proposal", "pending")
+    scenes_done = complete or scenes == "approved"
+    scenes_pending = scenes == "pending"
+    text_done = complete or (concept == "approved" and bible_done
+                             and scenes_done and chars_done)
+    text_pending = (concept == "pending" or bible_pending or scenes_pending
+                    or chars_pending)
+    images_done = complete or (text_done and all_status("refs"))
     images_pending = any_status("refs", "pending")
-    voices_done = complete or (plan_done and all_status("voice"))
+    voices_done = complete or (text_done and all_status("voice"))
     voices_pending = any_status("voice", "pending")
 
     states = {
-        "plan": ("accepted" if plan_done
-                 else "reviewing" if plan_pending else "planned"),
+        "ideas": ("accepted" if (complete or concept == "approved"
+                                 or ideas_selected)
+                  else "reviewing" if ideas_any else "planned"),
+        "bible": ("accepted" if bible_done
+                  else "reviewing" if bible_pending else "planned"),
+        "characters": ("accepted" if chars_done
+                       else "reviewing" if chars_pending else "planned"),
+        "scenes": ("accepted" if scenes_done
+                   else "reviewing" if scenes_pending else "planned"),
+        # Legacy single-shot plan card (pre-partition shows).
+        "plan": ("accepted" if text_done
+                 else "reviewing" if text_pending else "planned"),
         "images": ("accepted" if images_done
                    else "reviewing" if images_pending else "planned"),
         "voices": ("accepted" if voices_done

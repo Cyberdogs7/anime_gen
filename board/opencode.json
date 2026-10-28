@@ -2,6 +2,15 @@
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["C:\\Users\\Chad\\PycharmProjects\\anime\\board\\AGENTS.md"],
   "small_model": "lm_studio_local/qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp",
+  "provider": {
+    "lm_studio_local": {
+      "models": {
+        "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp": {
+          "limit": { "context": 80000, "output": 65536 }
+        }
+      }
+    }
+  },
   "mcp": {
     "higgsfield": { "enabled": false },
     "playwright": { "enabled": false }

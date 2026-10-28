@@ -52,6 +52,38 @@ roles:
     prompt: >
       Read .agents/skills/show-bootstrap/SKILL.md and build the show artifacts.
 
+  gate0_ideas:
+    kind: exec
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    max_steps: 1
+    tools: [gate0_ideas]
+    prompt: Pitch 5 show ideas off the brief and archive them.
+
+  gate0_bible:
+    kind: exec
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    max_steps: 1
+    tools: [gate0_bible]
+    prompt: Write the series bible from the approved concept.
+
+  gate0_characters:
+    kind: exec
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    max_steps: 1
+    tools: [gate0_characters]
+    prompt: Propose the cast from the approved bible.
+
+  gate0_scenes:
+    kind: exec
+    lane: llm
+    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    max_steps: 1
+    tools: [gate0_scenes]
+    prompt: Build the scene registry from the approved bible.
+
   gate0_images:
     kind: exec
     lane: image

@@ -302,6 +302,79 @@ def gate0_plan(ctx: ToolContext, args: dict[str, Any]) -> Any:
     return {**st, "log": log}
 
 
+@tool("gate0_ideas", "Pitch N show ideas off the brief; archive them all.", long=True)
+def gate0_ideas(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    from ..bootstrap import BootstrapChain
+    from . import gate0
+    show = _show(ctx)
+    payload = ctx.card.get("payload") or {}
+    try:
+        n = int(payload.get("n") or 5)
+    except (TypeError, ValueError):
+        n = 5
+    chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
+    log = chain.advance_ideas(brief=str(payload.get("brief") or ""), n=n)
+    st = gate0.status(show, "ideas")
+    if show.ideas_path.exists():
+        _attach_unique(ctx, show.ideas_path, "Gate 0 ideas archive")
+    ctx.store.update(ctx.card["id"], result={**st, "log": log})
+    return {**st, "log": log}
+
+
+@tool("gate0_bible", "Write the series bible from the approved concept.", long=True)
+def gate0_bible(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    from ..bootstrap import BootstrapChain
+    from . import gate0
+    show = _show(ctx)
+    st0 = show.bootstrap_state() or {}
+    if (st0.get("concept") or {}).get("status") != "approved":
+        raise ValueError("concept is not approved yet; pick a pitch first")
+    chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
+    log = chain.advance_bible()
+    st = gate0.status(show, "bible")
+    for rel in ("concept.json", "bible.yaml"):
+        p = show.dir / rel
+        if p.exists():
+            _attach_unique(ctx, p, rel)
+    ctx.store.update(ctx.card["id"], result={**st, "log": log})
+    return {**st, "log": log}
+
+
+@tool("gate0_characters", "Propose the cast from the approved bible.", long=True)
+def gate0_characters(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    from ..bootstrap import BootstrapChain
+    from . import gate0
+    show = _show(ctx)
+    st0 = show.bootstrap_state() or {}
+    if (st0.get("bible") or {}).get("status") != "approved":
+        raise ValueError("bible is not approved yet")
+    chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
+    log = chain.advance_characters()
+    st = gate0.status(show, "characters")
+    for cid in show.list_characters():
+        _attach_unique(ctx, show.characters_dir / f"{cid}.yaml",
+                       f"character {cid}")
+    ctx.store.update(ctx.card["id"], result={**st, "log": log})
+    return {**st, "log": log}
+
+
+@tool("gate0_scenes", "Build the scene registry from the approved bible.", long=True)
+def gate0_scenes(ctx: ToolContext, args: dict[str, Any]) -> Any:
+    from ..bootstrap import BootstrapChain
+    from . import gate0
+    show = _show(ctx)
+    st0 = show.bootstrap_state() or {}
+    if (st0.get("bible") or {}).get("status") != "approved":
+        raise ValueError("bible is not approved yet")
+    chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
+    log = chain.advance_scene_registry()
+    st = gate0.status(show, "scenes")
+    for sid in show.list_scenes():
+        _attach_unique(ctx, show.scenes_dir / f"{sid}.yaml", f"scene {sid}")
+    ctx.store.update(ctx.card["id"], result={**st, "log": log})
+    return {**st, "log": log}
+
+
 @tool("gate0_images", "Generate character and scene reference images (ComfyUI only).", long=True)
 def gate0_images(ctx: ToolContext, args: dict[str, Any]) -> Any:
     from ..bootstrap import BootstrapChain

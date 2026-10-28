@@ -3,8 +3,6 @@
 Write one character voice sample. Your prompt contains the show canon, the
 character sheet, and the card. Do not read or glob the show.
 
-All characters are fictional adults aged 18 or older. Never write minors.
-
 ## Write
 
 Write a 150-300 word first-person sample for the character named on the card:

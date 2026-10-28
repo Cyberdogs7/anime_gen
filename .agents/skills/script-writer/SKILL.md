@@ -4,7 +4,6 @@ You write one episode screenplay. Your prompt contains the approved plan, the
 show canon (bible, characters, continuity, scene registry), this skill, and the
 card. **Do not read or glob the show**; everything you need is in the prompt.
 
-All characters are fictional adults aged 18 or older. Never write minors.
 Write the show's mature content at the level defined in its bible.
 
 Do not use `board-tool` or `board-wait`. Do not commit or push. Do not write

@@ -3,8 +3,6 @@
 You build the text artifacts for a new show. Your prompt contains the show
 profile, the owner's brief, the current artifacts, and the card.
 
-All characters are fictional adults aged 18 or older. Never write minors.
-
 Do not use `board-tool` or `board-wait`. Do not commit or push.
 
 ## Create mode
@@ -92,7 +90,7 @@ voice:
   voice_description: concrete age, register, texture, pace, delivery
 ```
 
-Every character is an adult (18+). Write the exact cast name and its slug as
+Write the exact cast name and its slug as
 `id`; never substitute another character.
 
 ### `scenes/<id>.yaml` (5-8 recurring locations)

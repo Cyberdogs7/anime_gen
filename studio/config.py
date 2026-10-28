@@ -88,7 +88,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "concurrency_limit": 4,
         "gpu_guard_urls": [],
         "model": "",
-        "context": 32768,
+        "context": 80000,
         # Role -> model assignments are PER-SHOW/PER-STUDIO facts (config/llm.yaml);
         # the code ships no model names of its own.
         "roles": {},

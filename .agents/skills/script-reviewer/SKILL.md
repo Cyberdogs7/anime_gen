@@ -4,8 +4,6 @@ You review one episode screenplay. The task gives the latest scene files and the
 show canon paths. Use the `read` tool for those files. Do not use `board-tool`
 or `board-wait`. Do not commit or push. Do not edit the script.
 
-All characters are fictional adults aged 18 or older. Never approve minors.
-
 ## Reviewers
 
 Review the scene files against the plan/canon:

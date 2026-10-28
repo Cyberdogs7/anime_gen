@@ -710,7 +710,9 @@ function fileTableHTML(files, showId) {
 function allDataHTML(card, history, runs, files) {
   const runHtml = (runs || []).map(r => `<details class="data-run">
     <summary><code>${esc(r.id)}</code> · ${esc(r.role)} · ${esc(r.phase)} · ${esc(r.state)}</summary>
-    <pre class="json-block">${esc(JSON.stringify(r, null, 2))}</pre></details>`).join("");
+    <pre class="json-block">${esc(JSON.stringify(r, null, 2))}</pre>
+    <div class="row"><button class="btn sm" data-run-files="${esc(r.id)}">Load files (prompt · trace · logs)</button></div>
+    <div class="run-files"></div></details>`).join("");
   return `<details class="panel" style="margin-top:16px" id="all-data">
     <summary><h2>All data</h2><span class="muted" style="font-size:11px;margin-left:8px">raw card · runs · history · every file this stage produced</span></summary>
     <div class="data-section">
@@ -1027,6 +1029,30 @@ async function renderShow(el, id) {
   </div>`).join("");
   const cards = (d.cards || []).map(c => `<tr class="click" data-card="${esc(c.id)}">
     <td><code>${esc(c.id)}</code></td><td>${esc(cardTitle(c))}</td><td>${stateBadge(c.state)}</td><td>${esc(c.role)}</td></tr>`).join("");
+  const ideas = d.ideas || {}, pitches = ideas.pitches || [];
+  const ideasCards = (d.cards || []).filter(c => (c.kind || "") === "gate0_ideas");
+  const pickCard = ideasCards.find(c => c.state === "reviewing")
+    || ideasCards.find(c => c.state === "agent_verified") || null;
+  const activePitch = ideas.active || (d.concept || {}).picked_from || "";
+  const needPick = pitches.some(p => p.status === "proposed") && !pitches.some(p => p.status === "selected");
+  const pitchTile = (p, pickable) => `<div class="tile">
+      <h3>${pickable ? `<input type="checkbox" class="pick-box" value="${esc(p.id)}" style="margin-right:6px">` : ""}${esc(p.title || p.id)}
+        <span class="badge">${esc(p.status || "")}</span>${p.id === activePitch ? ' <span class="badge">active</span>' : ""}</h3>
+      ${p.show_id ? `<p style="font-size:11px;color:var(--muted)">id: <code>${esc(p.show_id)}</code></p>` : ""}
+      <p><em>${esc(p.logline || "")}</em></p>
+      <p>${esc(p.premise || "")}</p>
+      <p style="font-size:11px;color:var(--muted)">${esc((p.genre || []).join(" / "))} · ${esc((p.tone || []).join(", "))} · hook: ${esc(p.hook || "")}</p>
+      ${!pickable ? `<button class="btn sm" data-reselect="${esc(p.id)}" ${p.id === activePitch ? "disabled" : ""}>${p.id === activePitch ? "Active concept" : "Select"}</button>` : ""}
+    </div>`;
+  const ideasHtml = pitches.length ? `
+    ${needPick && pickCard ? `<p style="color:var(--muted);font-size:12px">Tick one or more pitches, then approve — the first pick becomes the concept. Everything stays archived and reselectable.</p>
+    <div class="grid">${pitches.filter(p => p.status === "proposed").map(p => pitchTile(p, true)).join("")}</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" data-ideas-approve="${esc(pickCard.id)}">Approve selection</button>
+      <button class="btn" data-regen="ideas">Re-pitch (adds 5 more)</button>
+    </div>` : ""}
+    <h3>Archive (${pitches.length})</h3>
+    <div class="grid">${pitches.map(p => pitchTile(p, false)).join("")}</div>` : '<div class="empty">No pitches yet — the ideas card has not run.</div>';
   const charRefs = (d.characters || []).flatMap(c =>
     (c.refs_images || []).map(x => artHTML(x.path, `${c.name} ? ${x.label}`))).join("");
   const sceneRefs = scenes.flatMap(s =>
@@ -1092,11 +1118,22 @@ async function renderShow(el, id) {
         <div class="panel" style="margin-top:16px"><h2>Episodes</h2>
           ${eps ? `<table><thead><tr><th>Episode</th><th>Synopsis</th><th>Artifacts</th><th>Cards</th><th></th></tr></thead><tbody>${eps}</tbody></table>` : '<div class="empty">No episodes yet. Queue one from the header.</div>'}
         </div>
+        <div class="panel" style="margin-top:16px"><h2>Show ideas</h2>${ideasHtml}</div>
         <div class="panel" style="margin-top:16px"><h2>Gate 0</h2>
           <div class="row" style="gap:8px;flex-wrap:wrap">
+            <span class="badge ${g.pending_by_domain?.ideas ? "warn" : "ok"}">ideas ${esc(g.pending_by_domain?.ideas?.step || "clear")}</span>
+            <span class="badge ${g.pending_by_domain?.bible ? "warn" : "ok"}">bible ${esc(g.pending_by_domain?.bible?.step || "clear")}</span>
+            <span class="badge ${g.pending_by_domain?.characters ? "warn" : "ok"}">characters ${esc(g.pending_by_domain?.characters?.char || g.pending_by_domain?.characters?.step || "clear")}</span>
+            <span class="badge ${g.pending_by_domain?.scenes ? "warn" : "ok"}">scenes ${esc(g.pending_by_domain?.scenes?.step || "clear")}</span>
             <span class="badge ${g.pending_by_domain?.plan ? "warn" : "ok"}">plan ${esc(g.pending_by_domain?.plan?.step || "clear")}</span>
             <span class="badge ${g.pending_by_domain?.images ? "warn" : "ok"}">images ${esc(g.pending_by_domain?.images?.char || "clear")}</span>
             <span class="badge ${g.pending_by_domain?.voices ? "warn" : "ok"}">voices ${esc(g.pending_by_domain?.voices?.char || "clear")}</span>
+          </div>
+          <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn sm" data-regen="ideas">Re-pitch</button>
+            <button class="btn sm" data-regen="bible">Rewrite bible</button>
+            <button class="btn sm" data-regen="characters">Re-propose cast</button>
+            <button class="btn sm" data-regen="scenes">Rebuild scenes</button>
           </div>
           <h3>Characters</h3>
           ${chars ? `<table><thead><tr><th>Name</th><th>Proposal</th><th>Refs</th><th>Voice</th><th>Actions</th></tr></thead><tbody>${chars}</tbody></table>` : '<div class="empty">No characters.</div>'}
@@ -1131,6 +1168,24 @@ async function renderShow(el, id) {
   el.querySelector("[data-back-shows]").addEventListener("click", () => location.hash = "#/shows");
   el.querySelector("[data-queue-ep]").addEventListener("click", () => queueEpisodeModal(id));
   el.querySelectorAll("[data-regen]").forEach(b => b.addEventListener("click", () => regenerate(id, b.dataset.regen, b.dataset.char || "")));
+  el.querySelector("[data-ideas-approve]")?.addEventListener("click", async (e) => {
+    const picks = [...el.querySelectorAll(".pick-box:checked")].map(b => b.value);
+    if (!picks.length) { toast("Select at least one pitch", true); return; }
+    try {
+      const out = await post("/api/gate0/decide", {card_id: e.target.dataset.ideasApprove, action: "approve", picks});
+      toast(`Concept approved from ${picks[0]}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
+      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
+      else load();
+    } catch (err) { toast(err.message, true); }
+  });
+  el.querySelectorAll("[data-reselect]").forEach(b => b.addEventListener("click", async () => {
+    try {
+      const out = await post("/api/show/reselect", {show_id: id, pitch_id: b.dataset.reselect});
+      toast(`Reselected ${b.dataset.reselect}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
+      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
+      else load();
+    } catch (err) { toast(err.message, true); }
+  }));
   el.querySelectorAll("[data-edit-file]").forEach(b => b.addEventListener("click", () => editFile(b.dataset.show, b.dataset.editFile)));
   el.querySelectorAll("[data-refs-char]").forEach(b => b.addEventListener("click", () => {
     const c = (d.characters || []).find(x => (x.name || "") === b.dataset.refsChar) || {};
@@ -1347,17 +1402,17 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal()
 
 function newShowModal() {
   openModal(`<h2>New show</h2><div class="body">
-    <label>Show id<input id="ns-name" placeholder="rainline"></label>
+    <label>Show id (optional — the picked pitch supplies it)<input id="ns-name" placeholder="leave blank for pitch-picked id"></label>
     <label>Brief<textarea id="ns-brief" placeholder="A tense one-location cyberpunk chase..."></textarea></label>
-    <p style="color:var(--muted);font-size:12px">Creates the skeleton and queues Gate 0 plan, images and voices.</p>
+    <p style="color:var(--muted);font-size:12px">Creates the skeleton and queues the Gate 0 idea → bible → cast → scenes chain. Leave the id blank and the selected pitch names the show.</p>
   </div><div class="row"><button class="btn" id="ns-cancel">Cancel</button><button class="btn primary" id="ns-create">Create</button></div>`);
   $("#ns-cancel").addEventListener("click", closeModal);
   $("#ns-create").addEventListener("click", async () => {
     try {
       const name = $("#ns-name").value.trim();
-      if (!name) return toast("Name is required", true);
-      await post("/api/show", {name, brief: $("#ns-brief").value});
-      closeModal(); toast("Show queued: " + name); render();
+      const out = await post("/api/show", {name, brief: $("#ns-brief").value});
+      closeModal(); toast("Show queued: " + (out.show_id || name));
+      location.hash = "#/show/" + encodeURIComponent(out.show_id || name);
     } catch (e) { toast(e.message, true); }
   });
 }
@@ -1380,13 +1435,21 @@ async function queueEpisodeModal(showId = "", episode = 1) {
   });
 }
 
+function runFilesHTML(d) {
+  let trace = String(d.trace || "");
+  if (trace) {
+    try { trace = JSON.stringify(JSON.parse(trace), null, 2); } catch (_) {}
+  }
+  const sec = (t, v) => `<h3 style="font-size:11px;letter-spacing:.1em;color:var(--muted)">${t}</h3><pre style="max-height:40vh;overflow:auto">${esc(v || "—")}</pre>`;
+  return sec("TRACE", trace) + sec("STDOUT", d.stdout) + sec("STDERR", d.stderr);
+}
+
 async function runLogModal(id) {
   try {
     const d = await api("/api/run/log?id=" + encodeURIComponent(id));
     openModal(`<h2>Run <code>${esc(id)}</code></h2><div class="body">
       <h3 style="font-size:11px;letter-spacing:.1em;color:var(--muted)">PROMPT</h3><pre>${esc(d.prompt || "—")}</pre>
-      <h3 style="font-size:11px;letter-spacing:.1em;color:var(--muted)">STDOUT</h3><pre>${esc(d.stdout || "—")}</pre>
-      <h3 style="font-size:11px;letter-spacing:.1em;color:var(--muted)">STDERR</h3><pre>${esc(d.stderr || "—")}</pre>
+      ${runFilesHTML(d)}
     </div><div class="row"><button class="btn" id="rl-close">Close</button></div>`);
     $("#rl-close").addEventListener("click", closeModal);
   } catch (e) { toast(e.message, true); }
@@ -1500,6 +1563,20 @@ document.addEventListener("click", async e => {
     e.preventDefault();
     e.stopPropagation();
     viewFileModal(viewFile.dataset.show, viewFile.dataset.viewFile);
+    return;
+  }
+  const runFiles = e.target.closest("[data-run-files]");
+  if (runFiles) {
+    e.preventDefault();
+    e.stopPropagation();
+    const box = runFiles.closest("details")?.querySelector(".run-files");
+    if (!box || box.dataset.loaded) return;
+    box.innerHTML = '<div class="empty">Loading run files…</div>';
+    try {
+      const d = await api("/api/run/log?id=" + encodeURIComponent(runFiles.dataset.runFiles));
+      box.innerHTML = runFilesHTML(d);
+      box.dataset.loaded = "1";
+    } catch (err) { box.innerHTML = `<div class="empty">${esc(err.message)}</div>`; }
     return;
   }
   const act = e.target.closest("[data-act]");

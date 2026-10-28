@@ -3,8 +3,6 @@
 Write the recurring-object image prompts for one episode. Your prompt contains
 the plan, show canon, this skill, and the card. Do not read or glob the show.
 
-All characters are fictional adults aged 18 or older. Never write minors.
-
 ## Write
 
 The plan lists the episode's narratively important objects. For each object,

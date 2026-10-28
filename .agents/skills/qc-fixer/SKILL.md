@@ -4,8 +4,6 @@ Fix the shots that failed QC in one episode. Your prompt contains the card's
 failure list, the scene-file paths, and the skill. Use the `read` tool for those
 files. Do not use `board-tool` or `board-wait`. Do not commit or push.
 
-All characters are fictional adults aged 18 or older. Never write minors.
-
 ## Fix
 
 1. Read the scene file for each failed shot id.

@@ -14,10 +14,11 @@ gpu_guard_urls:
   - "http://127.0.0.1:8188"
   - "http://127.0.0.1:8189"
 model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-# The 27B is 14.4 GB on a 16 GB card. LM Studio's per-model default (82k across
-# 4 slots) left ~0.5 GB free and generation fell to ~4 tokens/sec. One slot at a
-# working context is what actually makes outline steps finish in minutes.
-context: 32768
+# The 27B already offloads to CPU at 32k. A larger context is a little slower,
+# but runs complete instead of filling a small context and then crashing.
+# Keep one slot; the loader (studio/gpu_manager.py preload_model) enforces
+# this value on every `lms load`, overriding LM Studio's per-model default.
+context: 80000
 parallel: 1
 # Safety net for a non-streaming call that never returns; not a speed target.
 request_timeout_s: 3600

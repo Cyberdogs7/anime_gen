@@ -12,7 +12,7 @@ from .clients import LMStudioClient
 from .config import get_config
 
 
-def propose_concepts(guidance: str = "", n: int = 3, cfg=None, llm=None) -> list[dict[str, Any]]:
+def propose_concepts(guidance: str = "", n: int = 5, cfg=None, llm=None) -> list[dict[str, Any]]:
     cfg = cfg or get_config()
     # No wall-clock limit on generation (the client bounds only the connection,
     # not the response): a 27B can legitimately take minutes, and a read timeout

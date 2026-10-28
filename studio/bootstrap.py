@@ -429,6 +429,109 @@ class BootstrapChain:
         self.show.set_bootstrap_state(st)
         return log_
 
+    # ---- single-stage Gate-0 passes (one board card each) ----
+
+    def advance_ideas(self, brief: str = "", n: int = 5) -> list[str]:
+        """Pitch N distinct executions of the brief and archive them all.
+
+        Writes ``ideas.json`` (every pitch kept with status ``proposed``).
+        Picking pitches happens via the board (approval = concept).
+        """
+        from .proposals import propose_concepts
+        with _show_lock(self.show.show_id):
+            log_: list[str] = []
+            pitches = propose_concepts(brief, n=n, cfg=self.cfg, llm=self.llm)
+            import time as _time
+            # Append-only: re-pitches add to the archive, never erase picks.
+            archive = self.show.read_ideas() or {}
+            existing = archive.get("pitches") or []
+            taken = {str(p.get("show_id") or "") for p in existing if p.get("show_id")}
+            base = len(existing)
+            new_pitches = []
+            for i, p in enumerate(pitches or []):
+                # The pitch carries its own show id: prefer a usable
+                # model-provided slug, else derive one from its title, deduped.
+                slug = _pitch_slug(str((p or {}).get("show_id") or ""))
+                if not slug:
+                    slug = _pitch_slug(str((p or {}).get("title") or "")) or "show"
+                root = slug[:40].strip("-") or "show"
+                slug, k = root, 2
+                while slug in taken:
+                    slug = f"{root}-{k}"
+                    k += 1
+                taken.add(slug)
+                entry = {"id": f"p{base + i + 1}", **(p or {}),
+                         "show_id": slug, "status": "proposed",
+                         "selected_at": None}
+                new_pitches.append(entry)
+            existing.extend(new_pitches)
+            archive.update({
+                "brief": brief or archive.get("brief", ""),
+                "n": len(existing),
+                "created": archive.get("created") or int(_time.time()),
+                "updated": int(_time.time()),
+                "pitches": existing,
+            })
+            self.show.write_ideas(archive)
+            log_.append(f"ideas: {len(pitches or [])} new pitches "
+                        f"({len(existing)} archived) -> pending pick")
+            self.show.set_bootstrap_state(self.show.bootstrap_state())
+            return log_
+
+    def advance_bible(self) -> list[str]:
+        """Generate only the bible from the approved concept (lands pending)."""
+        with _show_lock(self.show.show_id):
+            log_: list[str] = []
+            st = self.show.bootstrap_state()
+            bible = st.setdefault("bible", {"status": ""})
+            if bible.get("status") != "approved" and not bible.get("status"):
+                self.generate_bible()
+                bible["status"] = "pending"
+                self._emit(new_event(BIBLE_PENDING, show_id=self.show.show_id))
+                log_.append("bible: generated -> pending")
+                self.show.set_bootstrap_state(st)
+            return log_
+
+    def advance_characters(self) -> list[str]:
+        """Generate only the character proposals from the approved bible."""
+        with _show_lock(self.show.show_id):
+            log_: list[str] = []
+            st = self.show.bootstrap_state()
+            roster = [c.get("name") for c in self.show.read_bible().get("cast", [])]
+            roster = [n for n in roster if n and looks_like_character_name(n)]
+            chars = st.setdefault("characters", [])
+            for name in roster:
+                entry = next((c for c in chars if c.get("name") == name), None)
+                if entry is None:
+                    entry = {"name": name, "proposal": "", "refs": "", "voice": ""}
+                    chars.append(entry)
+                if entry.get("proposal") != "approved" and not entry.get("proposal"):
+                    existing = next((cid for cid in self.show.list_characters()
+                                     if self.show.read_character(cid).get("name") == name),
+                                    None)
+                    if not existing:
+                        self.generate_character_proposal(name)
+                    entry["proposal"] = "pending"
+                    self._emit(new_event(CHAR_PROPOSAL_PENDING, show_id=self.show.show_id,
+                                         payload={"char": _slug(name)}))
+                    log_.append(f"character {name}: proposal -> pending")
+                    self.show.set_bootstrap_state(st)
+            return log_
+
+    def advance_scene_registry(self) -> list[str]:
+        """Generate only the scene registry (lands pending)."""
+        with _show_lock(self.show.show_id):
+            log_: list[str] = []
+            st = self.show.bootstrap_state()
+            scenes = st.setdefault("scenes", {"status": ""})
+            if scenes.get("status") != "approved" and not scenes.get("status"):
+                self.generate_scenes()
+                scenes["status"] = "pending"
+                self._emit(new_event(SCENE_REGISTRY_PENDING, show_id=self.show.show_id))
+                log_.append("scenes: generated -> pending")
+                self.show.set_bootstrap_state(st)
+            return log_
+
     def advance_images(self) -> list[str]:
         """Generate character and scene reference images only (ComfyUI)."""
         with _show_lock(self.show.show_id):
@@ -701,3 +804,8 @@ class BootstrapChain:
 def _slug(text: str) -> str:
     import re
     return re.sub(r"[^a-z0-9-]+", "-", (text or "").strip().lower()).strip("-")
+
+
+def _pitch_slug(text: str) -> str:
+    """Normalize a pitch's proposed show id (or title) to a folder-safe slug."""
+    return _slug(text or "")[:40].strip("-")

@@ -158,6 +158,18 @@ class Show:
         fsutil.write_json(self.concept_path, data)
         return self.concept_path
 
+    # ---- show ideas (Gate 0 archive; every pitch kept, reselectable) ----
+    @property
+    def ideas_path(self) -> Path:
+        return self.dir / "ideas.json"
+
+    def read_ideas(self) -> dict[str, Any]:
+        return fsutil.read_json(self.ideas_path, {})
+
+    def write_ideas(self, data: dict[str, Any]) -> Path:
+        fsutil.write_json(self.ideas_path, data)
+        return self.ideas_path
+
     # ---- characters ----
     def list_characters(self) -> list[str]:
         if not self.characters_dir.exists():

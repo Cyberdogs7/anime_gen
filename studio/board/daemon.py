@@ -491,20 +491,22 @@ class BoardDaemon:
             if result.verdict == "pass":
                 self.store.advance(card["id"], "accepted", run_id, result.notes)
             else:
-                if result.notes:
-                    self.store.note(card["id"], run_id, result.notes)
+                _reason = str(result.notes or result.error or "").strip()
+                if _reason:
+                    self.store.note(card["id"], run_id, _reason)
                 self.store.update(card["id"],
                                   attempts=int(current.get("attempts") or 0) + 1)
-                self.store.advance(card["id"], "retake", run_id, result.notes)
+                self.store.advance(card["id"], "retake", run_id, _reason)
             return
         if result.status == "verified":
             self.store.advance(card["id"], "agent_verified", run_id, result.summary)
         elif result.status == "retake":
-            if result.notes:
-                self.store.note(card["id"], run_id, result.notes)
+            _reason = str(result.notes or result.error or "").strip()
+            if _reason:
+                self.store.note(card["id"], run_id, _reason)
             self.store.update(card["id"],
                               attempts=int(current.get("attempts") or 0) + 1)
-            self.store.advance(card["id"], "retake", run_id, result.notes)
+            self.store.advance(card["id"], "retake", run_id, _reason)
         else:
             self.store.advance(card["id"], "blocked", run_id,
                                result.error or result.notes)

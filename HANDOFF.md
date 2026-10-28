@@ -165,8 +165,8 @@ Data under `shows/<id>/`: `bible.yaml`, `concept.json`, `bootstrap.json`, `story
 ## 7. Useful commands
 
 ```
-# dashboard
-.venv\Scripts\python.exe studio.py dashboard --port 8125
+# board (API + daemon)
+.venv\Scripts\python.exe studio.py board --port 8130
 
 # tests
 .venv\Scripts\python.exe -m pytest tests -q
