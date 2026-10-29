@@ -52,6 +52,64 @@ def _port_open(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+def _comfy_pids_on_port(port: int) -> list[int]:
+    """PIDs holding ``port`` listeners plus ComfyUI workers naming the port.
+
+    netstat finds listeners; a cmdline sweep catches mid-startup or detached
+    orphans that aren't listening yet. Never returns this process.
+    """
+    found: list[int] = []
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                             text=True, timeout=30,
+                             encoding="utf-8", errors="replace").stdout
+    except Exception:
+        out = ""
+    for line in (out or "").splitlines():
+        if f":{port} " in line and "LISTENING" in line.upper():
+            try:
+                found.append(int(line.strip().split()[-1]))
+            except ValueError:
+                pass
+    try:
+        ps = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }"],
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace").stdout
+    except Exception:
+        ps = ""
+    for line in (ps or "").splitlines():
+        if "ComfyUI/main.py" in line and str(port) in line:
+            try:
+                found.append(int(line.split("|", 1)[0]))
+            except ValueError:
+                pass
+    me = os.getpid()
+    return sorted({p for p in found if p and p != me})
+
+
+def kill_comfy_on_port(port: int, tag: str = "") -> list[int]:
+    """Taskkill every ComfyUI holder of ``port``; return PIDs signalled.
+
+    The backstop for stop paths: catches double-spawns, pre-restart orphans
+    and mid-startup workers that a single tracked-handle kill misses.
+    """
+    killed: list[int] = []
+    for pid in _comfy_pids_on_port(port):
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=30)
+            killed.append(pid)
+        except Exception:
+            pass
+    if killed:
+        log.info("[gpu] %s swept ComfyUI on :%s (pids %s)",
+                 tag or "stop", port, killed)
+    return killed
+
+
 def _run(cmd: list[str], timeout: float = 20) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
@@ -99,11 +157,11 @@ def _loaded_models(lms: str) -> list[dict]:
 def preload_model(cfg, model: str, strict_context: bool = True) -> bool:
     """Make ``model`` resident, keeping any pinned agent model in place.
 
-    ``llm.context`` / ``llm.parallel`` (when set) override LM Studio's per-model
-    load config. A model pinned by a running agent (``hold_llm``) is never
-    evicted: the agent still needs it to emit its next tool command while a long
-    tool runs. ``strict_context=False`` keeps a pinned agent model even if its
-    opencode-loaded context differs from the config.
+    LM Studio's remembered per-model settings (context, parallel slots, GPU
+    offload) are authoritative: the loader never passes ``-c``/``--parallel``
+    and never reloads an already-resident model to enforce config values.
+    A model pinned by a running agent (``hold_llm``) is never evicted: the
+    agent still needs it to emit its next tool command while a long tool runs.
     """
     if not model:
         return False
@@ -115,58 +173,29 @@ def preload_model(cfg, model: str, strict_context: bool = True) -> bool:
                  timeout=30)
             time.sleep(2)
         rows = _loaded_models(lms)
-        context = int(cfg.get("llm", "context", 0) or 0)
-        parallel = int(cfg.get("llm", "parallel", 0) or 0)
-
-        def _num(value) -> int:
-            try:
-                return int(value or 0)
-            except (TypeError, ValueError):
-                return 0
 
         current = next((r for r in rows
                         if r.get("identifier") == model or r.get("modelKey") == model),
                        None)
         if current:
-            same_ctx = (not context
-                        or _num(current.get("contextLength")) == context)
-            same_par = (not parallel
-                        or _num(current.get("parallel")) == parallel)
-            if (same_ctx and same_par) or (not strict_context
-                                            and model in _PINNED_MODELS):
-                log.info("[gpu] %s already loaded (ctx=%s, parallel=%s)",
-                         model, current.get("contextLength"), current.get("parallel"))
-                return True
-            log.info("[gpu] reloading %s (want ctx=%s parallel=%s; have ctx=%s "
-                     "parallel=%s)", model, context, parallel,
-                     current.get("contextLength"), current.get("parallel"))
-            for row in rows:
-                if row.get("type") != "llm":
-                    continue
-                ident = row.get("identifier") or row.get("modelKey")
-                if ident in _PINNED_MODELS and ident != model:
-                    log.info("[gpu] keeping pinned %s", ident)
-                    continue
-                _run([lms, "unload", ident], timeout=30)
-            rows = _loaded_models(lms)
+            log.info("[gpu] %s already loaded (ctx=%s, parallel=%s; "
+                     "using LM Studio's remembered settings)",
+                     model, current.get("contextLength"),
+                     current.get("parallel"))
+            return True
         for row in rows:
-            if row.get("type") == "llm":
-                ident = row.get("identifier") or row.get("modelKey")
-                if ident in _PINNED_MODELS and ident != model:
-                    log.info("[gpu] keeping pinned %s", ident)
-                    continue
-                log.info("[gpu] unloading %s before %s", ident, model)
-                _run([lms, "unload", ident], timeout=30)
-        cmd = [lms, "load", model]
-        # LM Studio's per-model 82k/4-slot config leaves ~0.5 GB free on a 16 GB
-        # card and drops the writer to a few tokens/sec. Pin one generation and a
-        # working context instead so a 4k-token answer takes minutes, not hours.
-        if context > 0:
-            cmd += ["-c", str(context)]
-        if parallel > 0:
-            cmd += ["--parallel", str(parallel)]
-        cmd.append("-y")
-        log.info("[gpu] loading %s (ctx=%s parallel=%s)", model, context, parallel)
+            if row.get("type") != "llm":
+                continue
+            ident = row.get("identifier") or row.get("modelKey")
+            if ident in _PINNED_MODELS and ident != model:
+                log.info("[gpu] keeping pinned %s", ident)
+                continue
+            log.info("[gpu] unloading %s before %s", ident, model)
+            _run([lms, "unload", ident], timeout=30)
+        # No -c / --parallel flags: LM Studio applies the model's remembered
+        # settings (context length, concurrent slots, GPU offload).
+        cmd = [lms, "load", model, "-y"]
+        log.info("[gpu] loading %s (LM Studio remembered settings)", model)
         res = _run(cmd, timeout=900)
         if res.returncode != 0:
             log.warning("[gpu] load failed for %s: %s", model,
@@ -370,12 +399,12 @@ class GPUManager:
                     "(free=%s MiB, target=%d); proceeding anyway",
                     self._gpu_free_mib(), target)
 
-    # ---- LM Studio VLM (Qwen3-VL frame-based visual QC) ----
+    # ---- LM Studio VLM (frame-based visual QC) ----
 
     def _vlm_model(self) -> str:
         """The LM Studio vision model id for the frame-sampling vcheck path."""
         return (self.cfg.get("qc", "vcheck", {}).get("model")
-                or "qwen/qwen3-vl-8b")
+                or "gemma4-12b-qat-uncensored-hauhaucs-balanced")
 
     def _load_vlm(self) -> None:
         """Load the vcheck vision model (Qwen3-VL) into LM Studio under the lock.
@@ -398,16 +427,13 @@ class GPUManager:
         if not _port_open(port):
             _run([self.cfg.lms_cli(), "server", "start", "--port", str(port), "--cors"])
             time.sleep(4)
-        ctx = int(self.cfg.get("qc", "vcheck", {}).get("context")
-                  or self.cfg.get("env", "lmstudio", {}).get("context", 32768))
-        ratio = self.cfg.get("qc", "vcheck", {}).get("gpu_ratio",
-                       self.cfg.get("env", "lmstudio", {}).get("gpu_ratio", "max"))
-        gpu = "max" if ratio in (None, "", "max", "auto") else str(ratio)
         _run([self.cfg.lms_cli(), "unload", "--all"])
         time.sleep(1)
-        log.info("[gpu] loading VLM %s for visual QC", model)
-        subprocess.Popen([self.cfg.lms_cli(), "load", model, "--gpu", gpu,
-                          "-c", str(ctx), "--parallel", "1", "-y"])
+        # No --gpu/-c/--parallel flags: LM Studio applies the model's
+        # remembered settings (context length, concurrent slots, GPU offload).
+        log.info("[gpu] loading VLM %s for visual QC (LM Studio remembered settings)",
+                 model)
+        subprocess.Popen([self.cfg.lms_cli(), "load", model, "-y"])
         # Wait for the API to serve the vision model (it appears in `lms ps`
         # once resident; a competing unload could otherwise publish an empty
         # model list while the load is still racing in).
@@ -594,17 +620,18 @@ class GPUManager:
             # as a child, so a bare terminate() leaves ComfyUI alive on the GPU.
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                            capture_output=True, timeout=30)
-        # With manage_lifecycle we own the instance: also stop one we didn't
-        # start (e.g. a manual launch), so release() really frees the GPU.
-        if bool(self.cfg.get("comfy", "manage_lifecycle", True)) and _port_open(port):
-            out = subprocess.run(["netstat", "-ano"], capture_output=True,
-                                  text=True, timeout=30).stdout
-            for line in out.splitlines():
-                if f":{port} " in line and "LISTENING" in line.upper():
-                    pid = line.strip().split()[-1]
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
-                                   capture_output=True, timeout=30)
+        # With manage_lifecycle we own the instance: also stop ones we didn't
+        # start (a manual launch, a pre-restart orphan, a double-spawn twin),
+        # so release() really frees the GPU. Kill EVERY holder, not just the
+        # first netstat hit — stopping after one is how duplicates accumulate.
+        if bool(self.cfg.get("comfy", "manage_lifecycle", True)):
+            kill_comfy_on_port(port, tag="unload")
+            for _ in range(5):
+                if not _port_open(port):
                     break
+                time.sleep(2)
+            if _port_open(port):
+                log.warning("[gpu] ComfyUI port :%s still open after sweep", port)
         time.sleep(1)
         # Wait for VRAM to actually be released (Comfy's VRAM lingers after taskkill)
         self._wait_vram_released(timeout=30, min_free_mib=4096)

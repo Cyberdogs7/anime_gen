@@ -156,6 +156,18 @@ def _episode_cards(show: Show, episode: int) -> list[dict[str, Any]]:
     render_any = any(_has_shot_file(video, sid) for sid in shot_ids)
 
     cards = episode_cards(show.show_id, episode)
+    plan_sids = [str(s.get("id") or "") for s in (plan.get("scenes") or [])
+                 if isinstance(s, dict) and s.get("id")]
+    legacy_approved = bool(script) and review.get("passed") is True
+
+    def _fragments_done(frag: str) -> bool:
+        if not plan_sids:
+            return False
+        return all((ep_dir / "passes" / f"{sid}.{frag}.json").exists()
+                   for sid in plan_sids)
+
+    pass_frags = {"locations", "cast", "outfits", "narrative",
+                  "dialogue", "shots", "camera", "action", "sound"}
     for card in cards:
         kind = str(card.get("kind") or "")
         state = "planned"
@@ -165,19 +177,18 @@ def _episode_cards(show: Show, episode: int) -> list[dict[str, Any]]:
                 state = "accepted"
             elif plan_any:
                 state, note = "blocked", "outline exists but is not approved"
-        elif kind == "script":
-            if script:
-                if review.get("passed") is True:
-                    state = "accepted"
-                elif review.get("passed") is False:
-                    state, note = "blocked", "script review failed"
-                else:
-                    state = "agent_verified"
+        elif kind in pass_frags:
+            if _fragments_done(kind) or legacy_approved:
+                state = "accepted"
+        elif kind == "h3prompts":
+            if legacy_approved or any(ep_dir.glob("script.r*.json")):
+                state = "accepted"
         elif kind == "objects":
             objects = plan.get("objects") or []
-            if plan_done and (not objects
-                              or (ep_dir / "object-prompts.json").exists()
-                              or any((ep_dir / "objects").glob("*"))):
+            if (_fragments_done("objects") or legacy_approved
+                    or (plan_done and (not objects
+                                        or (ep_dir / "object-prompts.json").exists()
+                                        or any((ep_dir / "objects").glob("*"))))):
                 state = "accepted"
         elif kind == "keyframes":
             if keyframes_done:

@@ -89,6 +89,37 @@ class FakeAgent:
         return ""
 
 
+def test_refresh_scene_rewrites_brief_from_notes(tmp_path):
+    from studio.bootstrap import BootstrapChain
+    from studio.config import Config
+    from studio.show import Show
+    root = tmp_path / "shows" / "demo"
+    (root / "scenes").mkdir(parents=True)
+    (root / "scenes" / "keen.yaml").write_text(
+        "id: keen\nname: Keen\nlocation: arena\n"
+        "description: Floating gears hall\n"
+        "setting_prompt: Floating gears hall, neon\n", encoding="utf-8")
+    (root / "characters").mkdir(exist_ok=True)
+
+    class FakeLLM:
+        def chat_json(self, messages, **kwargs):
+            assert "Director's revision notes" in messages[-1]["content"]
+            return {"id": "keen", "name": "Keen",
+                    "description": "A grounded workshop",
+                    "setting_prompt": "Realistic workshop, wooden benches",
+                    "location": "workshop", "time_of_day": "day"}
+
+    cfg = Config(tmp_path)
+    show = Show("demo", root=root)
+    chain = BootstrapChain(show, cfg=cfg, llm=FakeLLM())
+    out = chain.refresh_scene("keen", "more realistic, no floating things")
+    assert out["description"] == "A grounded workshop"
+    reread = show.read_scene("keen") if hasattr(show, "read_scene") else None
+    import yaml as _yaml
+    on_disk = _yaml.safe_load((root / "scenes" / "keen.yaml").read_text(encoding="utf-8"))
+    assert on_disk["setting_prompt"].startswith("Realistic workshop")
+
+
 def test_human_card_routes_to_reviewing_and_is_not_launched(tmp_path, monkeypatch):
     from studio.board import tools as tools_mod
     from studio.board.tools import Tool

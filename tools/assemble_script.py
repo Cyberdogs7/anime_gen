@@ -1,9 +1,9 @@
 """Assemble an agent-written screenplay from per-scene files.
 
-Deterministic only: no LLM calls. The script-writer agent writes
-``runs/EPxx/script_scenes/<scene>.json``; this helper validates them, applies the
-existing script normalizers, writes the next ``script.rN.json``, and attaches it
-to the card.
+Deterministic only: no LLM calls. Fragment passes write
+``runs/EPxx/script_scenes/<scene>.json`` (via merge_passes.py); this helper
+validates them, applies the existing script normalizers, writes the next
+``script.rN.json``, and attaches it to the card.
 """
 from __future__ import annotations
 

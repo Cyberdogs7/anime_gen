@@ -1,11 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["C:\\Users\\Chad\\PycharmProjects\\anime\\board\\AGENTS.md"],
-  "small_model": "lm_studio_local/qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp",
+  "small_model": "lm_studio_local/gemma4-12b-qat-uncensored-hauhaucs-balanced",
   "provider": {
     "lm_studio_local": {
       "models": {
-        "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp": {
+        "qwen3.8-27b-heretic-abliterated-uncensored": {
+          "limit": { "context": 80000, "output": 65536 }
+        },
+        "gemma4-12b-qat-uncensored-hauhaucs-balanced": {
+          "name": "Gemma 4 12B QAT (HauhauCS uncensored)",
           "limit": { "context": 80000, "output": 65536 }
         }
       }
@@ -100,6 +104,8 @@
           "python* *apply_voice_sample.py*": "allow",
           "python* *apply_object_prompts.py*": "allow",
           "python* *apply_show_bootstrap.py*": "allow",
+          "python* *check_show_ideas.py*": "allow",
+          "python* *draft_show_ideas.py*": "allow",
           "python* -c *": "allow",
           "python* *studio.py* board-finish *": "allow",
           "git push*": "deny",
@@ -172,55 +178,7 @@
         "skill": false
       }
     },
-    "studio-script-reviewer": {
-      "mode": "primary",
-      "description": "Studio screenplay reviewer; reads scene files and canon",
-      "prompt": "You are a studio script reviewer. The skill, scene file paths, and canon paths are in the user message. Read those files with the read tool. Do not use board-tool or board-wait. Write ONLY the review JSON named in the task, then run the board-finish verdict command.",
-      "permission": {
-        "read": "allow",
-        "edit": "allow",
-        "write": "allow",
-        "patch": "deny",
-        "grep": "allow",
-        "glob": "allow",
-        "list": "allow",
-        "external_directory": {
-          "*": "deny",
-          "C:\\Users\\Chad\\PycharmProjects\\anime\\shows\\*": "allow"
-        },
-        "webfetch": "deny",
-        "websearch": "deny",
-        "task": "deny",
-        "question": "deny",
-        "todowrite": "deny",
-        "skill": "deny",
-        "bash": {
-          "*": "deny",
-          "python* -c *": "allow",
-          "python* *studio.py* board-finish *": "allow",
-          "git push*": "deny",
-          "git reset*": "deny",
-          "git checkout*": "deny",
-          "git clean*": "deny",
-          "git commit*": "deny",
-          "rm *": "deny",
-          "rmdir *": "deny",
-          "del *": "deny",
-          "Remove-Item *": "deny"
-        }
-      },
-      "tools": {
-        "read": true,
-        "write": true,
-        "edit": false,
-        "bash": true,
-        "grep": false,
-        "glob": false,
-        "list": false,
-        "todowrite": false,
-        "skill": false
-      }
-    },
+
     "studio-fixer": {
       "mode": "primary",
       "description": "Studio QC fixer; edits failed shots and requeues renders",

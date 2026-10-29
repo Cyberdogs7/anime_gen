@@ -1,16 +1,16 @@
 # Skill: object-prompts
 
-Write the recurring-object image prompts for one episode. Your prompt contains
-the plan, show canon, this skill, and the card. Do not read or glob the show.
+You describe one episode's recurring objects, scene by scene. Your prompt
+contains the plan, this skill, and the card. You may read files under
+`EPISODE_DIR/passes/` with the read tool (location + cast fragments, for
+scale and handling); do not read or glob the rest of the show.
 
-## Write
+Do not use `board-tool` or `board-wait`. Do not commit or push.
 
-The plan lists the episode's narratively important objects. For each object,
-write one concrete visual description: shape, materials, scale, markings,
-wear/damage, and the show's style. Describe the object itself, not a scene or a
-character.
+## Write one fragment per plan scene
 
-Write `EPISODE_DIR/object-prompts.json` with the write tool:
+For each plan scene, in plan order, write
+`EPISODE_DIR/passes/<scene id>.objects.json` with the write tool:
 
 ```json
 {
@@ -20,20 +20,33 @@ Write `EPISODE_DIR/object-prompts.json` with the write tool:
 }
 ```
 
-Include every object in the plan; omit scenery and characters.
+One concern only: props that matter. Describe the object's shape, materials,
+scale, markings and wear — not a scene, not a character. Omit scenery and
+characters. A scene with no important props gets an empty list.
 
-## Apply
+Rules:
 
-Run the helper command printed in your Task section:
+- Names match the plan's object names where they overlap.
+- One paragraph of concrete visual detail per object.
+
+Write missing scene files first. If the card has notes, rewrite every
+affected scene; leave unaffected existing files alone.
+
+## Validate
+
+Run the exact helper command printed in your Task section:
 
 ```
-python "<absolute>/tools/apply_object_prompts.py" --card <card id>
+python "<absolute>/tools/check_pass.py" --card <card id> --pass objects
 ```
 
-It builds and saves the image prompts for the keyframe worker. If it reports a
-missing object, add it and run it again.
+It validates every fragment. Fix flagged files and re-run.
+
+The h3 card merges the fragments into the episode object prompts; do not
+write `object-prompts.json` yourself.
 
 ## Finish
 
 Use the exact finish command printed in your prompt (absolute `studio.py` path).
-If the objects cannot be written, finish `--status blocked` with the reason.
+
+If you cannot complete the card, finish with `--status blocked` and state why.

@@ -132,6 +132,17 @@ def mark_rejected(show, asset: dict[str, Any], notes: str = "") -> None:
                      "rejected_notes": notes or ""})
         scenes.save_refs(show, sid, data)
         return
+    if asset.get("type") == "voice":
+        # Voice approvals live on the roster entry, not in refs.json: without
+        # this branch a voice retake decision silently rewrote image flags and
+        # the voice flag stayed stale forever.
+        state = show.bootstrap_state()
+        entry = _char_entry(state, str(asset.get("id") or ""))
+        if entry is not None:
+            entry["voice"] = "rejected"
+            entry["voice_notes"] = notes or ""
+            show.set_bootstrap_state(state)
+        return
     cid = str(asset.get("id") or "")
     label = str(asset.get("label") or "")
     refs.mark_rejected(show, cid, label, notes)
@@ -168,6 +179,15 @@ def mark_approved(show, asset: dict[str, Any]) -> None:
         data.update({"status": "approved", "approved": True})
         data.pop("rejected_notes", None)
         scenes.save_refs(show, sid, data)
+        return
+    if asset.get("type") == "voice":
+        # See mark_rejected: the roster voice flag is the source of truth.
+        state = show.bootstrap_state()
+        entry = _char_entry(state, str(asset.get("id") or ""))
+        if entry is not None:
+            entry["voice"] = "approved"
+            entry.pop("voice_notes", None)
+            show.set_bootstrap_state(state)
         return
     cid = str(asset.get("id") or "")
     label = str(asset.get("label") or "")

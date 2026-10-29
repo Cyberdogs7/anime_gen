@@ -317,8 +317,22 @@ class BoardDaemon:
     def _deps_ok(self, card: dict[str, Any], cards: list[dict[str, Any]]) -> bool:
         by_id = {c["id"]: c for c in cards}
         for dep in card.get("depends_on") or []:
-            if (by_id.get(dep) or {}).get("state") != "accepted":
-                return False
+            if (by_id.get(dep) or {}).get("state") == "accepted":
+                continue
+            # A rejected/superseded stage card blocks nothing when a sibling
+            # revision of the same stage (same show, same kind, e.g.
+            # g0.<show>.bible.r<ts>) was accepted instead. Without this,
+            # any stage that went through a revision would pin its
+            # downstream cards on the dead original forever.
+            dep_kind = (by_id.get(dep) or {}).get("kind") or ""
+            show_id = str(card.get("show_id") or "")
+            if dep_kind and show_id and any(
+                    c.get("show_id") == show_id
+                    and c.get("kind") == dep_kind
+                    and c.get("state") == "accepted"
+                    for c in cards):
+                continue
+            return False
         return True
 
     # ---- execution ----
@@ -405,7 +419,12 @@ class BoardDaemon:
                 if current.get("claimed_by") != run_id:
                     return
                 if passed:
-                    self.store.advance(card["id"], "accepted", run_id, notes)
+                    if (current.get("payload") or {}).get("human_gate"):
+                        self.store.advance(card["id"], "reviewing", run_id,
+                                            notes)
+                    else:
+                        self.store.advance(card["id"], "accepted", run_id,
+                                            notes)
                 else:
                     if notes:
                         self.store.note(card["id"], run_id, notes)
@@ -489,7 +508,14 @@ class BoardDaemon:
             return  # a human or another run already moved it
         if phase == "review":
             if result.verdict == "pass":
-                self.store.advance(card["id"], "accepted", run_id, result.notes)
+                if (current.get("payload") or {}).get("human_gate"):
+                    # Gated stage: the agent reviewer passed; a human decides.
+                    # (agent_verified -> reviewing is a legal transition.)
+                    self.store.advance(card["id"], "reviewing", run_id,
+                                        result.notes)
+                else:
+                    self.store.advance(card["id"], "accepted", run_id,
+                                        result.notes)
             else:
                 _reason = str(result.notes or result.error or "").strip()
                 if _reason:

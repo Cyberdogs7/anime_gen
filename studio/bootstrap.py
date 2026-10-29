@@ -115,7 +115,8 @@ class BootstrapChain:
         _tag, user = prompts.concept_prompt(brief, profile, feedback=feedback,
                                             current_draft=current)
         system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
-        concept = self._ask("showrunner", system, user, temperature=0.7)
+        temp = 0.5 if feedback.strip() else 1.05
+        concept = self._ask("showrunner", system, user, temperature=temp)
         if maturity.strip():
             concept["maturity"] = maturity  # enforce the approved level exactly
         self.show.write_concept(concept)
@@ -128,10 +129,13 @@ class BootstrapChain:
         maturity = str(concept.get("maturity") or profile.get("maturity") or "").strip()
         system = prompts.showrunner_system(profile, maturity, profile.get("baseline", ""))
         current = self.show.read_bible() if feedback.strip() else None
+        # Revisions run cool: heat is for fresh invention, discipline is for
+        # following feedback. Hot revision passes drift instead of complying.
+        temp = 0.5 if feedback.strip() else 1.0
         bible = self._ask("bible", system, prompts.bible_prompt(concept, profile,
                                                                 feedback=feedback,
                                                                 current_draft=current),
-                          temperature=0.5, max_tokens=8192)
+                           temperature=temp, max_tokens=8192)
         # The approved concept's maturity IS the show's content policy; persisting
         # it here is what lets every later stage read the show's level instead of
         # falling back to a code default.
@@ -153,10 +157,11 @@ class BootstrapChain:
         system = prompts.showrunner_system(profile,
                                            bible.get("content_policy") or "",
                                            profile.get("baseline", ""))
+        temp = 0.5 if feedback.strip() else 1.0
         proposal = self._ask("showrunner", system,
                              prompts.character_prompt(bible, existing, name,
                                                       feedback=feedback, current_draft=current),
-                             temperature=0.7)
+                              temperature=temp)
         # force the canon name/id regardless of what the model wrote
         proposal["name"] = name
         proposal["id"] = _slug(name)
@@ -164,7 +169,7 @@ class BootstrapChain:
         if len(str(proposal.get("voice_sample_text") or "").split()) < 50:
             extra = self._ask("showrunner", system,
                               prompts.voice_sample_prompt(proposal, bible),
-                              temperature=0.8)
+                               temperature=1.0)
             text = str(extra.get("voice_sample_text") or "").strip()
             if text:
                 proposal["voice_sample_text"] = text
@@ -188,11 +193,27 @@ class BootstrapChain:
                 except Exception:
                     continue
             current = {"locations": locs}
+        temp = 0.5 if feedback.strip() else 1.0
         data = self._ask("showrunner", system, prompts.scenes_prompt(bible, feedback=feedback,
                                                                      current_draft=current),
-                         temperature=0.6)
-        for loc in data.get("locations", []):
-            self.show.write_scene(loc)
+                          temperature=temp)
+        with _show_lock(self.show.show_id):
+            st = self.show.bootstrap_state()
+            sts = st.setdefault("scenes", {"status": ""})
+            locs = sts.setdefault("locations", {})
+            written = []
+            for loc in data.get("locations", []):
+                self.show.write_scene(loc)
+                sid = str(loc.get("id") or "")
+                if sid:
+                    written.append(sid)
+                    locs.setdefault(sid, "pending")
+            # Drop registry entries for locations the model removed (unless
+            # already approved — approvals are never silently discarded).
+            for sid in [k for k in list(locs)
+                        if k not in written and locs.get(k) != "approved"]:
+                del locs[sid]
+            self.show.set_bootstrap_state(st)
         return data
 
     def revise_voice_description(self, char: dict[str, Any], feedback: str) -> str:
@@ -209,6 +230,52 @@ class BootstrapChain:
         char["voice"] = {**(char.get("voice") or {}), "voice_description": new_vd}
         self.show.write_character(char)
         return new_vd
+
+    def refresh_voice(self, name: str, notes: str = "",
+                      model: str = "") -> str:
+        """Full voice redo for one character: identity + sample text.
+
+        Rewrites the voice description from director notes (if any), then the
+        sample monologue, and marks the voice pending. TTS re-recording stays
+        with the caller (audio lane). Used by every voice reject path so a
+        reject anywhere rebuilds everything instead of one slice.
+        """
+        char = None
+        for cid in self.show.list_characters():
+            c = self.show.read_character(cid) or {}
+            if str(c.get("name") or "").lower() == str(name or "").strip().lower():
+                char = c
+                break
+        if not char:
+            raise ValueError(f"no character named {name!r}")
+        notes = (notes or "").strip()
+        if notes:
+            self.revise_voice_description(char, notes)
+            char = self.show.read_character(char.get("id") or "") or char
+        bible = self.show.read_bible() or {}
+        profile = self.show.style_profile(self.cfg)
+        system = prompts.showrunner_system(profile, bible.get("content_policy") or "",
+                                           profile.get("baseline", ""))
+        prompt = prompts.voice_sample_prompt(char, bible)
+        if notes:
+            prompt = prompt.rstrip() + f"\n\nDirector's notes for this rewrite:\n{notes}"
+        model = model or (self.cfg.get("llm", "roles", {}).get("showrunner")
+                          or self.cfg.get("llm", "model") or "")
+        data = self.llm.chat_json(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": prompt}],
+            model=model, temperature=0.8)
+        text = str((data or {}).get("voice_sample_text") or "").strip()
+        if len(text.split()) < 50:
+            raise ValueError("model returned a voice sample that is too short")
+        char["voice_sample_text"] = text
+        self.show.write_character(char)
+        st = self.show.bootstrap_state()
+        for entry in st.get("characters", []):
+            if str(entry.get("name") or "").lower() == str(name or "").strip().lower():
+                entry["voice"] = ""
+        self.show.set_bootstrap_state(st)
+        return text
 
     def revise_character_appearance(self, char: dict[str, Any], feedback: str) -> str:
         """LLM rewrites ONLY appearance_canonical from rejection feedback."""
@@ -431,16 +498,21 @@ class BootstrapChain:
 
     # ---- single-stage Gate-0 passes (one board card each) ----
 
-    def advance_ideas(self, brief: str = "", n: int = 5) -> list[str]:
+    def advance_ideas(self, brief: str = "", n: int = 5,
+                      notes: str = "") -> list[str]:
         """Pitch N distinct executions of the brief and archive them all.
 
-        Writes ``ideas.json`` (every pitch kept with status ``proposed``).
-        Picking pitches happens via the board (approval = concept).
+        Writes ``ideas.json`` (every pitch kept with ``status`` ``proposed``).
+        Picking pitches happens via the board (approval = concept). ``notes``
+        are owner guidance for this round (e.g. from a re-pitch) and are
+        appended to the brief the model sees.
         """
         from .proposals import propose_concepts
         with _show_lock(self.show.show_id):
             log_: list[str] = []
-            pitches = propose_concepts(brief, n=n, cfg=self.cfg, llm=self.llm)
+            guided = (brief + "\n\nOwner notes for this round: " + notes.strip()
+                      if notes.strip() else brief)
+            pitches = propose_concepts(guided, n=n, cfg=self.cfg, llm=self.llm)
             import time as _time
             # Append-only: re-pitches add to the archive, never erase picks.
             archive = self.show.read_ideas() or {}
@@ -467,6 +539,7 @@ class BootstrapChain:
             existing.extend(new_pitches)
             archive.update({
                 "brief": brief or archive.get("brief", ""),
+                "notes": notes.strip(),
                 "n": len(existing),
                 "created": archive.get("created") or int(_time.time()),
                 "updated": int(_time.time()),
@@ -478,25 +551,46 @@ class BootstrapChain:
             self.show.set_bootstrap_state(self.show.bootstrap_state())
             return log_
 
-    def advance_bible(self) -> list[str]:
-        """Generate only the bible from the approved concept (lands pending)."""
+    def advance_bible(self, notes: str = "", force: bool = False) -> list[str]:
+        """Generate only the bible from the approved concept (lands pending).
+
+        ``notes`` is reviewer feedback from a rejected round: it is passed
+        through so the rewrite addresses it instead of re-rolling the same
+        content. ``force`` re-arms a ``pending`` stage (a reject leaves the
+        old status in place; without re-arming the guard below would skip
+        generation and the revision would no-op).
+        """
         with _show_lock(self.show.show_id):
             log_: list[str] = []
             st = self.show.bootstrap_state()
+            if force:
+                st["bible"] = {"status": ""}
+                self.show.set_bootstrap_state(st)
             bible = st.setdefault("bible", {"status": ""})
             if bible.get("status") != "approved" and not bible.get("status"):
-                self.generate_bible()
+                self.generate_bible(feedback=notes)
                 bible["status"] = "pending"
                 self._emit(new_event(BIBLE_PENDING, show_id=self.show.show_id))
                 log_.append("bible: generated -> pending")
                 self.show.set_bootstrap_state(st)
             return log_
 
-    def advance_characters(self) -> list[str]:
-        """Generate only the character proposals from the approved bible."""
+    def advance_characters(self, notes: str = "", force: bool = False) -> list[str]:
+        """Generate only the character proposals from the approved bible.
+
+        ``notes`` is reviewer feedback: only pending (unapproved) proposals
+        are regenerated, so the feedback lands exactly on the rejected ones.
+        ``force`` re-arms ``pending`` proposals (a reject leaves them in
+        place), otherwise the revision would no-op.
+        """
         with _show_lock(self.show.show_id):
             log_: list[str] = []
             st = self.show.bootstrap_state()
+            if force:
+                for entry in st.get("characters", []):
+                    if entry.get("proposal") == "pending":
+                        entry["proposal"] = ""
+                self.show.set_bootstrap_state(st)
             roster = [c.get("name") for c in self.show.read_bible().get("cast", [])]
             roster = [n for n in roster if n and looks_like_character_name(n)]
             chars = st.setdefault("characters", [])
@@ -509,8 +603,11 @@ class BootstrapChain:
                     existing = next((cid for cid in self.show.list_characters()
                                      if self.show.read_character(cid).get("name") == name),
                                     None)
-                    if not existing:
-                        self.generate_character_proposal(name)
+                    # A forced rerun (rejected with notes) must regenerate
+                    # even when files exist, or the worker runs 3 minutes
+                    # and changes nothing.
+                    if not existing or force:
+                        self.generate_character_proposal(name, feedback=notes)
                     entry["proposal"] = "pending"
                     self._emit(new_event(CHAR_PROPOSAL_PENDING, show_id=self.show.show_id,
                                          payload={"char": _slug(name)}))
@@ -518,48 +615,66 @@ class BootstrapChain:
                     self.show.set_bootstrap_state(st)
             return log_
 
-    def advance_scene_registry(self) -> list[str]:
-        """Generate only the scene registry (lands pending)."""
+    def advance_scene_registry(self, notes: str = "", force: bool = False
+                             ) -> list[str]:
+        """Generate only the scene registry (lands pending).
+
+        ``notes`` is reviewer feedback from a rejected round. ``force``
+        re-arms a ``pending`` stage so the revision regenerates instead of
+        no-op'ing.
+        """
         with _show_lock(self.show.show_id):
             log_: list[str] = []
             st = self.show.bootstrap_state()
             scenes = st.setdefault("scenes", {"status": ""})
-            if scenes.get("status") != "approved" and not scenes.get("status"):
-                self.generate_scenes()
+            if force:
+                # Re-arm without discarding approvals: approved locations
+                # stay approved, everything else regenerates.
+                scenes["status"] = ""
+                self.show.set_bootstrap_state(st)
+            if scenes.get("status") != "approved":
+                self.generate_scenes(feedback=notes)
                 scenes["status"] = "pending"
                 self._emit(new_event(SCENE_REGISTRY_PENDING, show_id=self.show.show_id))
                 log_.append("scenes: generated -> pending")
                 self.show.set_bootstrap_state(st)
             return log_
 
-    def advance_images(self) -> list[str]:
-        """Generate character and scene reference images only (ComfyUI)."""
-        with _show_lock(self.show.show_id):
-            return self._advance_images()
+    def advance_images(self, notes: str = "") -> list[str]:
+        """Generate character and scene reference images only (ComfyUI).
 
-    def _advance_images(self) -> list[str]:
+        A retake (notes present) also regenerates entries marked rejected,
+        not just missing ones; per-asset director notes ride along.
+        """
+        with _show_lock(self.show.show_id):
+            return self._advance_images(notes=notes)
+
+    def _advance_images(self, notes: str = "") -> list[str]:
         from . import refs as _refs
-        st = self.show.bootstrap_state()
+        show = self.show
+        st = show.bootstrap_state()
         log_: list[str] = []
+        do_force = bool((notes or "").strip())
         for entry in st.get("characters", []):
-            if entry.get("refs") not in ("", None, "stub"):
+            if entry.get("refs") not in ("", None, "stub", "rejected"):
                 continue
             name = entry.get("name") or ""
-            char = next((self.show.read_character(cid)
-                         for cid in self.show.list_characters()
-                         if self.show.read_character(cid).get("name") == name), None)
+            char = next((show.read_character(cid)
+                         for cid in show.list_characters()
+                         if show.read_character(cid).get("name") == name), None)
             if not char:
                 continue
-            kind = _refs.ensure_ref(self.show, char, cfg=self.cfg, llm=None,
+            entry_notes = str(entry.get("rejected_notes") or notes or "").strip()
+            kind = _refs.ensure_ref(show, char, cfg=self.cfg, llm=None,
+                                    notes=entry_notes, force=do_force,
                                     report=self._report)
-            entry["refs"] = kind
-            self.show.set_bootstrap_state(st)
+            show.set_bootstrap_state(st)
             log_.append(f"character {name}: refs ({kind})")
             if kind == "real":
-                self._emit(new_event(CHAR_REFS_PENDING, show_id=self.show.show_id,
+                self._emit(new_event(CHAR_REFS_PENDING, show_id=show.show_id,
                                      payload={"char": char.get("id")}))
-        self._step_scene_refs(log_)
-        self.show.set_bootstrap_state(st)
+        self._step_scene_refs(log_, notes=notes)
+        show.set_bootstrap_state(st)
         return log_
 
     def advance_voices(self, char: str = "") -> list[str]:
@@ -579,7 +694,10 @@ class BootstrapChain:
             name = str(entry.get("name") or "")
             if char_filter and name.lower() != char_filter:
                 continue
-            if entry.get("voice") not in ("", None):
+            # Rejected voices regenerate like rejected image refs do: without
+            # this a main-card rerun silently skips the rejected voice and the
+            # retake never happens.
+            if entry.get("voice") not in ("", None, "rejected"):
                 continue
             char_data = next((self.show.read_character(cid)
                               for cid in self.show.list_characters()
@@ -762,48 +880,126 @@ class BootstrapChain:
         log_.append("scenes: approved -> BOOTSTRAP COMPLETE")
         return True
 
-    def _step_scene_refs(self, log_: list[str]) -> bool | None:
+    def _step_scene_refs(self, log_: list[str], notes: str = "") -> bool | None:
         """Generate a reference image for every scene once the registry exists.
 
         Runs while the registry is still *pending* (so the human can review the
         locations on the dashboard) and again after approval. Non-gating: images
-        drop in as they finish; the chain never blocks on them.
+        drop in as they finish; the chain never blocks on them. Existing files
+        are left alone unless their refs status is rejected (rework requested).
         """
         import yaml
         st = self.show.bootstrap_state()
-        if not (st.get("scenes", {}) or {}).get("status"):
+        if not (st.get("scenes") or {}).get("status"):
             return None
         did = False
+        from . import scenes as _scenes
         for sid in self.show.list_scenes():
             rd = self.show.scenes_dir / sid / "refs"
-            if (rd / f"{sid}_ref_01.png").exists():
+            out = rd / f"{sid}_ref_01.png"
+            try:
+                status = str((_scenes.load_refs(self.show, sid) or {}).get("status") or "")
+            except Exception:
+                status = ""
+            if out.exists() and status not in ("", None, "rejected"):
                 continue
             try:
                 scene = yaml.safe_load((self.show.scenes_dir / f"{sid}.yaml")
                                        .read_text(encoding="utf-8")) or {}
             except Exception:
                 continue
-            ok = self.bootstrap_scene_ref(scene, sid)
+            snap = ""
+            try:
+                snap = str(((_scenes.load_refs(self.show, sid) or {}).get("rejected_notes")) or "")
+            except Exception:
+                pass
+            ok = self.bootstrap_scene_ref(scene, sid,
+                                          force=status == "rejected",
+                                          notes=snap or notes)
             if ok:
                 log_.append(f"scene {sid}: ref image")
                 did = True
         return True if did else None
 
-    def bootstrap_scene_ref(self, scene: dict[str, Any], sid: str) -> bool:
+    def refresh_scene(self, sid: str, notes: str, model: str = "") -> dict:
+        """Rewrite one location's description/setting from director notes.
+
+        Used when a location reject asks for a different *place* (not just a
+        different rendering): appended prompt notes lose to a dominant base
+        description, so the yaml itself has to change first. Returns the
+        updated scene dict.
+        """
+        import yaml as _yaml
+        p = self.show.scenes_dir / f"{sid}.yaml"
+        scene: dict[str, Any] = {}
+        if p.exists():
+            try:
+                scene = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            except Exception:
+                scene = {}
+        model = model or (self.cfg.get("llm", "roles", {}).get("showrunner")
+                          or self.cfg.get("llm", "model") or "")
+        system = ("You are rewriting one location brief for an anime production "
+                  "bible. Reply with exactly one JSON object, no other text.")
+        user = ("Current location brief (JSON):\n"
+                + json.dumps(scene, indent=1, default=str)
+                + "\n\nDirector's revision notes (follow them exactly; rewrite DESCRIPTION "
+                "and SETTING_PROMPT to match; update location/time_of_day if they change; "
+                "never add people, characters, or text overlays):\n" + notes.strip()
+                + '\n\nReturn ONLY JSON: {"id": ..., "name": ..., "description": ..., '
+                  '"setting_prompt": ..., "location": ..., "time_of_day": ...}')
+        data = self.llm.chat_json(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            model=model, temperature=0.7)
+        if not isinstance(data, dict) or not data:
+            # chat_json raises on transport/parse failure, so reaching here
+            # with a non-dict means the model ignored the JSON contract: fail
+            # loud instead of re-rendering the unchanged brief (same image).
+            raise RuntimeError(
+                f"scene rewrite for {sid!r} returned no usable brief")
+        data["id"] = sid
+        if not str(data.get("name") or "").strip():
+            data["name"] = str(scene.get("name") or sid)
+        if notes.strip() and _brief_text(data) == _brief_text(scene):
+            # The model echoed the brief and ignored the revision notes:
+            # rendering from this would return the same location again.
+            # Block the retake with the cause instead of burning a render.
+            raise RuntimeError(
+                f"scene rewrite for {sid!r} ignored the revision notes; "
+                f"brief unchanged")
+        with _show_lock(self.show.show_id):
+            self.show.write_scene(data)
+        return data
+
+    def bootstrap_scene_ref(self, scene: dict[str, Any], sid: str,
+                            force: bool = False, notes: str = "") -> bool:
         """Generate a location reference image (krea2) for one scene.
 
         Returns True when an image landed (or a stub was recorded so reconcile
         stops retrying). A stub refs.json prevents an infinite reconcile loop
         when no krea2 instance is configured or generation is unavailable.
+        When notes ask for a different *place*, the yaml is rewritten first —
+        appended prompt notes alone cannot beat the base description.
         """
         from . import scenes
+        if notes.strip():
+            scene = self.refresh_scene(sid, notes)
         return scenes.generate_ref(self.show, scene, sid, cfg=self.cfg,
-                                   report=self._report)
+                                   report=self._report, force=force,
+                                   notes=notes)
 
 
 def _slug(text: str) -> str:
     import re
     return re.sub(r"[^a-z0-9-]+", "-", (text or "").strip().lower()).strip("-")
+
+
+def _brief_text(scene: dict[str, Any]) -> str:
+    """Normalized description + setting_prompt for rewrite change detection."""
+    import re as _re
+    text = f"{scene.get('description') or ''}\n{scene.get('setting_prompt') or ''}"
+    return _re.sub(r"\s+", " ", text).strip().lower()
 
 
 def _pitch_slug(text: str) -> str:

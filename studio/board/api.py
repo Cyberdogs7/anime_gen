@@ -199,12 +199,19 @@ def _resolve_show_file(show, rel: str):
     return p
 
 
-def _read_show_file(show, rel: str):
+def _read_show_file(show, rel: str, parse: bool = False):
     p = _resolve_show_file(show, rel)
     if p is None or not p.exists() or not p.is_file():
         return None
-    return {"path": rel, "content": p.read_text(encoding="utf-8", errors="replace"),
-            "format": p.suffix.lstrip(".").lower()}
+    out = {"path": rel, "content": p.read_text(encoding="utf-8", errors="replace"),
+           "format": p.suffix.lstrip(".").lower()}
+    if parse and p.suffix.lower() in (".yaml", ".yml"):
+        try:
+            import yaml as _yaml
+            out["data"] = _yaml.safe_load(out["content"])
+        except Exception:
+            pass
+    return out
 
 
 def _write_show_file(show, rel: str, content: str) -> dict:
@@ -319,7 +326,8 @@ def _show_episodes(show, store) -> list[dict]:
     return out
 
 
-def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
+def _show_regenerate(store, show_id: str, kind: str, char: str = "",
+                     notes: str = ""):
     import time
     from ..show import Show
     from .cards import new_card
@@ -344,7 +352,8 @@ def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
             orig = store.get(f"g0.{show_id}.ideas") or {}
             op = (orig.get("payload") or {})
             payload = {"brief": str(op.get("brief") or ""),
-                       "n": int(op.get("n") or 5), "auto": False}
+                       "n": int(op.get("n") or 5), "auto": False,
+                       "notes": notes}
         if kind == "bible":
             st.setdefault("bible", {})["status"] = ""
         if kind == "characters":
@@ -395,23 +404,60 @@ def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
         import re as _re
         slug = _re.sub(r"[^a-z0-9-]+", "-", char.lower()).strip("-")
         if kind in ("voice_text", "voices") and char:
-            active = [c for c in store.all(show_id=show_id)
-                      if c.get("kind") == "voice_text"
-                      and str((c.get("payload") or {}).get("char") or "").lower()
-                      == char.lower()
-                      and c.get("state") not in ("accepted", "blocked", "deferred")]
-            if active:
-                return active[0]
-            for entry in st.get("characters", []):
-                if str(entry.get("name") or "").lower() == char.lower():
-                    entry["voice"] = ""
-            show.set_bootstrap_state(st)
-            cid = f"g0.{show_id}.voice_text.{slug}.{stamp}"
-            card = new_card(
-                cid, kind="voice_text", title=f"Write voice sample: {char}",
-                show_id=show_id, role="voice_writer", lane="llm",
-                priority=9, max_attempts=1, payload={"char": char})
-            return store.upsert(card)
+            # Voice work lives on the (per-character) voices card only: text,
+            # identity and recording are one job, so a "write" card is never
+            # minted. Requeue the character's voices card (or mint one if the
+            # only ones around are already accepted).
+            target = None
+            for c in store.all(show_id=show_id):
+                if c.get("kind") != "gate0_voices":
+                    continue
+                if str((c.get("payload") or {}).get("char") or "").lower() != char.lower():
+                    continue
+                if c.get("state") in ("accepted",):
+                    continue
+                target = c
+                break
+            if target is None:
+                for entry in st.get("characters", []):
+                    if str(entry.get("name") or "").lower() == char.lower():
+                        entry["voice"] = ""
+                show.set_bootstrap_state(st)
+                cid = f"g0.{show_id}.voices.{slug}.{stamp}"
+                card = new_card(
+                    cid, kind="gate0_voices",
+                    title=f"Record voice sample: {char}",
+                    show_id=show_id, role="gate0_voices", reviewer="human",
+                    lane="audio", priority=8, max_attempts=2,
+                    payload={"char": char})
+                return store.upsert(card)
+            if target.get("state") in ("blocked", "deferred"):
+                # Reuse instead of minting a duplicate: this card is the
+                # character's one voice card. Unblock it so the daemon
+                # picks it back up.
+                for entry in st.get("characters", []):
+                    if str(entry.get("name") or "").lower() == char.lower():
+                        entry["voice"] = ""
+                show.set_bootstrap_state(st)
+                store.update(target["id"], attempts=0)
+                try:
+                    store.advance(target["id"], "planned", "human",
+                                    "voice rework requested")
+                except ValueError:
+                    pass
+                return store.get(target["id"])
+            if target.get("state") == "reviewing":
+                for entry in st.get("characters", []):
+                    if str(entry.get("name") or "").lower() == char.lower():
+                        entry["voice"] = ""
+                show.set_bootstrap_state(st)
+                store.update(target["id"], attempts=0)
+                try:
+                    store.advance(target["id"], "retake", "human",
+                                  "voice rework requested")
+                except ValueError:
+                    pass
+            return store.get(target["id"])
         if kind == "voices":
             active = [c for c in store.all(show_id=show_id)
                       if c.get("kind") == "gate0_voices"
@@ -442,13 +488,21 @@ def _show_regenerate(store, show_id: str, kind: str, char: str = ""):
 
 
 def _reject_image(store, card_id: str, path: str, notes: str):
+    import shutil
     from ..show import Show
-    from .cards import new_card
     card = store.get(card_id)
     if not card:
         raise ValueError(f"no card {card_id!r}")
     if card.get("state") == "accepted":
-        raise ValueError("that card is already accepted; create a new review card")
+        # Late rejection: reopen the accepted card for rework instead of
+        # stranding the user (accepted is otherwise terminal).
+        store.update(card_id, attempts=0)
+        try:
+            store.advance(card_id, "retake", "human",
+                           notes or "reopened for image retake")
+        except ValueError:
+            pass
+        card = store.get(card_id) or card
     show = Show(str(card.get("show_id") or ""))
     asset = asset_lib.parse_asset(show, path)
     if not asset:
@@ -459,38 +513,56 @@ def _reject_image(store, card_id: str, path: str, notes: str):
                 if str(a.get("path") or "").replace("\\", "/") == asset["path"]]
     if not attached:
         raise ValueError("that image is not attached to this card")
-    key = asset_lib.asset_key(asset)
-    for existing in asset_lib.open_retakes(store, card_id):
-        current = (existing.get("payload") or {}).get("asset") or {}
-        if asset_lib.asset_key(current) == key:
-            return store.get(card_id), existing
+    # Same card does the rework: mark the asset rejected (with notes), stash
+    # the notes on the card for the rerun, archive the rejected file, and
+    # send the card itself back through retake. No separate retake card.
     asset_lib.mark_rejected(show, asset, notes)
-    stamp = int(time.time() * 1000)
-    slug = re.sub(r"[^a-z0-9-]+", "-", str(asset.get("id") or "").lower()).strip("-")
-    label = re.sub(r"[^a-z0-9-]+", "-",
-                   str(asset.get("label") or "").lower()).strip("-")
-    suffix = f".{label}" if label and label != slug else ""
-    retake_id = f"{card_id}.retake.{asset['type']}.{slug}{suffix}.{stamp}"
-    retake = new_card(
-        retake_id, kind="image_retake",
-        title=(f"Redraw location reference: {asset.get('id')}"
-               if asset.get("type") == "scene"
-               else f"Redraw character reference: {asset.get('id')} ({asset.get('label')})"),
-        show_id=show.show_id, episode=int(card.get("episode") or 0),
-        role="image_retake", reviewer="human", lane="image",
-        priority=int(card.get("priority") or 5), max_attempts=2,
-        payload={"tool": "image_retake",
-                 "args": {"asset": asset, "notes": notes, "parent": card_id},
-                 "asset": asset, "notes": notes, "parent": card_id},
-    )
-    retake = store.upsert(retake)
+    source = Path(show.dir.parents[1]) / asset["path"]
+    if source.exists():
+        stamp = int(time.time() * 1000)
+        dest = source.parent / "rejected" / f"{source.stem}.{stamp}{source.suffix}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+    payload = dict(card.get("payload") or {})
+    payload["notes"] = notes or "rejected"
+    store.update(card_id,
+                 result={**(card.get("result") or {}), "rejected": notes or "rejected"},
+                 payload=payload, attempts=0)
     updated = asset_lib.update_artifact(
         store, card_id, asset["path"], status="rejected",
-        notes=notes, retake_id=retake_id, asset=asset)
+        notes=notes, asset=asset)
+    try:
+        updated = store.advance(card_id, "retake", "human", notes or "rejected")
+    except ValueError:
+        pass
     store.note(card_id, "human",
                f"Rejected {asset_lib.asset_title(asset)}: {notes or 'no notes'}; "
-               f"queued {retake_id}")
-    return updated, retake
+               f"reworking on this card")
+    return store.get(card_id), None
+
+
+def _approve_image(store, card_id: str, path: str):
+    """Approve one attached image in place (no retake card)."""
+    from ..show import Show
+    card = store.get(card_id)
+    if not card:
+        raise ValueError(f"no card {card_id!r}")
+    if card.get("state") == "accepted":
+        raise ValueError("that card is already accepted")
+    show = Show(str(card.get("show_id") or ""))
+    asset = asset_lib.parse_asset(show, path)
+    if not asset:
+        raise ValueError("that path is not a character or scene image")
+    attached = [a for a in (card.get("artifacts") or [])
+                if str(a.get("path") or "").replace("\\", "/") == asset["path"]]
+    if not attached:
+        raise ValueError("that image is not attached to this card")
+    asset_lib.mark_approved(show, asset)
+    updated = asset_lib.update_artifact(
+        store, card_id, asset["path"], status="accepted")
+    store.note(card_id, "human",
+               f"Accepted {asset_lib.asset_title(asset)}")
+    return store.get(card_id)
 
 
 def _reject_scene(store, card_id: str, scene_id: str, notes: str):
@@ -541,12 +613,19 @@ def _reject_scene(store, card_id: str, scene_id: str, notes: str):
 def _reject_voice(store, card_id: str, path: str, notes: str):
     import shutil
     from ..show import Show
-    from .cards import new_card
     card = store.get(card_id)
     if not card:
         raise ValueError(f"no card {card_id!r}")
     if card.get("state") == "accepted":
-        raise ValueError("that card is already accepted; create a new review card")
+        # Late rejection: reopen the accepted card for rework instead of
+        # stranding the user (accepted is otherwise terminal).
+        store.update(card_id, attempts=0)
+        try:
+            store.advance(card_id, "retake", "human",
+                           notes or "reopened for voice retake")
+        except ValueError:
+            pass
+        card = store.get(card_id) or card
     show = Show(str(card.get("show_id") or ""))
     asset = asset_lib.parse_asset(show, path)
     if not asset or asset.get("type") != "voice":
@@ -557,11 +636,6 @@ def _reject_voice(store, card_id: str, path: str, notes: str):
                 if str(a.get("path") or "").replace("\\", "/") == asset["path"]]
     if not attached:
         raise ValueError("that voice sample is not attached to this card")
-    key = asset_lib.asset_key(asset)
-    for existing in asset_lib.open_children(store, card_id):
-        current = (existing.get("payload") or {}).get("asset") or {}
-        if asset_lib.asset_key(current) == key:
-            return store.get(card_id), existing
     char = show.read_character(str(asset.get("id") or "")) or {}
     name = str(char.get("name") or asset.get("label") or asset.get("id") or "")
     state = show.bootstrap_state()
@@ -571,31 +645,30 @@ def _reject_voice(store, card_id: str, path: str, notes: str):
             entry["voice_notes"] = notes or ""
             break
     show.set_bootstrap_state(state)
-    stamp = int(time.time() * 1000)
-    slug = re.sub(r"[^a-z0-9-]+", "-", str(asset.get("id") or "").lower()).strip("-")
-    retake_id = f"{card_id}.voice_retake.{slug}.{stamp}"
-    retake = new_card(
-        retake_id, kind="voice_text",
-        title=f"Rewrite voice sample: {name}",
-        show_id=show.show_id, role="voice_writer", lane="llm",
-        priority=9, max_attempts=2,
-        payload={"char": name, "notes": notes, "parent": card_id, "asset": asset},
-    )
-    retake = store.upsert(retake)
+    # Same card does the full loop now (identity + text + re-record via the
+    # voices tool's refresh step): no second card, no blocked original.
     source = Path(show.dir.parents[1]) / asset["path"]
     if source.exists():
+        stamp = int(time.time() * 1000)
         dest = source.parent / "rejected" / f"{source.stem}.{stamp}{source.suffix}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
-        store.attach(retake_id, str(dest.relative_to(Path(show.dir.parents[1])))
-                    .replace("\\", "/"), "rejected before retake")
+    payload = dict(card.get("payload") or {})
+    payload["notes"] = notes or "rejected"
+    payload["char"] = name
+    store.update(card_id,
+                 result={**(card.get("result") or {}), "rejected": notes or "rejected"},
+                 payload=payload, attempts=0)
     updated = asset_lib.update_artifact(
         store, card_id, asset["path"], status="rejected",
-        notes=notes, retake_id=retake_id, asset=asset)
+        notes=notes, asset=asset)
+    try:
+        updated = store.advance(card_id, "retake", "human", notes or "rejected")
+    except ValueError:
+        pass
     store.note(card_id, "human",
-               f"Rejected {asset_lib.asset_title(asset)}: "
-               f"{notes or 'no notes'}; queued {retake_id}")
-    return updated, retake
+               f"Rejected {asset_lib.asset_title(asset)}: {notes or 'no notes'}; reworking in place")
+    return store.get(card_id), None
 
 
 def _decide_retake(store, card: dict, action: str, notes: str):
@@ -1000,7 +1073,9 @@ class BoardHandler(BaseHTTPRequestHandler):
                 from ..show import Show
                 sid = (q.get("show_id") or [""])[0]
                 rel = (q.get("path") or [""])[0]
-                data = _read_show_file(Show(sid), rel) if sid else None
+                want_parsed = (q.get("parsed") or [""])[0] == "1"
+                data = _read_show_file(Show(sid), rel,
+                                       parse=want_parsed) if sid else None
                 if not data:
                     return _json(self, 404, {"error": "file not found"})
                 return _json(self, 200, data)
@@ -1099,7 +1174,8 @@ class BoardHandler(BaseHTTPRequestHandler):
                     return _json(self, 400, {"error": "show_id and kind are required"})
                 try:
                     card = _show_regenerate(self.store, sid, kind,
-                                            str(data.get("char") or ""))
+                                            str(data.get("char") or ""),
+                                            str(data.get("notes") or ""))
                 except Exception as exc:
                     return _json(self, 400, {"error": str(exc)})
                 return _json(self, 200, {"card": card})
@@ -1191,10 +1267,36 @@ class BoardHandler(BaseHTTPRequestHandler):
                     self.store.upsert(new)
                     minted.append(new)
                     prev = str(new.get("id"))
+                # A reselect is a pick: accept every reviewing ideas card so
+                # the stage reads complete and downstream stages unblock.
+                for _c in self.store.all(show_id=sid):
+                    if (str(_c.get("kind") or "") != "gate0_ideas"
+                            or str(_c.get("state") or "") != "reviewing"):
+                        continue
+                    try:
+                        self.store.advance(
+                            str(_c.get("id")), "accepted", "human",
+                            f"reselected pitch {pid}; concept approved")
+                    except ValueError:
+                        pass
                 _Chain(show, cfg=self.cfg, llm=None).check_complete()
                 return _json(self, 200, {"concept": show.read_concept(),
                     "cards": minted, "status": _gate0.status(show),
                     "show_id": sid, "renamed": renamed})
+            if parsed.path == "/api/show/delete":
+                sid = str(data.get("show_id") or "").strip()
+                if not sid:
+                    return _json(self, 400, {"error": "show_id is required"})
+                from ..shows import delete_show as _delete_show
+                try:
+                    _delete_show(sid)
+                except Exception as exc:
+                    return _json(self, 400, {"error": str(exc)})
+                try:
+                    self.store.close_show(sid)
+                except Exception:
+                    pass
+                return _json(self, 200, {"deleted": sid})
             if parsed.path == "/api/episode":
                 show_id = str(data.get("show_id") or "")
                 episode = int(data.get("episode") or 0)
@@ -1211,8 +1313,18 @@ class BoardHandler(BaseHTTPRequestHandler):
                                        str(data.get("text") or ""))
                 return _json(self, 200, {"card": card})
             if parsed.path == "/api/cards/advance":
+                cid = str(data.get("id") or "")
+                dest = str(data.get("to") or "")
+                if dest == "planned":
+                    # A human retry (Unblock / Retry button) is a deliberate
+                    # fresh start: reset the attempt counter so the daemon's
+                    # retake-cap check doesn't instantly re-block the card.
+                    # Automatic daemon retakes still increment and cap.
+                    cur = self.store.get(cid) or {}
+                    if str(cur.get("state") or "") in ("blocked", "retake"):
+                        self.store.update(cid, attempts=0)
                 card = self.store.advance(
-                    str(data.get("id") or ""), str(data.get("to") or ""),
+                    cid, dest,
                     str(data.get("by") or "human"), str(data.get("reason") or ""))
                 return _json(self, 200, {"card": card})
             if parsed.path == "/api/cards/reject_image":
@@ -1226,6 +1338,16 @@ class BoardHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     return _json(self, 400, {"error": str(exc)})
                 return _json(self, 200, {"card": card, "retake": retake})
+            if parsed.path == "/api/cards/approve_image":
+                card_id = str(data.get("card_id") or "")
+                path = str(data.get("path") or "")
+                if not card_id or not path:
+                    return _json(self, 400, {"error": "card_id and path are required"})
+                try:
+                    card = _approve_image(self.store, card_id, path)
+                except Exception as exc:
+                    return _json(self, 400, {"error": str(exc)})
+                return _json(self, 200, {"card": card})
             if parsed.path == "/api/cards/reject_scene":
                 card_id = str(data.get("card_id") or "")
                 scene_id = str(data.get("scene_id") or "")
@@ -1298,6 +1420,20 @@ class BoardHandler(BaseHTTPRequestHandler):
                             "error": f"{len(open_children)} child retake(s) still open",
                             "retakes": [c.get("id") for c in open_children]})
                 show = Show(str(card.get("show_id") or ""))
+                if domain == "scenes":
+                    # Self-heal registries predating per-scene tracking:
+                    # every on-disk location gets a pending entry unless
+                    # already recorded.
+                    _st = show.bootstrap_state() or {}
+                    _locs = _st.setdefault("scenes", {}).setdefault("locations", {})
+                    _changed = False
+                    if show.scenes_dir.exists():
+                        for _p in sorted(show.scenes_dir.glob("*.yaml")):
+                            if _p.stem not in _locs:
+                                _locs[_p.stem] = "pending"
+                                _changed = True
+                    if _changed:
+                        show.set_bootstrap_state(_st)
                 current = gate0.status(show, domain)
                 card_char = str((card.get("payload") or {}).get("char") or "")
                 if domain == "voices" and card_char:
@@ -1389,53 +1525,86 @@ class BoardHandler(BaseHTTPRequestHandler):
                             f"{len(picks)} pitch(es) selected; concept approved")
                     except ValueError:
                         pass
+                    # A pick completes the ideas stage: accept every reviewing
+                    # ideas card (original + any re-pitch revisions) so the
+                    # board reflects the approval and downstream stages unblock.
+                    for _c in self.store.all(show_id=old_sid):
+                        if (gate0.KIND_DOMAINS.get(str(_c.get("kind") or ""))
+                                != "ideas"
+                                or str(_c.get("state") or "") != "reviewing"
+                                or str(_c.get("id")) == card_id):
+                            continue
+                        try:
+                            self.store.advance(
+                                str(_c.get("id")), "accepted", "human",
+                                f"pitch {picks[0]} selected; concept approved")
+                        except ValueError:
+                            pass
                     return _json(self, 200, {"card": self.store.get(card_id),
                         "status": st, "show_id": old_sid, "renamed": renamed,
                         "messages": [f"concept approved from pitch {picks[0]}"]})
                 if action == "reject" and domain in ("plan", "ideas", "bible",
                                                     "characters", "scenes"):
-                    from .cards import new_card
-                    kind = str(card.get("kind") or "")
-                    role = str(card.get("role") or kind)
-                    titles = {
-                        "gate0_plan": "Revise the show bible, cast & scenes",
-                        "gate0_ideas": "Re-pitch show ideas off the brief",
-                        "gate0_bible": "Rewrite the series bible",
-                        "gate0_characters": "Re-propose the cast",
-                        "gate0_scenes": "Rebuild the scene registry",
-                    }
+                    # Reject sends the ORIGINAL card back for rework (no
+                    # revision cards): the notes land on its payload so the
+                    # rerun picks them up as feedback, the attempt counts
+                    # toward the retake cap, and the daemon requeues the
+                    # card to planned automatically.
                     pending_reject = current.get("pending") or {}
-                    self.store.update(card_id, result={
-                        **current, "rejected": notes or "rejected"})
-                    revision = new_card(
-                        f"g0.{show.show_id}.{domain}.r{int(time.time())}",
-                        kind=kind,
-                        title=titles.get(kind, f"Revise {domain}"),
-                        show_id=show.show_id, role=role,
-                        reviewer="human", lane="llm", priority=9,
-                        max_attempts=3,
-                        depends_on=list((card.get("depends_on") or [])),
-                        payload={
-                            **(card.get("payload") or {}),
-                            "notes": notes or "rejected",
-                            "step": pending_reject.get("step", ""),
-                            "char": pending_reject.get("char", ""),
-                        })
-                    revision = self.store.upsert(revision)
+                    req_char = str(data.get("char") or "").strip()
+                    if req_char:
+                        # Per-item reject: scope the rework to one roster entry.
+                        names = [str(c.get("name") or "") for c in
+                                 (show.bootstrap_state() or {}).get("characters", [])]
+                        if req_char not in names:
+                            return _json(self, 400, {"error":
+                                f"no character named {req_char!r}"})
+                        pending_reject = {"step": "character", "char": req_char}
+                    payload = dict(card.get("payload") or {})
+                    payload["notes"] = notes or "rejected"
+                    payload["step"] = pending_reject.get("step", "")
+                    payload["char"] = pending_reject.get("char", "")
+                    if data.get("scene"):
+                        payload["scene"] = str(data.get("scene"))
+                    # A human reject is a deliberate fresh start, not an
+                    # automatic retry: reset the counter so the retake cap
+                    # (which guards runaway workers) never blocks it.
+                    # Worker-driven failures still increment and cap.
+                    self.store.update(card_id,
+                        result={**current, "rejected": notes or "rejected"},
+                        payload=payload,
+                        attempts=0)
                     try:
-                        self.store.advance(card_id, "blocked", "human",
+                        self.store.advance(card_id, "retake", "human",
                                            notes or "rejected")
                     except ValueError:
                         pass
                     return _json(self, 200, {"card": self.store.get(card_id),
-                                             "retake": revision,
-                                             "status": current})
+                                               "status": current})
                 if action == "reject" and domain in ("images", "voices"):
-                    from . import assets as asset_lib
-                    from .cards import new_card
                     pending_reject = current.get("pending") or {}
                     step = str(pending_reject.get("step") or "")
                     ident = str(pending_reject.get("char") or card_char or "")
+                    req_char = str(data.get("char") or "").strip()
+                    req_scene = str(data.get("scene") or "").strip()
+                    if domain == "images" and req_scene:
+                        # Per-item reject from the Missing/failed refs rows:
+                        # honor the requested scene, not the card's pending
+                        # pointer (which may name an already-done item).
+                        if req_scene not in show.list_scenes():
+                            return _json(self, 400, {"error":
+                                f"no scene named {req_scene!r}"})
+                        step, ident = "scene", req_scene
+                    elif domain == "images" and req_char:
+                        # Same for characters: a stub has no artifact, so the
+                        # pending pointer can never name it — without this the
+                        # request silently rejects the wrong character's image.
+                        names = [str(c.get("name") or "") for c in
+                                 (show.bootstrap_state() or {}).get("characters", [])]
+                        if req_char not in names:
+                            return _json(self, 400, {"error":
+                                f"no character named {req_char!r}"})
+                        step, ident = "refs", req_char
                     if domain == "voices" and ident:
                         for art in card.get("artifacts") or []:
                             ast = art.get("asset") or {}
@@ -1444,25 +1613,29 @@ class BoardHandler(BaseHTTPRequestHandler):
                                     == ident.lower()):
                                 asset_lib.mark_rejected(show, ast, notes)
                                 break
-                        import re as _re
-                        slug = _re.sub(r"[^a-z0-9-]+", "-", ident.lower()).strip("-")
-                        revision = new_card(
-                            f"g0.{show.show_id}.voice_text.{slug}.{int(time.time())}",
-                            kind="voice_text",
-                            title=f"Rewrite voice sample: {ident}",
-                            show_id=show.show_id, role="voice_writer",
-                            lane="llm", priority=9, max_attempts=2,
-                            payload={"char": ident, "notes": notes or "rejected",
-                                     "parent": card_id})
-                        revision = self.store.upsert(revision)
+                        # Re-arm the bootstrap flag or the rerun skips this
+                        # voice as already done.
+                        _vst = show.bootstrap_state()
+                        for _e in _vst.get("characters", []):
+                            if str(_e.get("name") or "").lower() == ident.lower():
+                                _e["voice"] = "rejected"
+                                _e["voice_notes"] = notes or "rejected"
+                        show.set_bootstrap_state(_vst)
+                        # Same card reworks the voice end to end (identity +
+                        # text refresh, then re-record): no second card.
+                        payload = dict(card.get("payload") or {})
+                        payload["notes"] = notes or "rejected"
+                        payload["char"] = ident
+                        self.store.update(card_id,
+                            result={**current, "rejected": notes or "rejected"},
+                            payload=payload, attempts=0)
                         try:
-                            self.store.advance(card_id, "blocked", "human",
+                            self.store.advance(card_id, "retake", "human",
                                                notes or "rejected")
                         except ValueError:
                             pass
                         return _json(self, 200, {"card": self.store.get(card_id),
-                                                 "retake": revision,
-                                                 "status": current})
+                                                  "status": current})
                     if domain == "images" and ident:
                         target_type = "scene" if step == "scene" else "character"
                         path = ""
@@ -1474,41 +1647,78 @@ class BoardHandler(BaseHTTPRequestHandler):
                                 path = str(art.get("path") or "")
                                 break
                         if path:
+                            # _reject_image already reworks the same card and
+                            # moves it to retake; nothing left to block here.
                             try:
-                                updated, retake = _reject_image(
+                                updated, _ = _reject_image(
                                     self.store, card_id, path, notes)
                             except Exception as exc:
                                 return _json(self, 400, {"error": str(exc)})
-                            try:
-                                self.store.advance(card_id, "blocked", "human",
-                                                   notes or "rejected")
-                            except ValueError:
-                                pass
                             return _json(self, 200, {
-                                "card": self.store.get(card_id),
-                                "retake": retake, "status": current})
+                                "card": updated, "status": current})
+                        # No artifact matched: the item is a stub/missing ref
+                        # with no file to archive. Scope the rerun to it and
+                        # requeue the card; advance_images regenerates stubs.
+                        payload = dict(card.get("payload") or {})
+                        payload["notes"] = notes or "rejected"
+                        if target_type == "scene":
+                            payload["scene"] = ident
+                        else:
+                            payload["char"] = ident
+                        self.store.update(card_id,
+                            result={**current,
+                                    "rejected": notes or "rejected"},
+                            payload=payload, attempts=0)
+                        self.store.note(card_id, "human",
+                            f"Rejected missing {target_type} reference: "
+                            f"{ident}: {notes or 'no notes'}; reworking on "
+                            f"this card")
+                        try:
+                            self.store.advance(card_id, "retake", "human",
+                                               notes or "rejected")
+                        except ValueError:
+                            pass
+                        return _json(self, 200, {
+                            "card": self.store.get(card_id),
+                            "status": current})
                 if action == "reject":
-                    self.store.update(card_id, result={
-                        **current, "rejected": notes or "rejected"})
+                    # Reject sends the ORIGINAL card back for rework (no
+                    # revision cards, no blocked dead-ends): notes land on
+                    # its payload so the rerun picks them up, the attempt
+                    # counts toward the retake cap, and the daemon requeues
+                    # to planned automatically. Fix cards keep their
+                    # existing flow (a rerun would mint duplicate renders).
+                    if str(card.get("kind") or "") == "fix":
+                        self.store.update(card_id, result={
+                            **current, "rejected": notes or "rejected"})
+                        try:
+                            self.store.advance(card_id, "blocked", "human",
+                                                 notes or "rejected")
+                        except ValueError:
+                            pass
+                        return _json(self, 200, {"card": self.store.get(card_id),
+                                                  "status": current})
+                    payload = dict(card.get("payload") or {})
+                    payload["notes"] = notes or "rejected"
+                    if data.get("scene"):
+                        payload["scene"] = str(data.get("scene"))
+                    self.store.update(card_id,
+                        result={**current, "rejected": notes or "rejected"},
+                        payload=payload,
+                        attempts=0)
                     if domain == "voices" and card_char:
                         st = show.bootstrap_state()
                         for entry in st.get("characters", []):
                             if str(entry.get("name") or "").lower() == card_char.lower():
                                 entry["voice"] = ""
                         show.set_bootstrap_state(st)
-                        try:
-                            self.store.advance(card_id, "retake", "human",
-                                               notes or "rejected")
-                        except ValueError:
-                            pass
-                    else:
-                        try:
-                            self.store.advance(card_id, "blocked", "human",
-                                               notes or "rejected")
-                        except ValueError:
-                            pass
+                    try:
+                        self.store.advance(card_id, "retake", "human",
+                                           notes or "rejected")
+                    except ValueError:
+                        pass
                     return _json(self, 200, {"card": self.store.get(card_id),
-                                             "status": current})
+                                               "status": current})
                 if not pending:
                     if card.get("state") != "accepted":
                         try:
@@ -1521,11 +1731,64 @@ class BoardHandler(BaseHTTPRequestHandler):
                 step = str(pending.get("step") or "")
                 char = str(pending.get("char") or "")
                 show_id = str(show.show_id)
-                if step == "scene":
+                req_char = str(data.get("char") or "").strip()
+                if req_char and domain in ("characters", "voices"):
+                    # Per-item approve: target one roster entry instead of
+                    # the first pending one.
+                    names = [str(c.get("name") or "") for c in
+                             (show.bootstrap_state() or {}).get("characters", [])]
+                    if req_char not in names:
+                        return _json(self, 400, {"error":
+                            f"no character named {req_char!r}"})
+                    entry = next((c for c in
+                                  (show.bootstrap_state() or {}).get("characters", [])
+                                  if str(c.get("name") or "") == req_char), {})
+                    key = "proposal" if domain == "characters" else "voice"
+                    if entry.get(key) == "approved":
+                        return _json(self, 200, {"card": self.store.get(card_id),
+                            "status": current,
+                            "messages": [f"{req_char} is already approved"]})
+                    step = "character" if domain == "characters" else "voice"
+                    char = req_char
+                if step == "scene" and domain == "images":
                     return _json(self, 409, {
                         "error": "scene ref is pending; approve its retake card first"})
                 if domain == "plan" and step == "character":
                     messages = approval.approve_proposal(show_id, char, notes)
+                elif domain == "scenes" and data.get("all"):
+                    messages = []
+                    bloc = (show.bootstrap_state() or {}).get("scenes", {})
+                    for sid, s in list((bloc.get("locations") or {}).items()):
+                        if s == "approved":
+                            continue
+                        try:
+                            messages.extend(approval.approve_step(
+                                show_id, "scene", slug=sid, notes=notes,
+                                advance=False))
+                        except ValueError:
+                            pass
+                elif domain == "scenes" and step == "scene":
+                    sid = str(data.get("scene") or pending.get("scene") or "").strip()
+                    if not sid:
+                        return _json(self, 400, {"error":
+                            "no scene selected for approval"})
+                    messages = approval.approve_step(
+                        show_id, "scene", slug=sid, notes=notes, advance=False)
+                elif domain == "characters" and data.get("all"):
+                    messages = []
+                    bst = show.bootstrap_state() or {}
+                    for entry in list(bst.get("characters") or []):
+                        if entry.get("proposal") == "approved":
+                            continue
+                        nm = str(entry.get("name") or "")
+                        if not nm:
+                            continue
+                        try:
+                            messages.extend(approval.approve_step(
+                                show_id, "character", char=nm, notes=notes,
+                                advance=False))
+                        except ValueError:
+                            pass
                 elif domain == "images":
                     messages = approval.approve_step(show_id, "refs", char=char,
                                                      notes=notes, advance=False)
@@ -1596,6 +1859,19 @@ class BoardHandler(BaseHTTPRequestHandler):
                          if data.get(k) is not None}
                 self.store.set_run_final(run_id, final)
                 return _json(self, 200, {"ok": True})
+            if parsed.path == "/api/version":
+                import os as _os
+                def _mt(name):
+                    try:
+                        return int(_os.path.getmtime(
+                            Path(self.cfg.root) / name))
+                    except OSError:
+                        return 0
+                return _json(self, 200, {
+                    "board_js": _mt("board/board.js"),
+                    "api": _mt("studio/board/api.py"),
+                    "daemon": _mt("studio/board/daemon.py"),
+                })
             if parsed.path == "/api/daemon":
                 enabled = bool(data.get("enabled", True))
                 if enabled:

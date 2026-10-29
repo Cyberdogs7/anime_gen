@@ -15,9 +15,10 @@ from studio.board.api import make_server
 from studio.board.cards import new_card
 from studio.board.daemon import BoardDaemon
 from studio.board.opencode import OpenCodeAgent, _model_id
-from studio.board.roles import get_role
+from studio.board.roles import get_role, load_roles
 from studio.board.store import BoardStore
 from studio.config import Config
+from studio.prompts import BOARD_AGE_GATE
 
 
 def _call(port, path, body=None):
@@ -114,6 +115,27 @@ class _FakeProc:
         pass
 
 
+def test_central_gate_in_every_agent_prompt(tmp_path):
+    cfg = Config(ROOT)
+    card = {"id": "c1", "kind": "outline", "title": "t", "show_id": "demo",
+            "episode": 1, "state": "planned", "payload": {}, "notes": []}
+    checked = 0
+    for role in load_roles(cfg).values():
+        if role.kind == "exec" or role.name == "human" or not role.skill:
+            continue
+        producer = OpenCodeAgent(role=role, card=dict(card), store=None,
+                                 phase="produce", run_id="r", cfg=cfg)
+        assert BOARD_AGE_GATE in producer._skill_prompt(), role.name
+        checked += 1
+        if role.kind == "reviewer":
+            reviewer = OpenCodeAgent(role=role, card=dict(card), store=None,
+                                     phase="review", run_id="r", cfg=cfg)
+            assert BOARD_AGE_GATE in reviewer._skill_prompt(), role.name
+            checked += 1
+    # Every producer + reviewer role, both phases where applicable.
+    assert checked > 20
+
+
 def test_agent_spawns_opencode_in_the_worker_root(tmp_path, monkeypatch):
     cfg, store, httpd, port = _server(tmp_path)
     cfg.data["agents"]["board_url"] = f"http://127.0.0.1:{port}"
@@ -134,7 +156,7 @@ def test_agent_spawns_opencode_in_the_worker_root(tmp_path, monkeypatch):
                           phase="produce", run_id="run1", cfg=cfg)
     result = agent.run()
     assert result.status == "verified"
-    assert seen["cmd"][:4] == ["opencode", "run", "--model", "lm_studio_local/qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"]
+    assert seen["cmd"][:4] == ["opencode", "run", "--model", "lm_studio_local/gemma4-12b-qat-uncensored-hauhaucs-balanced"]
     assert "--agent" in seen["cmd"] and seen["cmd"][seen["cmd"].index("--agent") + 1] == "studio"
     assert Path(seen["cwd"]) == ROOT / "board"
     assert seen["env"]["STUDIO_RUN_ID"] == "run1"

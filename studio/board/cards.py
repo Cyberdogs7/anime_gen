@@ -38,7 +38,10 @@ LEGAL: dict[str, frozenset[str]] = {
     "retake": frozenset({"planned", "blocked"}),
     "blocked": frozenset({"planned", "deferred"}),
     "deferred": frozenset({"planned"}),
-    "accepted": frozenset(),
+    # Human reopen: an accepted Gate 0 card can go back for rework when a
+    # late issue surfaces. Only the human reject actions drive this; the
+    # daemon never moves cards out of accepted.
+    "accepted": frozenset({"retake"}),
 }
 
 #: Lanes are concurrency resources, not departments: one render at a time on a

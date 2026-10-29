@@ -23,22 +23,12 @@ These steer the model, but they are not enforcement.
 
 | Layer | Location | Text |
 |---|---|---|
+| Central board gate (single source) | `studio/prompts.py` `BOARD_AGE_GATE`, injected into every opencode board prompt by `studio/board/opencode.py` | “All characters are adults (18+). Do not write minors.” |
 | Python creative system prompts | `studio/prompts.py:18` `FICTIONAL_DIRECTIVE` | “All characters are fictional. No minors” |
 | Python creative system prompts | `studio/prompts.py:25` `UNCENSORED_PREAMBLE` | “All characters in this work are fictional adults aged 18 or older; there are no minors.” |
-| Every opencode board agent | `board/AGENTS.md:8` | adult-only preamble injected through `board/opencode.json` `instructions` |
-| opencode task text | `studio/board/opencode.py::_skill_prompt` | adult-only lines for Gate 0, outline, script, voice, object prompts, and QC fixes |
-| Outline writer | `.agents/skills/outline-writer/SKILL.md` | “All characters are fictional adults aged 18 or older. Never write minors.” |
-| Script writer | `.agents/skills/script-writer/SKILL.md` | “Never write minors.” and “Keep every character an adult (18+).” |
-| Script reviewer | `.agents/skills/script-reviewer/SKILL.md` | “Never approve minors.” |
-| Show bootstrap | `.agents/skills/show-bootstrap/SKILL.md` | “Never write minors.” and “Every character is an adult (18+).” |
-| Voice writer | `.agents/skills/voice-writer/SKILL.md` | “Never write minors.” |
-| Object prompts | `.agents/skills/object-prompts/SKILL.md` | “Never write minors.” |
-| QC fixer | `.agents/skills/qc-fixer/SKILL.md` | “Never write minors.” |
-
-Skills that currently have **no** adult-only line:
-
-- `.agents/skills/outline-reviewer/SKILL.md`
-- `.agents/skills/scene-rewriter/SKILL.md`
+| opencode task text | `studio/board/opencode.py::_skill_prompt` | no adult-only lines (prompts.py is the single source) |
+| Board system prompt | `board/AGENTS.md` | no adult-only lines (removed; prompts.py is the single source) |
+| All agent skills | `.agents/skills/*` | no adult-only lines (removed; prompts.py is the single source) |
 
 ## 2. What is not enforced
 

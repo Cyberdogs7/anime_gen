@@ -29,7 +29,7 @@ def propose_concepts(guidance: str = "", n: int = 5, cfg=None, llm=None) -> list
     # omits the field). A cap only truncates a thinking model's JSON.
     data = llm.chat_json(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        model=model, temperature=0.9, max_tokens=None, retries=1, role="concept",
+        model=model, temperature=1.15, max_tokens=None, retries=1, role="concept",
     )
     proposals = data.get("proposals") or []
     if maturity:

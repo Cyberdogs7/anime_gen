@@ -162,14 +162,14 @@ def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
         if entry is None and (step != "refs" or not (c and c.get("id"))):
             raise ValueError(f"no character named '{char}' in bootstrap state")
         if step == "character":
+            # Approving the proposal approves ONLY the proposal. Refs and
+            # voice have their own Gate 0 stages; marking them here would
+            # silently skip that work (their workers skip "approved" entries).
             entry["proposal"] = "approved"
-            entry["refs"] = "approved"
-            entry["voice"] = "approved"
             if c and c.get("id"):
                 from .storyboard import mark_base_ref_approved
-                mark_base_ref_approved(show, c["id"])
+                mark_base_ref_approved(show, c.get("id"))
             _emit(show, CHAR_PROPOSAL_APPROVED, {**payload, "char": char})
-            _emit(show, VOICE_APPROVED, {**payload, "char": char})
         elif step == "refs":
             persisted = False
             if entry is not None:
@@ -189,6 +189,30 @@ def approve_step(show_id: str, step: str, char: str = "", notes: str = "",
         else:
             entry["voice"] = "approved"
             _emit(show, VOICE_APPROVED, {**payload, "char": char})
+    elif step == "scene":
+        # Approve one registry location; the registry completes when every
+        # tracked location is approved.
+        locs = st.setdefault("scenes", {}).setdefault("locations", {})
+        sid = str(slug or char or "").strip()
+        if not sid:
+            raise ValueError("no scene id given for per-scene approval")
+        if sid not in locs:
+            on_disk = [p.stem for p in show.scenes_dir.glob("*.yaml")] \
+                if show.scenes_dir.exists() else []
+            if sid in on_disk:
+                locs[sid] = "pending"
+            else:
+                raise ValueError(f"no scene '{sid}' in the registry")
+        locs[sid] = "approved"
+        if locs and all(v == "approved" for v in locs.values()):
+            st["scenes"]["status"] = "approved"
+            show.set_bootstrap_state(st)
+            _emit(show, SCENE_REGISTRY_APPROVED, payload)
+            return [f"scene {sid} approved; registry complete"]
+        show.set_bootstrap_state(st)
+        _emit(show, SCENE_REGISTRY_APPROVED,
+              {**payload, "scene": sid, "partial": True})
+        return [f"scene {sid} approved"]
     elif step == "scenes":
         st["scenes"]["status"] = "approved"
         if advance:

@@ -120,7 +120,7 @@ def test_clear_scenes_downstream_drops_stale_shot_state(tmp_path, monkeypatch):
 
 # --- #12: CLI character approval means the same as the dashboard -------------
 
-def test_cli_approve_character_sets_proposal_refs_voice(tmp_path, monkeypatch):
+def test_cli_approve_character_sets_only_proposal(tmp_path, monkeypatch):
     import studio.cli as cli
     import studio.bootstrap as bootstrap
     monkeypatch.setattr(bootstrap, "BootstrapChain", _FakeChain)
@@ -139,8 +139,10 @@ def test_cli_approve_character_sets_proposal_refs_voice(tmp_path, monkeypatch):
     assert rc == 0
     entry = show.bootstrap_state()["characters"][0]
     assert entry["proposal"] == "approved"
-    assert entry["refs"] == "approved"
-    assert entry["voice"] == "approved"
+    # Refs and voice keep their own gates: approving the proposal must not
+    # silently approve stages whose artifacts were never generated.
+    assert entry["refs"] == ""
+    assert entry["voice"] == ""
 
 
 # --- helpers ------------------------------------------------------------------

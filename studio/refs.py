@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from .show import Show
 NUDE_LABEL = "nude"
 
 
+# ---------------------------------------------------------------------------
+# State — the ONLY place refs.json is read/written.
 # ---------------------------------------------------------------------------
 # State — the ONLY place refs.json is read/written.
 # ---------------------------------------------------------------------------
@@ -175,11 +178,13 @@ def _render_costume_via_krea2(show: Show, name: str, prompt: str, label: str,
         with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
             generate_keyframe(client, load_workflow(cfg.workflows_dir / "image_keyframe.json"),
                               prompt, seed, out_path, aspect_ratio="3:4",
-                              style_ref=_style_anchor_arg(show) or None)
+                                style_ref=_style_anchor_arg(show) or None)
         return True
     except Exception as exc:
         ACTIVITY.setdefault(show.show_id, {})["detail"] = f"Krea2 ref {label} failed: {exc}"
-        return False
+        # Loud, not silent: callers stub the ref with this message, so the
+        # card names the ComfyUI cause instead of "ref generation failed".
+        raise RuntimeError(f"Krea2 {label} render failed: {exc}") from exc
     finally:
         if stop is not None:
             stop()
@@ -213,7 +218,8 @@ def _render_costume_via_qwen_edit(show: Show, base_ref: str | None, name: str,
             logging.getLogger(__name__).warning(
                 "Qwen edit %s: could not upload edit source %s — not falling back",
                 label, base_ref)
-            return False
+            raise RuntimeError(
+                f"Qwen edit {label}: could not upload edit source; not falling back")
         with get_gpu_manager(cfg).acquire(ServiceType.COMFYUI):
             return _qwen_edit_render(show, client, cfg, prompt, ref_fn, label, out_path, seed)
     finally:
@@ -236,7 +242,7 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
         status = (entry.get("status") or {}).get("status_str", "")
         if status != "success":
             ACTIVITY.setdefault(sid, {})["detail"] = f"Qwen edit {label} status: {status}"
-            return False
+            raise RuntimeError(f"Qwen edit {label} failed with status: {status or 'unknown'}")
         img = None
         for _nid, output in (entry.get("outputs") or {}).items():
             for i in output.get("images", []):
@@ -246,7 +252,7 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
                 break
         if not img:
             ACTIVITY.setdefault(sid, {})["detail"] = f"Qwen edit {label}: no output image"
-            return False
+            raise RuntimeError(f"Qwen edit {label} produced no output image")
         client.download(img["filename"], img.get("subfolder", ""),
                         img.get("type", "output"), out_path)
         return True
@@ -255,7 +261,9 @@ def _qwen_edit_render(show: Show, client, cfg, prompt: str, ref_fn: str, label: 
         ACTIVITY.setdefault(sid, {})["detail"] = f"Qwen edit {label} failed: {exc}"
         logging.getLogger(__name__).warning("qwen edit failed for %s: %s", label, exc,
                                             exc_info=True)
-        return False
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Qwen edit {label} failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -639,12 +647,13 @@ def generate_refs(show: Show, cid: str, char: dict[str, Any] | None = None,
 # Resolver — the ONE way to look up a character's refs by name.
 # ---------------------------------------------------------------------------
 def ensure_ref(show: Show, char: dict[str, Any], cfg=None, llm=None,
-               report=None, force: bool = False) -> str:
+               report: Callable[[str], None] | None = None,
+               force: bool = False, notes: str = "") -> str:
     """Ensure ONE character has refs — the SINGLE generator used by both the
     bootstrap chain and the startup pass. Returns ``"real"`` when a ref landed
     (a nude awaiting approval counts), else ``"stub"``. Idempotent unless
-    ``force`` (reject/regenerate), which re-renders. There is no other ref
-    generator to race with this one."""
+    ``force`` (reject/regenerate) is set, which re-renders; ``notes`` carries
+    director feedback into the revision."""
     import logging
     cfg = cfg or get_config()
     cid = char.get("id", "") or "char"
@@ -670,12 +679,15 @@ def ensure_ref(show: Show, char: dict[str, Any], cfg=None, llm=None,
     if report:
         report(f"Generating {name}'s refs — nude root, then outfit…")
     try:
-        if not generate_refs(show, cid, char, cfg=cfg, llm=llm, force=force):
+        if not generate_refs(show, cid, char, cfg=cfg, llm=llm, force=force,
+                              notes=notes):
             raise RuntimeError("ref generation failed")
         return "real"
     except Exception as exc:
         logging.getLogger(__name__).warning("character ref generation failed: %s", exc)
-        mark_stub(show, cid, "character ref generation unavailable")
+        # Record WHY it stubbed: the note surfaces in the card's Missing /
+        # failed refs row, so the director sees the cause instead of a blank.
+        mark_stub(show, cid, f"character ref generation failed: {exc}"[:300])
         return "stub"
 
 
@@ -704,10 +716,12 @@ def regenerate_nude(show: Show, cid: str, char: dict[str, Any], cfg=None, llm=No
             if r or rw:
                 _recombine(char)
                 show.write_character(char)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "nude revision skipped (%s); rendering from current sheet", exc)
     elif (not (char.get("identity_canonical") or "").strip()
-          or not (char.get("wardrobe_canonical") or "").strip()):
+        or not (char.get("wardrobe_canonical") or "").strip()):
         parts = _backfill_identity(show, char, llm, cfg)
         if parts:
             char.update(parts)
@@ -725,11 +739,14 @@ def regenerate_nude(show: Show, cid: str, char: dict[str, Any], cfg=None, llm=No
 
 def regenerate_base(show: Show, cid: str, char: dict[str, Any], cfg=None, llm=None,
                     notes: str = "") -> bool:
-    """Regenerate a character's clothed CANONICAL (base) from their APPROVED nude.
+    """Regenerate a character's clothed CANONICAL (base), honoring ``notes``.
 
-    Revises the OUTFIT (wardrobe) from ``notes`` — never the body — then re-renders
-    ``base`` as an edit of the approved nude (which is kept). Returns False when
-    there is no approved nude to derive from (caller should re-roll the nude).
+    Revises the OUTFIT (wardrobe) from ``notes`` and re-renders ``base`` as an
+    edit of the approved nude (which is kept) — unless the notes target the
+    BODY itself (gender, face, build). A changed body invalidates the old nude
+    root, so the nude is re-rolled first and the base re-derived from it.
+    Returns False when there is no approved nude to derive from (caller should
+    re-roll the nude).
     """
     cfg = cfg or get_config()
     data = load_refs(show, cid)
@@ -744,14 +761,39 @@ def regenerate_base(show: Show, cid: str, char: dict[str, Any], cfg=None, llm=No
             model = (cfg.get("llm", "roles", {}).get("showrunner")
                      or cfg.get("llm", "model"))
             bible = show.read_bible() or {}
+            style = (bible.get("style_guide") or "").strip()
+            current_ident = identity_canonical(char)
+            r = _revise_identity(llm, model, name, current_ident, notes,
+                                 bible=bible, style=style)
+            if r and r.strip() != current_ident.strip():
+                # Body changed: the approved nude no longer matches. Re-roll
+                # the root (drops stale derived variants + their approvals)
+                # and derive the base from the fresh nude below.
+                char["identity_canonical"] = r
+                _recombine(char)
+                show.write_character(char)
+                data["approved"] = [a for a in (data.get("approved") or [])
+                                    if a != NUDE_LABEL]
+                save_refs(show, cid, data)
+                vmodel = (cfg.get("llm", "roles", {}).get("describer")
+                          or cfg.get("llm", "model") or "")
+                fresh = ensure_nude_ref(show, cid, name, cfg, force=True,
+                                        llm=llm, model=vmodel)
+                if not fresh:
+                    return False
+                data = load_refs(show, cid)
+                nude = (data.get("variants") or {}).get(NUDE_LABEL)
+                if not nude:
+                    return False
             rw = _revise_wardrobe(llm, model, name, wardrobe(char), notes, bible=bible,
-                                  style=(bible.get("style_guide") or "").strip())
+                                  style=style)
             if rw:
                 char["wardrobe_canonical"] = rw
                 _recombine(char)
                 show.write_character(char)
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "base revision skipped (%s); rendering from current sheet", exc)
     refs_dir = show.character_refs_dir(cid)
     out = refs_dir / f"{cid}_ref_01.png"
     outfit = wardrobe(char) or name

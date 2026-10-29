@@ -13,11 +13,10 @@ concurrency_limit: 4
 gpu_guard_urls:
   - "http://127.0.0.1:8188"
   - "http://127.0.0.1:8189"
-model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-# The 27B already offloads to CPU at 32k. A larger context is a little slower,
-# but runs complete instead of filling a small context and then crashing.
-# Keep one slot; the loader (studio/gpu_manager.py preload_model) enforces
-# this value on every `lms load`, overriding LM Studio's per-model default.
+model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+# Context/parallel targets only; the loader (studio/gpu_manager.py
+# preload_model) does NOT enforce these. LM Studio's remembered per-model
+# settings (context length, concurrent slots, GPU offload) are authoritative.
 context: 80000
 parallel: 1
 # Safety net for a non-streaming call that never returns; not a speed target.
@@ -33,25 +32,26 @@ max_output_tokens: 0
 
 # Role -> model assignment. Model names must be loaded in LM Studio's catalog.
 roles:
-  showrunner: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  bible: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  script: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-  judge: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+  showrunner: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  bible: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  script: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  judge: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
   # Reviewers judge a fixed artifact against a rubric and return one verdict, so
   # an 8B model is enough - and nine of them finish in minutes instead of hours.
-  slop_reviewer: "dolphin3.0-llama3.1-8b"
-  continuity_reviewer: "dolphin3.0-llama3.1-8b"
-  fan_service_reviewer: "dolphin3.0-llama3.1-8b"
-  growth_reviewer: "dolphin3.0-llama3.1-8b"
-  structure_reviewer: "dolphin3.0-llama3.1-8b"
-  voice_reviewer: "dolphin3.0-llama3.1-8b"
-  exposition_reviewer: "dolphin3.0-llama3.1-8b"
-  pacing_reviewer: "dolphin3.0-llama3.1-8b"
-  stakes_reviewer: "dolphin3.0-llama3.1-8b"
-  visual_reviewer: "dolphin3.0-llama3.1-8b"
-  agency_reviewer: "dolphin3.0-llama3.1-8b"
-  serial_reviewer: "dolphin3.0-llama3.1-8b"
-  describer: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"   # also handles vision (frame/image analysis)
+  slop_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  continuity_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  fan_service_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  growth_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  structure_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  voice_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  exposition_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  pacing_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  stakes_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  visual_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  agency_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  serial_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  repetition_reviewer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+  describer: "gemma4-12b-qat-uncensored-hauhaucs-balanced"   # vision model (frame/image analysis)
 
 gpu_offload: true          # if false, LLM runs on CPU during render phases
 evict_before_render: true  # unload LLM before Krea 2 / H3 renders (per-node GPU manager)

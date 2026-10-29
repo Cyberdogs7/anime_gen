@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import tools as tools_mod
+from ..prompts import BOARD_AGE_GATE
 from .agent import AgentResult
 
 
@@ -36,6 +37,43 @@ def _opencode_exe() -> str | None:
 
 
 REMOTE_PREFIXES = ("opencode/", "opencode-go/", "openrouter/", "quota-router/")
+
+
+# Fragment passes: skill -> (fragment suffix, one-line job, inputs note).
+# The producer task branch below is parameterized from this table so every
+# single-responsibility pass shares one prompt shape.
+_FRAGMENT_WRITERS = {
+    "location-writer": ("location",
+        "location fragment (set + time of day)",
+        "the plan's location fields and registry"),
+    "cast-writer": ("cast",
+        "cast fragment (exact on-screen names)",
+        "the plan cast plus the location fragments"),
+    "outfit-writer": ("outfits",
+        "outfit fragment (costume label per character)",
+        "the cast and location fragments plus the canon wardrobe"),
+    "object-prompts": ("objects",
+        "object fragment (props that matter, with visual detail)",
+        "the plan objects plus the location and cast fragments"),
+    "narrative-writer": ("narrative",
+        "narrative fragment (2-5 sentences of what happens)",
+        "the plan beats plus the location, cast, and object fragments"),
+    "dialogue-writer": ("dialogue",
+        "dialogue fragment (numbered spoken lines only)",
+        "the narrative fragment plus prior fragments for voice"),
+    "shot-splitter": ("shots",
+        "shot fragment (boundaries, durations, line refs — no camera)",
+        "the narrative and dialogue fragments"),
+    "camera-director": ("camera",
+        "camera fragment (framing/angle/movement per shot)",
+        "the shots fragment plus the n-1/n+1 shots for continuity"),
+    "action-writer": ("action",
+        "action fragment (pose-to-pose movement per shot)",
+        "the shots and camera fragments"),
+    "sound-writer": ("sound",
+        "sound fragment (soundscape + music cue per shot)",
+        "the shots fragment"),
+}
 
 
 def _needs_preload(model: str) -> bool:
@@ -82,7 +120,6 @@ class OpenCodeAgent:
             "outline_skeleton": "outline_skeleton",
             "outline_beats": "outline_beats",
             "outline_scene": "rewrite_scene",
-            "script": "generate_script",
         }.get(kind)
         if (self.phase == "produce" and produce_tool
                 and not getattr(self.role, "iterate", False)):
@@ -112,6 +149,8 @@ class OpenCodeAgent:
         return (
             f"You are the {self.role.name} agent on an anime production board.\n"
             f"You work exactly one card. Phase: {self.phase}.\n"
+            f"Central gate — applies to everything you do on this card:\n"
+            f"{BOARD_AGE_GATE}\n\n"
             f"{job}\n\n"
             f"{guard}"
             f"CARD:\n{self._json(card)}\n\n"
@@ -160,7 +199,7 @@ class OpenCodeAgent:
                 from ..scenes import registry_block
                 from ..planner import read_director_notes
                 show = Show(str(self.card.get("show_id") or ""))
-                if str(self.role.skill) == "show-bootstrap":
+                if str(self.role.skill) in ("show-bootstrap", "show-ideas"):
                     import yaml as _yaml
                     scenes = []
                     for sid in show.list_scenes():
@@ -177,6 +216,7 @@ class OpenCodeAgent:
                         "characters": [show.read_character(cid)
                                        for cid in show.list_characters()],
                         "scenes": scenes,
+                        "ideas": show.read_ideas(),
                         "bootstrap": show.bootstrap_state(),
                     })
                 else:
@@ -199,27 +239,17 @@ class OpenCodeAgent:
         record_py = root / "tools" / "record_outline_review.py"
         apply_py = root / "tools" / "apply_outline_changes.py"
         if self.phase == "review":
-            if str(self.role.skill) == "script-reviewer":
-                review_path = ep_dir / "reviews" / "script-review-r1.json"
-                scripts = sorted(ep_dir.glob("script.r*.json"))
-                scene_files = (sorted((ep_dir / "script_scenes").glob("*.json"))
-                               if (ep_dir / "script_scenes").exists() else [])
+            if str(self.role.skill) != "outline-reviewer":
+                # Fragment reviewers (and any future skill reviewer): the
+                # skill names its own read/write files, so the task stays
+                # generic. The outline reviewer below keeps its record step.
                 task = (
-                    "TASK: Review the latest screenplay against the skill. Read "
-                    "these files with the read tool:\n"
-                    f"- plan: {plan_path}\n"
-                    f"- latest script: {scripts[-1] if scripts else '(none)'}\n"
-                    "- scene files:\n"
-                    + ("\n".join(f"  {p}" for p in scene_files) or "  (none)")
-                    + f"\n- canon: {show_dir / 'bible.yaml'}, "
-                    f"{show_dir / 'characters'}, "
-                    f"{show_dir / 'continuity' / 'state.json'}\n"
-                    f"Write this file with the write tool:\n  {review_path}\n"
-                    "Format: {\"round\": 1, \"passed\": bool, "
-                    "\"reviews\": {name: {\"grade\": \"Pass\"|\"Fail\", "
-                    "\"pass\": bool, \"review\": \"...\"}}}.\n"
-                    "Blocking reviewers: structure, continuity, fan_service. "
-                    "Use one short sentence per reviewer.\n"
+                    "TASK: Review per the SKILL above. Use the read tool for "
+                    "the files it names under:\n"
+                    f"  {ep_dir}\n"
+                    "Write the review file the skill names with the write "
+                    "tool. Do not read, glob, or grep the show beyond what "
+                    "the skill allows; do not edit the reviewed files.\n"
                 )
                 finish = (f'python "{studio_py}" board-finish --run {{run}} '
                           '--verdict pass|fail --notes "..."')
@@ -261,8 +291,7 @@ class OpenCodeAgent:
                     "Use the current artifacts in SHOW CANON. Rewrite only the "
                     "affected artifact; a concept change also refreshes bible, "
                     "characters, and scenes; a bible change refreshes characters "
-                    "and scenes. Keep approved artifacts that are not affected. "
-                    "All characters are adults (18+).\n"
+                    "and scenes. Keep approved artifacts that are not affected.\n"
                     f"Then run (bash): python \"{apply_boot_py}\" --card "
                     f"{self.card.get('id')}\n"
                     "It validates, updates bootstrap state, and attaches the "
@@ -284,6 +313,36 @@ class OpenCodeAgent:
                 )
             finish = (f'python "{studio_py}" board-finish --run {{run}} '
                       '--status verified|retake|blocked --summary "..."')
+        elif str(self.role.skill) == "show-ideas":
+            check_py = root / "tools" / "check_show_ideas.py"
+            draft_py = root / "tools" / "draft_show_ideas.py"
+            ideas_path = show_dir / "ideas.json"
+            brief = str((self.card.get("payload") or {}).get("brief") or "")
+            n = int((self.card.get("payload") or {}).get("n") or 5)
+            task = (
+                "TASK: Pitch 5 distinct executions of the owner's brief.\n"
+                "Step 1 (do this FIRST, before anything else): run (bash):\n"
+                f"  python \"{draft_py}\" --card {self.card.get('id')}\n"
+                "It makes the draft LLM call and writes the archive file:\n"
+                f"  {ideas_path}\n"
+                "Only python helper commands are allowed in bash; type/cat/read "
+                "are denied. A missing ideas.json is EXPECTED before step 1 — "
+                "run the draft command instead of inspecting anything.\n"
+                f"Owner brief:\n{brief or '(none)'}\n"
+                f"Then run (bash): python \"{check_py}\" --show "
+                f"{self.card.get('show_id')}\n"
+                "It names the pitches to rewrite (bad schema/slug/duplicates). "
+                "Rewrite ONLY flagged pitches with the edit tool, keep the good "
+                "ones, and re-run the checker (max 4 rounds). Then do one critic "
+                "pass: if two pitches feel like the same show, or one ignores "
+                "the brief, rewrite the weaker and re-run the checker. "
+                "Do not write pitches in chat; the archive file is the only "
+                "draft surface.\n"
+                "Copy the board-finish command EXACTLY as given below; its "
+                "script is <root>\\studio.py, never tools\\studio.py.\n"
+            )
+            finish = (f'python "{studio_py}" board-finish --run {{run}} '
+                      '--status verified|retake|blocked --summary "..."')
         elif str(self.role.skill) == "voice-writer":
             import re as _re
             char = str((self.card.get("payload") or {}).get("char") or "").strip()
@@ -294,7 +353,7 @@ class OpenCodeAgent:
                 f"TASK: Write a 150-300 word first-person voice sample for {char} "
                 f"to this file with the write tool:\n  {sample_path}\n"
                 "Plain text only: read-aloud rhythm, attitude, vocabulary, and a "
-                "few lines in character. All characters are adults (18+).\n"
+                "few lines in character.\n"
                 f"Then run (bash): python \"{apply_voice_py}\" --card "
                 f"{self.card.get('id')}\n"
                 "It saves the sample, resets the voice state, and creates the TTS "
@@ -325,55 +384,66 @@ class OpenCodeAgent:
                 f"{self.card.get('id')}\n"
                 "The assembler writes the new script revision; the requeue helper "
                 "creates the render cards. Do not use apply_qc_fixes.\n"
-                "All characters are adults (18+).\n"
             )
             finish = (f'python "{studio_py}" board-finish --run {{run}} '
                       '--status verified|retake|blocked --summary "..."')
-        elif str(self.role.skill) == "object-prompts":
-            apply_obj_py = root / "tools" / "apply_object_prompts.py"
-            obj_path = ep_dir / "object-prompts.json"
+        elif str(self.role.skill) in _FRAGMENT_WRITERS:
+            frag, what, inputs = _FRAGMENT_WRITERS[str(self.role.skill)]
+            passes_dir = ep_dir / "passes"
+            hash_py = root / "tools" / "pass_hash.py"
+            check_py = root / "tools" / "check_pass.py"
+            prev_hash = str((self.card.get("result") or {}).get("input_hash") or "")
             task = (
-                f"TASK: Write the episode's object image prompts to this file with "
-                f"the write tool:\n  {obj_path}\n"
-                "Format: {\"objects\": [{\"name\": \"exact plan object name\", "
-                "\"description\": \"one paragraph of visual detail\"}]}.\n"
-                "Use the plan's objects list; include every object. Describe the "
-                "object's shape, materials, scale, markings and wear, not a scene "
-                "or a character.\n"
-                f"Then run (bash): python \"{apply_obj_py}\" --card "
-                f"{self.card.get('id')}\n"
-                "It builds and saves the Krea 2 object prompts. Fix missing "
-                "objects and re-run.\n"
-                "Do not read, glob, or grep the show; the plan, canon, and skill "
-                "are in this prompt.\n"
-            )
-            finish = (f'python "{studio_py}" board-finish --run {{run}} '
-                      '--status verified|retake|blocked --summary "..."')
-        elif str(self.role.skill) == "script-writer":
-            assemble_py = root / "tools" / "assemble_script.py"
-            scenes_dir = ep_dir / "script_scenes"
-            existing = (sorted(p.stem for p in scenes_dir.glob("*.json"))
-                        if scenes_dir.exists() else [])
-            notes = (self.card.get("notes")
-                     or (self.card.get("payload") or {}).get("notes") or [])
-            task = (
-                "TASK: Write the screenplay scene files for every plan scene, in "
-                f"plan order, under:\n  {scenes_dir}\\<scene id>.json\n"
-                f"Scene files already present: {', '.join(existing) or 'none'}.\n"
-                "For each plan scene, write a JSON object with id, location, "
-                "time_of_day, summary, narrative, characters, and a shots list of "
-                "4-8 shots. Each shot needs id, type, importance, duration_s, "
-                "beat, camera, action, references, soundscape, music, dialogue, "
-                "and silence. Use the SKILL schema exactly.\n"
+                f"TASK: Write the {what} for every plan scene, in plan order, "
+                f"one file per scene with the write tool:\n  {passes_dir}"
+                f"\\<scene id>.{frag}.json\n"
+                f"Inputs: the CURRENT PLAN above plus {inputs}. Write exactly "
+                "one concern per file — the SKILL defines the schema; do not "
+                "add other passes' fields.\n"
+                "Step 0 (fast-pass): run (bash): python "
+                f"\"{hash_py}\" --card {self.card.get('id')}\n"
+                "It prints one sha1 over this pass's inputs. If it matches "
+                f"input_hash below AND every scene file exists, the inputs are "
+                "unchanged: do not rewrite anything, finish --status verified "
+                "with a one-line summary.\n"
+                f"input_hash: {prev_hash or '(none yet)'}\n"
                 "If the card has notes, rewrite every affected scene; leave "
-                "unaffected existing scene files alone. Do not use filler.\n"
-                "After every plan scene has a file, run (bash): python "
+                "unaffected existing files alone.\n"
+                f"Then run (bash): python \"{check_py}\" --card "
+                f"{self.card.get('id')} --pass {frag}\n"
+                "It validates every fragment (schema + cross-refs). Fix "
+                "flagged files and re-run.\n"
+                "Do not read, glob, or grep the show; the plan, needed prior "
+                "fragments, skill, and card are in this prompt.\n"
+            )
+            finish = (f'python "{studio_py}" board-finish --run {{run}} '
+                      '--status verified|retake|blocked --summary "..."')
+        elif str(self.role.skill) == "h3-writer":
+            merge_py = root / "tools" / "merge_passes.py"
+            compile_py = root / "tools" / "compile_h3_prompts.py"
+            assemble_py = root / "tools" / "assemble_script.py"
+            task = (
+                "TASK: Merge the episode fragments into scene files, compile "
+                "the H3 prompts, then assemble the script. Run (bash):\n"
+                f"  python \"{merge_py}\" --card {self.card.get('id')}\n"
+                "It merges runs/EPxx/passes/<sid>.*.json into script_scenes/ "
+                "<sid>.json (full scene schema), builds object-prompts.json, "
+                "and saves the Krea object prompts. Fix flagged fragments "
+                "(edit ONLY the named pass files) and re-run.\n"
+                "  python "
+                f"\"{compile_py}\" --card {self.card.get('id')}\n"
+                "It compiles every shot's H3 prompt without rendering and "
+                "reports shots whose framed characters/sets lack approved "
+                "refs. If it reports gaps, do NOT invent refs: finish "
+                "--status verified anyway (mechanical merge done) — the "
+                "reviewer fails the card with directives for the right "
+                "upstream pass.\n"
+                "  python "
                 f"\"{assemble_py}\" --card {self.card.get('id')}\n"
-                "It validates, normalizes, resolves locations, writes the next "
-                "script.rN.json, and attaches it. Fix any missing/invalid scene "
-                "and re-run.\n"
-                "Do not read, glob, or grep the show; the plan, show canon, and "
-                "skill are in this prompt. Do not write script.r*.json yourself.\n"
+                "It validates, normalizes, writes the next script.rN.json, "
+                "and attaches it.\n"
+                "Do not read, glob, or grep the show; the card and skill are "
+                "in this prompt. Do not write script.r*.json yourself.\n"
             )
             finish = (f'python "{studio_py}" board-finish --run {{run}} '
                       '--status verified|retake|blocked --summary "..."')
@@ -400,8 +470,7 @@ class OpenCodeAgent:
                     "characters, location_id, location, location_setting, "
                     "time_of_day, and exactly 3 beats (Setup/Change/Consequence).\n"
                     "Use the SHOW CANON above: expand each season key beat into "
-                    "2-3 distinct scenes, vary locations, and keep every "
-                    "character an adult (18+). Do not write minors.\n"
+                    "2-3 distinct scenes and vary locations.\n"
                     "Use the write tool exactly once for that file; do not print "
                     "the JSON in chat and do not use bash to write it.\n"
                     f"Then run (bash): python \"{apply_py}\" --card "
@@ -443,7 +512,9 @@ class OpenCodeAgent:
                       if self.phase != "review" else "")
         return (
             f"You are the {self.role.name} agent on an anime production board.\n"
-            f"You work exactly one card. Phase: {self.phase}.\n\n"
+            f"You work exactly one card. Phase: {self.phase}.\n"
+            f"Central gate — applies to everything you do on this card:\n"
+            f"{BOARD_AGE_GATE}\n\n"
             f"SKILL:\n{skill_text}\n\n"
             f"{show_block}"
             f"CURRENT PLAN ({plan_path}):\n{plan_text}\n\n"
@@ -501,9 +572,15 @@ class OpenCodeAgent:
         err = open(self.run_dir / "stderr.log", "wb")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
+            # Explicit UTF-8: the prompt routinely contains non-ASCII
+            # glyphs (opencode renders failed tool calls with ✗, model
+            # output may too). The Windows locale default (cp1252) cannot
+            # encode them and the spawn dies with "spawn failed: 'charmap'
+            # codec can't encode...". Node reads stdin as UTF-8.
             self.proc = subprocess.Popen(
                 cmd, cwd=str(self.worker), stdin=subprocess.PIPE,
-                stdout=log, stderr=err, env=env, text=True, creationflags=flags)
+                stdout=log, stderr=err, env=env, text=True,
+                encoding="utf-8", creationflags=flags)
             if self.proc.stdin:
                 self.proc.stdin.write(prompt)
                 self.proc.stdin.close()

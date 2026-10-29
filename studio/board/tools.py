@@ -313,7 +313,8 @@ def gate0_ideas(ctx: ToolContext, args: dict[str, Any]) -> Any:
     except (TypeError, ValueError):
         n = 5
     chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
-    log = chain.advance_ideas(brief=str(payload.get("brief") or ""), n=n)
+    log = chain.advance_ideas(brief=str(payload.get("brief") or ""), n=n,
+                             notes=str(payload.get("notes") or ""))
     st = gate0.status(show, "ideas")
     if show.ideas_path.exists():
         _attach_unique(ctx, show.ideas_path, "Gate 0 ideas archive")
@@ -330,7 +331,8 @@ def gate0_bible(ctx: ToolContext, args: dict[str, Any]) -> Any:
     if (st0.get("concept") or {}).get("status") != "approved":
         raise ValueError("concept is not approved yet; pick a pitch first")
     chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
-    log = chain.advance_bible()
+    _notes = str((ctx.card.get("payload") or {}).get("notes") or "")
+    log = chain.advance_bible(notes=_notes, force=bool(_notes))
     st = gate0.status(show, "bible")
     for rel in ("concept.json", "bible.yaml"):
         p = show.dir / rel
@@ -349,7 +351,8 @@ def gate0_characters(ctx: ToolContext, args: dict[str, Any]) -> Any:
     if (st0.get("bible") or {}).get("status") != "approved":
         raise ValueError("bible is not approved yet")
     chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
-    log = chain.advance_characters()
+    _notes = str((ctx.card.get("payload") or {}).get("notes") or "")
+    log = chain.advance_characters(notes=_notes, force=bool(_notes))
     st = gate0.status(show, "characters")
     for cid in show.list_characters():
         _attach_unique(ctx, show.characters_dir / f"{cid}.yaml",
@@ -367,7 +370,8 @@ def gate0_scenes(ctx: ToolContext, args: dict[str, Any]) -> Any:
     if (st0.get("bible") or {}).get("status") != "approved":
         raise ValueError("bible is not approved yet")
     chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
-    log = chain.advance_scene_registry()
+    _notes = str((ctx.card.get("payload") or {}).get("notes") or "")
+    log = chain.advance_scene_registry(notes=_notes, force=bool(_notes))
     st = gate0.status(show, "scenes")
     for sid in show.list_scenes():
         _attach_unique(ctx, show.scenes_dir / f"{sid}.yaml", f"scene {sid}")
@@ -380,13 +384,39 @@ def gate0_images(ctx: ToolContext, args: dict[str, Any]) -> Any:
     from ..bootstrap import BootstrapChain
     from . import gate0
     show = _show(ctx)
-    chain = BootstrapChain(show, cfg=ctx.cfg, llm=None)
+    chain = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx))
+    _notes = str((ctx.card.get("payload") or {}).get("notes") or "").strip()
+    before = {}
+    if _notes:
+        for _a in (ctx.card.get("artifacts") or []):
+            _p = Path(ctx.cfg.root) / str(_a.get("path") or "")
+            try:
+                before[str(_a.get("path"))] = _p.stat().st_mtime if _p.exists() else -1
+            except OSError:
+                before[str(_a.get("path"))] = -1
     from ..gpu_manager import get_gpu_manager
     gm = get_gpu_manager(ctx.cfg)
     try:
-        log = chain.advance_images()
+        log = chain.advance_images(notes=_notes)
     finally:
         gm.unload_comfy()
+    if _notes:
+        # Files that were actually re-rendered go back to unreviewed so the
+        # per-image Approve/Reject buttons come back; untouched ones keep
+        # their rejected state.
+        from . import assets as _assets
+        for _a in (ctx.store.get(ctx.card["id"]) or {}).get("artifacts") or []:
+            if str(_a.get("status") or "") != "rejected":
+                continue
+            _p = Path(ctx.cfg.root) / str(_a.get("path") or "")
+            try:
+                _fresh = _p.exists() and _p.stat().st_mtime > before.get(str(_a.get("path")), -1)
+            except OSError:
+                _fresh = False
+            if _fresh:
+                _assets.update_artifact(ctx.store, ctx.card["id"],
+                                         str(_a.get("path") or ""),
+                                         status="", notes=_a.get("notes", ""))
     st = gate0.status(show, "images")
     path = show.dir / "bootstrap.json"
     if path.exists():
@@ -435,22 +465,36 @@ def image_retake(ctx: ToolContext, args: dict[str, Any]) -> Any:
                          asset={**asset, "retakeable": False})
     if asset.get("type") == "scene":
         sid = str(asset.get("id") or "")
+        if notes.strip():
+            # Same fix as for characters: a "different place" request has to
+            # rewrite the location brief first, or the re-render repeats it.
+            from ..bootstrap import BootstrapChain
+            BootstrapChain(show, cfg=ctx.cfg, llm=None).refresh_scene(sid, notes)
         scene_path = show.scenes_dir / f"{sid}.yaml"
         scene = (yaml.safe_load(scene_path.read_text(encoding="utf-8")) or {}
                  if scene_path.exists() else {})
         ok = scenes_mod.generate_ref(show, scene, sid, cfg=ctx.cfg,
                                      force=True, notes=notes)
     else:
+        from ..clients.lmstudio import LMStudioClient
+        # The revision below is what makes a retake different from the
+        # rejected original: without a real LLM here the notes are silently
+        # ignored and the worker re-renders the identical image.
+        llm = LMStudioClient(ctx.cfg.get("llm", "base_url"), timeout=240)
         cid = str(asset.get("id") or "")
         label = str(asset.get("label") or "")
         char = show.read_character(cid)
         if label == "nude":
-            ok = bool(refs_mod.ensure_nude_ref(
-                show, cid, char.get("name") or cid, cfg=ctx.cfg,
-                force=True, llm=None, notes=notes))
+            ok = refs_mod.regenerate_nude(show, cid, char, cfg=ctx.cfg,
+                                          llm=llm, notes=notes)
         elif label == "base":
             ok = refs_mod.regenerate_base(show, cid, char, cfg=ctx.cfg,
-                                          llm=None, notes=notes)
+                                          llm=llm, notes=notes)
+            if not ok:
+                # No approved nude to derive from: re-roll the nude root
+                # itself instead of failing the retake outright.
+                ok = refs_mod.regenerate_nude(show, cid, char, cfg=ctx.cfg,
+                                              llm=llm, notes=notes)
         else:
             raise ValueError(f"retake not implemented for {assets.asset_title(asset)}")
     if not ok:
@@ -477,6 +521,12 @@ def gate0_voices(ctx: ToolContext, args: dict[str, Any]) -> Any:
         char = str(raw_char.get("name") or raw_char.get("id") or "")
     else:
         char = str(raw_char or "")
+    _vnotes = str((ctx.card.get("payload") or {}).get("notes") or "").strip()
+    if _vnotes and char:
+        # A card-level voice reject carries director notes: run the full
+        # voice redo (identity + sample text) before re-recording, so the
+        # retake rebuilds everything instead of reusing the rejected voice.
+        chain.refresh_voice(char, _vnotes)
     log = chain.advance_voices(char)
     chain.check_complete()
     st = gate0.status(show, "voices")
@@ -519,52 +569,38 @@ def gate0_voices(ctx: ToolContext, args: dict[str, Any]) -> Any:
       "Write a 70-110 word first-person voice sample for a character.",
       {"char": "character name", "notes": "director notes (optional)"})
 def write_voice_sample(ctx: ToolContext, args: dict[str, Any]) -> Any:
-    from .. import prompts
     show = _show(ctx)
     name = str(args.get("char") or "").strip()
     notes = str(args.get("notes")
                 or (ctx.card.get("payload") or {}).get("notes") or "").strip()
     if not name:
         raise ValueError("char is required")
-    char = None
-    for cid in show.list_characters():
-        c = show.read_character(cid) or {}
-        if str(c.get("name") or "").lower() == name.lower():
-            char = c
-            break
-    if not char:
-        raise KeyError(f"no character named {name!r}")
-    bible = show.read_bible() or {}
-    profile = show.style_profile(ctx.cfg)
-    system = prompts.showrunner_system(profile, bible.get("content_policy") or "",
-                                       profile.get("baseline", ""))
-    llm = _role_llm(ctx)
-    prompt = prompts.voice_sample_prompt(char, bible)
-    if notes:
-        prompt = prompt.rstrip() + f"\n\nDirector's notes for this rewrite:\n{notes}"
-    data = llm.chat_json(
-        [{"role": "system", "content": system},
-         {"role": "user", "content": prompt}],
-        model=ctx.role.model, temperature=0.8)
-    text = str((data or {}).get("voice_sample_text") or "").strip()
-    if len(text.split()) < 50:
-        raise ValueError("model returned a voice sample that is too short")
-    char["voice_sample_text"] = text
-    show.write_character(char)
-    st = show.bootstrap_state()
-    for entry in st.get("characters", []):
-        if str(entry.get("name") or "").lower() == name.lower():
-            entry["voice"] = ""
-    show.set_bootstrap_state(st)
+    from ..bootstrap import BootstrapChain
+    text = BootstrapChain(show, cfg=ctx.cfg, llm=_role_llm(ctx)).refresh_voice(
+        name, notes, model=str(ctx.role.model or ""))
     # Guarantee the TTS follow-up exists even if the caller only queued the
     # text card. The voices card waits for this card to be accepted.
     parent = str((ctx.card.get("payload") or {}).get("parent") or "")
     asset = (ctx.card.get("payload") or {}).get("asset") or {}
-    active = [c for c in ctx.store.all(show_id=show.show_id)
-              if c.get("kind") == "gate0_voices"
-              and str((c.get("payload") or {}).get("char") or "").lower() == name.lower()
-              and c.get("state") not in ("accepted", "blocked", "deferred")]
+    same = [c for c in ctx.store.all(show_id=show.show_id)
+            if c.get("kind") == "gate0_voices"
+            and str((c.get("payload") or {}).get("char") or "").lower() == name.lower()]
+    live = [c for c in same if c.get("state") not in ("accepted",)]
+    parked = [c for c in live
+              if c.get("state") in ("blocked", "deferred")]
+    active = [c for c in live if c not in parked]
     audio_card = active[0]["id"] if active else ""
+    if parked and not active:
+        # Reuse the character's own card instead of minting a duplicate.
+        for _c in parked:
+            ctx.store.update(_c["id"], attempts=0)
+            try:
+                ctx.store.advance(_c["id"], "planned", "human",
+                                  "voice rework requested")
+            except ValueError:
+                pass
+        audio_card = parked[0]["id"]
+        active = [ctx.store.get(audio_card)]
     if not active:
         import time as _time
         from .cards import new_card
@@ -584,7 +620,10 @@ def write_voice_sample(ctx: ToolContext, args: dict[str, Any]) -> Any:
         payload = dict(current.get("payload") or {})
         payload.update({"parent": parent, "asset": asset})
         ctx.store.update(audio_card, payload=payload)
-    _attach_unique(ctx, show.characters_dir / f"{char.get('id') or name}.yaml",
+    _cid = next((c for c in show.list_characters()
+                 if str((show.read_character(c) or {}).get("name") or "").lower()
+                 == name.lower()), name)
+    _attach_unique(ctx, show.characters_dir / f"{_cid}.yaml",
                    f"{name} character sheet")
     result = {"char": name, "words": len(text.split()),
               "voice_sample_text": text, "audio_card": audio_card}

@@ -67,7 +67,9 @@ def test_adopt_complete_folder_marks_everything_accepted(tmp_path):
     for domain in ("ideas", "bible", "characters", "scenes",
                    "images", "voices"):
         assert store.get(f"g0.alpha.{domain}")["state"] == "accepted", domain
-    for kind in ("outline", "script", "objects", "keyframes", "render",
+    for kind in ("outline", "locations", "cast", "outfits", "objects",
+                 "narrative", "dialogue", "shots", "camera", "action",
+                 "sound", "h3prompts", "keyframes", "render",
                  "qc", "assemble"):
         assert store.get(f"alpha.ep01.{kind}")["state"] == "accepted", kind
     store.close()

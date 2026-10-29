@@ -212,8 +212,16 @@ def generate_ref(show: Show, scene: dict[str, Any], sid: str, cfg=None,
         prompt, seed=0, aspect_ratio="16:9", out_path=str(out),
         style_ref=str(anchor) if (use_anchor and anchor.exists()) else "")
     if res.get("ok") and out.exists():
-        save_refs(show, sid, {"status": "real", "refs": [out.name],
-                              "seed": res.get("seed", 0)})
+        # Preserve the director's rejected_notes across the render: the next
+        # retry's brief rewrite needs them, and nothing else re-records them.
+        # Without this a second retry rewrites the brief from empty notes and
+        # the same location comes back.
+        prev = load_refs(show, sid) or {}
+        data: dict[str, Any] = {"status": "real", "refs": [out.name],
+                                "seed": res.get("seed", 0)}
+        if str(prev.get("rejected_notes") or "").strip():
+            data["rejected_notes"] = str(prev["rejected_notes"])
+        save_refs(show, sid, data)
         return True
     save_refs(show, sid, {"status": "stub",
                           "note": "krea2 scene ref generation unavailable"})

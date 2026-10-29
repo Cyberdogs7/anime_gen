@@ -278,6 +278,15 @@ class ServiceOps:
                 pass
             _KREA2_PROC = None
             log.info("transient krea2 comfy stopped")
+        # Backstop: _KREA2_PROC is per-process memory, so after a board restart
+        # this is a no-op and the pre-restart instance is orphaned. Sweep the
+        # port so orphans and double-spawns die with the tracked instance.
+        try:
+            from ..gpu_manager import kill_comfy_on_port
+            port = int((self._comfy_cfg("krea2") or {}).get("port", 8190) or 8190)
+        except Exception:
+            port = 8190
+        kill_comfy_on_port(port, tag="transient krea2")
 
     def _release_krea2(self) -> None:
         """Defer stopping the transient krea2 comfy.

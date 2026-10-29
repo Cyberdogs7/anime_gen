@@ -21,6 +21,9 @@ class FakeLLM:
 
     def chat_json(self, messages, **kwargs):
         user = messages[-1]["content"]
+        if "Revise ONLY the voice description" in user:
+            return {"voice_description": self.script.get(
+                "voice_description", "masculine baritone, gravelly texture")}
         if "Propose a show series concept" in user:
             return self.script.get("concept", {"title": "T", "logline": "L",
                                                "genre": ["martial-arts"],
@@ -56,6 +59,23 @@ def _make_chain(tmp_path) -> BootstrapChain:
     show = Show("demo", root=tmp_path)
     show.write_concept({"title": "Demo"})
     return BootstrapChain(show, cfg=cfg, llm=FakeLLM({}))
+
+
+def test_revise_voice_description_applies_director_notes(tmp_path):
+    """A voice rejection for gender must rewrite the voice identity itself,
+    not just the sample words — otherwise 'make it male' can never work."""
+    chain = _make_chain(tmp_path)
+    chain.llm = FakeLLM({"voice_description":
+                          "masculine baritone, gravelly texture, slow and heavy"})
+    show = chain.show
+    show.write_character({"id": "kaito", "name": "Kaito",
+                          "voice": {"mode": "designed",
+                                    "voice_description": "soft feminine lilt"}})
+    char = show.read_character("kaito")
+    new_vd = chain.revise_voice_description(char, "make the voice male")
+    assert new_vd.startswith("masculine")
+    reread = show.read_character("kaito")
+    assert reread["voice"]["voice_description"].startswith("masculine")
 
 
 def test_bootstrap_auto_completes(tmp_path):

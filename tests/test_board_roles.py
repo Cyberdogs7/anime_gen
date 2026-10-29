@@ -12,9 +12,14 @@ from studio.config import Config
 def test_configured_roles_have_models_lanes_and_tools():
     cfg = Config(ROOT)
     roles = load_roles(cfg)
-    assert {"showrunner", "outline_reviewer", "script_reviewer",
+    assert {"showrunner", "outline_reviewer",
             "storyboard_planner", "image_exec", "render_exec",
-            "qc_exec", "assembler_exec"} <= set(roles)
+            "qc_exec", "assembler_exec",
+            "location_writer", "cast_writer", "outfit_writer",
+            "narrative_writer", "dialogue_writer", "shot_splitter",
+            "camera_director", "action_writer", "sound_writer", "h3_writer",
+            "location_reviewer", "dialogue_reviewer", "camera_reviewer",
+            "h3_reviewer"} <= set(roles)
     for role in roles.values():
         assert role.model, f"{role.name} has no model"
         assert role.lane in lane_config(cfg)
@@ -55,7 +60,7 @@ def test_outline_roles_are_skill_agents_not_board_tool_wrappers():
     roles = load_roles(Config(ROOT))
     stage = roles["outline_writer"]
     assert stage.kind == "exec"
-    assert stage.model == "dolphin-2.9.3-mistral-nemo-12b"
+    assert stage.model == "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     assert "outline_skeleton" in stage.tools and "outline_beats" in stage.tools
 
     writer = roles["outline_writer_agent"]

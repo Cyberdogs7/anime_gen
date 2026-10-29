@@ -183,7 +183,7 @@ def _generate_ref(show: Show, char: dict[str, Any], cfg=None) -> None:
         from . import refs
         cid = char.get("id", "")
         if not refs.generate_refs(show, cid, char, cfg=cfg):
-            refs.mark_stub(show, cid, "character ref generation unavailable")
+            refs.mark_stub(show, cid, "character ref generation failed (no ref produced)")
     except Exception as exc:
         log.warning("new character ref generation failed for %s: %s",
                     char.get("id"), exc)

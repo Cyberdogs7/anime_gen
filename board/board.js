@@ -50,6 +50,7 @@ function cardActions(c, detail = false) {
   const sm = detail ? "" : " sm";
   if (c.reviewer === "human" && (s === "reviewing" || s === "agent_verified")) {
     out.push(`<button class="btn${sm} primary" data-act="approve" data-id="${esc(c.id)}">Approve</button>`);
+    if (c.kind === "gate0_characters" || c.kind === "gate0_scenes") out.push(`<button class="btn${sm}" data-act="approve-all" data-id="${esc(c.id)}" title="Approve everything remaining at once">Approve all</button>`);
     out.push(`<button class="btn${sm} danger" data-act="reject" data-id="${esc(c.id)}">Reject</button>`);
   }
   if (c.kind === "outline" && !["in_work", "reviewing", "accepted"].includes(s)) {
@@ -68,9 +69,15 @@ const KIND_TITLE = {
   outline: "Outline", outline_skeleton: "Outline skeleton",
   outline_beats: "Outline beats", outline_scene: "Scene rewrite",
   script: "Screenplay", objects: "Object references",
+  locations: "Locations", cast: "Cast", outfits: "Outfits",
+  narrative: "Narratives", dialogue: "Dialogue", shots: "Shot splits",
+  camera: "Camera direction", action: "Action", sound: "Sound design",
+  h3prompts: "H3 prompts",
   keyframes: "Keyframes", render: "Shot renders", qc: "Quality check",
   assemble: "Episode assembly",
-  gate0_plan: "Show setup", gate0_images: "Reference art",
+  gate0_plan: "Show setup", gate0_ideas: "Show ideas",
+  gate0_bible: "Series bible", gate0_characters: "Cast proposals",
+  gate0_scenes: "Scene registry", gate0_images: "Reference art",
   gate0_voices: "Voice casting", voice_text: "Voice script", fix: "QC fix",
   image_retake: "Image retake",
   storyboard: "Storyboard", render_shot: "Shot render", shot: "Shot",
@@ -108,6 +115,16 @@ function cardTitle(c) {
   if (kind === "outline") return `Write ${ep} outline`;
   if (kind === "script") return `Write ${ep} screenplay`;
   if (kind === "objects") return `Plan ${ep} object references`;
+  if (kind === "locations") return `Set ${ep} locations`;
+  if (kind === "cast") return `Cast ${ep} scenes`;
+  if (kind === "outfits") return `Dress ${ep} cast`;
+  if (kind === "narrative") return `Write ${ep} narratives`;
+  if (kind === "dialogue") return `Write ${ep} dialogue`;
+  if (kind === "shots") return `Split ${ep} shots`;
+  if (kind === "camera") return `Direct ${ep} cameras`;
+  if (kind === "action") return `Choreograph ${ep} action`;
+  if (kind === "sound") return `Design ${ep} sound`;
+  if (kind === "h3prompts") return `Compile ${ep} H3 prompts`;
   if (kind === "keyframes") return `Draw ${ep} keyframes`;
   if (kind === "storyboard") return `Build ${ep} storyboard`;
   return c.title || `${ep}: ${KIND_TITLE[kind] || kind}`;
@@ -116,7 +133,10 @@ function cardTitle(c) {
 function cardCategory(c) {
   const kind = c.kind || "";
   if (["outline", "outline_skeleton", "outline_beats", "outline_scene",
-       "script", "objects", "gate0_plan", "voice_text", "fix"].includes(kind)) return "write";
+       "script", "objects", "locations", "cast", "outfits", "narrative",
+       "dialogue", "shots", "camera", "action", "sound", "h3prompts",
+       "gate0_plan", "gate0_ideas", "gate0_bible",
+       "gate0_characters", "gate0_scenes", "voice_text", "fix"].includes(kind)) return "write";
   if (["storyboard", "keyframes", "gate0_images", "image_retake"].includes(kind)) return "image";
   if (["gate0_voices"].includes(kind) || c.lane === "audio") return "audio";
   if (["render", "render_shot", "shot"].includes(kind)) return "video";
@@ -203,26 +223,64 @@ function renderBoard(el) {
   $("#queue-ep").addEventListener("click", queueEpisodeModal);
 }
 
-function voiceRowsHTML(c) {
+/**
+ * Voice text cards are retired: text + recording live on the voices card
+ * now. Point anyone who lands on one at the card that does the work.
+ */
+function voiceRetiredBanner(c, cards) {
+  const char = (c.payload || {}).char || "";
+  const target = voiceRetakeTarget(cards, c.show_id, char);
+  return `<div class="callout warn" style="margin-top:12px"><strong>Retired card type.</strong>
+    Voice text cards no longer do anything — writing <em>and</em> recording happen
+    on the voices card now (reject there re-runs the full loop).
+    ${target ? `<div class="actions" style="margin-top:8px"><a class="btn primary" href="#/card/${encodeURIComponent(target)}">Open the voices card${char ? " for " + esc(char) : ""}</a></div>` : `<div class="muted">No live voices card found for this show.</div>`}</div>`;
+}
+
+/**
+ * A "Retake queued" link pointing at a retired voice_text card is a dead
+ * end. Reroute it to the voices card that actually owns the rework now:
+ * the per-character one when it exists, else the bulk voices card.
+ */
+function voiceRetakeTarget(cards, showId, charName) {
+  const all = cards || [];
+  const match = (c) => c.kind === "gate0_voices" && c.show_id === showId
+    && c.state !== "accepted";
+  const perChar = all.find(c => match(c)
+    && String((c.payload || {}).char || "").toLowerCase() === String(charName || "").toLowerCase());
+  if (perChar) return perChar.id;
+  const bulk = all.find(c => match(c) && !(c.payload || {}).char);
+  return bulk ? bulk.id : "";
+}
+
+function voiceRowsHTML(c, roster, cards) {
   const wavs = (c.artifacts || []).filter(a => /_voice\.wav$/i.test(a.path || ""));
-  if (!wavs.length) return "";
-  const chars = c.result?.characters || [];
-  const rows = wavs.map(a => {
-    const name = String(a.caption || "").replace(/\s+voice sample$/i, "");
+  const chars = (roster && roster.length ? roster : (c.result?.characters || []));
+  const names = chars.length ? chars.map(x => String(x.name || ""))
+    : [...new Set(wavs.map(a => String(a.caption || "").replace(/\s+voice sample$/i, "")))];
+  if (!names.length) return "";
+  const rows = names.map(name => {
     const ch = chars.find(x => String(x.name || "") === name);
-    const artStatus = String(a.status || "");
-    const status = artStatus || ch?.voice || "pending";
-    const url = "/api/artifact?path=" + encodeURIComponent(a.path);
-    let action = `<button class="btn sm danger" data-reject-voice="${esc(a.path)}" data-card="${esc(c.id)}">Reject voice</button>`;
-    if (artStatus === "rejected" || artStatus === "pending") {
-      action = a.retake_id
-        ? `<a class="btn sm" href="#/card/${encodeURIComponent(a.retake_id)}">${artStatus === "pending" ? "Review retake" : "Retake queued"}</a>`
-        : "";
+    const a = wavs.find(x => String(x.caption || "").replace(/\s+voice sample$/i, "") === name);
+    const artStatus = String((a && a.status) || "");
+    const status = ch?.voice || artStatus || (a ? "pending" : "not generated");
+    const url = a ? "/api/artifact?path=" + encodeURIComponent(a.path) : "";
+    const approvedYet = status === "approved" || status === "accepted";
+    let action = "";
+    if (a && !approvedYet) {
+      action = `<button class="btn sm danger" data-reject-voice="${esc(a.path)}" data-card="${esc(c.id)}">Reject voice</button>`;
+      if (artStatus === "rejected" || artStatus === "pending") {
+        const live = resolveRetakeTarget(cards, a.retake_id, c.id);
+        if (live) {
+          action += ` <a class="btn sm" href="#/card/${encodeURIComponent(live.id)}">${artStatus === "pending" ? "Review retake" : "Retake queued"}</a>`;
+        }
+      }
+      action += ` <button class="btn sm primary" data-char-approve="${esc(name)}" data-card="${esc(c.id)}">Approve</button>`;
     }
-    const cls = status === "approved" || status === "accepted" ? "ok"
+    const cls = approvedYet ? "ok"
       : status === "rejected" ? "bad" : "warn";
-    return `<tr><td>${esc(name)}</td><td><span class="badge ${cls}">${esc(status)}</span></td>
-      <td><audio controls preload="none" src="${url}"></audio></td><td>${action}</td></tr>`;
+    const sample = url ? `<audio controls preload="none" src="${url}"></audio>` : '<span class="muted">not generated yet</span>';
+    return `<tr><td>${esc(name)}</td><td><span class="badge ${cls}">${esc(status)}</span>
+      <td>${sample}</td><td>${action}</td></tr>`;
   }).join("");
   return `<div class="panel"><h2>Voice samples</h2>
     <table><thead><tr><th>Character</th><th>Status</th><th>Sample</th><th></th></tr></thead>
@@ -776,7 +834,7 @@ async function renderCard(el, id) {
       seenArt.add(key);
       return true;
     })
-    .map(a => artHTML(a.path, a.caption, a, c.kind === "gate0_images" ? c.id : "", c.show_id)).join("");
+    .map(a => artHTML(a.path, a.caption, a, c.kind === "gate0_images" ? c.id : "", c.show_id, cards)).join("");
   const notes = notesHTML(c);
   const hist = (d.history || []).map(h => {
     const reason = String(h.reason || "");
@@ -805,7 +863,17 @@ async function renderCard(el, id) {
       <td>${esc(outcome || "—")}</td><td>${esc(r.model || "")}</td><td>${dur(r)}</td>
       <td>${esc(fmtDate(r.started))}</td></tr>`;
   }).join("");
-  const voiceTable = c.kind === "gate0_voices" ? voiceRowsHTML(c) : "";
+  // Live Gate 0 snapshot (single fetch): fresh per-item approval state for
+  // the voice roster and the review-materials buttons. The card's own
+  // result can lag behind, so it is only a fallback.
+  let showSnap = null;
+  if (/^gate0_(characters|voices|scenes|ideas|images)$/.test(c.kind || "") && c.show_id) {
+    try { showSnap = await api("/api/show?id=" + encodeURIComponent(c.show_id)); } catch (_) {}
+  }
+  const snapChars = ((showSnap && showSnap.gate0) || {}).characters || [];
+  const snapLocs = ((showSnap && showSnap.gate0) || {}).locations || [];
+  const snapSceneRefs = ((showSnap && showSnap.gate0) || {}).scene_refs || {};
+  const voiceTable = c.kind === "gate0_voices" ? voiceRowsHTML(c, snapChars.length ? snapChars : undefined, cards) : "";
   const fails = (d.history || []).filter(h => h.to_state === "blocked" || h.to_state === "retake");
   const lastFail = fails[fails.length - 1];
   const reviewRows = reviewGrades(c);
@@ -813,6 +881,99 @@ async function renderCard(el, id) {
   const scenesPanel = await scenesPanelHTML(c, cards);
   const skeletonPanel = await skeletonPanelHTML(c, cards);
   const planContext = await planContextHTML(c, cards);
+  // Review materials: inline every readable attached document (yaml/json/md/txt)
+  // so the card view carries what a reviewer needs — bible, concept, cast,
+  // screenplay, object prompts, QC reports — instead of bare download links.
+  // The outline family keeps its richer parsed panels (skeleton/scenes tables).
+  let reviewMats = "";
+  if (!/^(outline|outline_skeleton|outline_beats|outline_scene)$/.test(c.kind || "")) {
+    const approved = {};
+    if (/^gate0_(characters|voices|scenes)$/.test(c.kind || "")) {
+      if (showSnap) {
+        for (const ch of snapChars) {
+          if (c.kind === "gate0_characters" && ch.proposal === "approved") approved[ch.name] = true;
+          if (c.kind === "gate0_voices" && ch.voice === "approved") approved[ch.name] = true;
+        }
+        for (const lc of snapLocs) {
+          if (c.kind === "gate0_scenes" && lc.status === "approved") approved[lc.id] = true;
+        }
+      } else {
+        for (const ch of (c.result?.characters || [])) {
+          if (ch.proposal === "approved" && c.kind === "gate0_characters") approved[ch.name] = true;
+          if (ch.voice === "approved" && c.kind === "gate0_voices") approved[ch.name] = true;
+        }
+      }
+    }
+    const docs = [];
+    for (const a of (c.artifacts || [])) {
+      const p = String(a.path || "");
+      if (/\/bootstrap\.json$/i.test(p)) continue; // pipeline state, not review content
+      if (!/\.(yaml|yml|json|md|txt)$/i.test(p)) continue;
+      const rel = p.replace(/^shows\/[^/]+\//, "");
+      try {
+        const wantParsed = /\.ya?ml$/i.test(p) ? "&parsed=1" : "";
+        const f = await api("/api/show/file?show_id=" + encodeURIComponent(c.show_id) + "&path=" + encodeURIComponent(rel) + wantParsed);
+        let text = String(f.content ?? "");
+        if (/\.json$/i.test(p)) {
+          try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+        }
+        let parsed = ("data" in f && f.data && typeof f.data === "object") ? f.data : null;
+        if (!parsed && /\.json$/i.test(p)) {
+          try { parsed = JSON.parse(String(f.content ?? "")); } catch (_) {}
+        }
+        let body;
+        if (parsed && typeof parsed === "object") {
+          body = formatDoc(rel, parsed, text, c, approved);
+          if (body.length > 60000) body = `<div style="max-height:50vh;overflow:auto">${body.slice(0, 60000)}…[truncated]</div>`;
+        } else {
+          if (text.length > 40000) text = text.slice(0, 40000) + `\n…[truncated, ${text.length} chars total]`;
+          body = `<pre class="json-block" style="max-height:50vh;overflow:auto">${esc(text)}</pre>`;
+        }
+        docs.push(`<details open><summary style="cursor:pointer"><strong>${esc(a.caption || rel)}</strong></summary>${body}</details>`);
+      } catch (_) {
+        docs.push(`<div class="empty">${esc(rel)} (could not load — use Raw link below)</div>`);
+      }
+    }
+    if (docs.length) reviewMats = `<div class="panel" style="margin-top:16px"><h2>Review materials</h2>${docs.join("")}</div>`;
+  }
+  // Missing / failed references (images card only): characters and scenes
+  // with no usable ref yet have no artifact to act on, so they get explicit
+  // rows with Reject buttons here. Rejected items already carry their own
+  // per-artifact buttons and are not repeated.
+  let missingRefs = "";
+  if ((c.kind || "") === "gate0_images" && c.state !== "accepted") {
+    const missChars = (snapChars || []).filter(ch =>
+      ["", null, undefined].includes(ch.refs) || ch.refs === "stub" || ch.refs === "missing");
+    const missScenes = Object.entries(snapSceneRefs || {})
+      .filter(([_, v]) => ["", null, undefined, "missing", "stub", "failed"].includes(v && v.status))
+      .map(([sid, v]) => ({id: sid, status: (v && v.status) || "missing", note: (v && v.note) || ""}));
+    const rows = [];
+    for (const ch of missChars) {
+      const st = (ch.refs === "stub" || ch.refs === "missing") ? ch.refs : "missing";
+      const note = ch.refs_note || (st === "missing" ? "no ref generated yet" : "");
+      rows.push(`<tr><td>${esc(ch.name || "?")}</td><td>character</td>`
+        + `<td><span class="badge warn">${esc(st)}</span>${note ? `<div class="muted small">${esc(note)}</div>` : ""}</td>`
+        + `<td><button class="btn sm danger" data-missing-reject="char" data-name="${esc(ch.name || "")}" data-card="${esc(c.id)}">Reject</button></td></tr>`);
+    }
+    for (const sc of missScenes) {
+      rows.push(`<tr><td><code>${esc(sc.id)}</code></td><td>scene</td>`
+        + `<td><span class="badge warn">${esc(sc.status)}</span>${sc.note ? `<div class="muted small">${esc(sc.note)}</div>` : ""}</td>`
+        + `<td><button class="btn sm danger" data-missing-reject="scene" data-name="${esc(sc.id)}" data-card="${esc(c.id)}">Reject</button></td></tr>`);
+    }
+    if (rows.length) {
+      missingRefs = `<div class="panel" style="margin-top:16px"><h2>Missing / failed references</h2>`
+        + `<p class="muted">These have no image to review yet. Rejecting requeues the card; the rerun regenerates everything listed here.</p>`
+        + `<table class="review-table"><thead><tr><th>Name</th><th>Kind</th><th>Status</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+    }
+  }
+  let ideasSection = "";
+  if ((c.kind || "") === "gate0_ideas") {
+    try {
+      const sd = await api("/api/show?id=" + encodeURIComponent(c.show_id));
+      const reviewable = c.state === "reviewing" || c.state === "agent_verified";
+      ideasSection = `<div class="panel" style="margin-top:16px"><h2>Show ideas</h2>${ideasSectionHTML(sd.ideas, sd.concept, reviewable ? c.id : null, c.show_id, true)}</div>`;
+    } catch (_) {}
+  }
   let cardFiles = [];
   try {
     const fd = await api("/api/card/files?id=" + encodeURIComponent(c.id));
@@ -847,7 +1008,11 @@ async function renderCard(el, id) {
       <div><h1>${esc(cardTitle(c))}</h1><p>${esc(showTitle(c.show_id))} · ${c.episode ? "EP" + String(c.episode).padStart(2, "0") : "Gate 0"} · ${esc(KIND_TITLE[c.kind] || c.kind)} · <code>${esc(c.id)}</code></p></div>
       <div class="actions">${stateBadge(c.state)}${cardActions(c, true)}</div>
     </div>
+    ${c.kind === "voice_text" ? voiceRetiredBanner(c, cards) : ""}
     ${outlineStagesHTML(c, cards, runs)}
+    ${ideasSection}
+    ${missingRefs}
+    ${reviewMats}
     ${scenesPanel}
     ${skeletonPanel}
     ${planContext}
@@ -858,7 +1023,7 @@ async function renderCard(el, id) {
         <div class="panel">
           <h2>What this step produced</h2>
           ${workSummaryText(c) ? `<div class="work-summary">${esc(workSummaryText(c))}</div>` : ""}
-          ${resultHTML(c.result)}
+          <details><summary style="cursor:pointer;color:var(--muted)">Raw step result (see All data below for full detail)</summary>${resultHTML(c.result)}</details>
           <h3>Artifacts</h3>${artifacts || '<div class="empty">No artifacts yet.</div>'}
           <h3>Notes</h3>${notes}
         </div>
@@ -888,6 +1053,60 @@ async function renderCard(el, id) {
     </div>
     ${allData}`;
   el.querySelectorAll("[data-run]").forEach(tr => tr.addEventListener("click", () => runLogModal(tr.dataset.run)));
+}
+
+function pendingDescriptor(pending) {
+  if (!pending || typeof pending !== "object") return "";
+  const kind = pending.kind, step = pending.step;
+  if (step === "ideas") return "pitch selection — pick one or more ideas";
+  if (step === "concept") return "concept review";
+  if (step === "bible") return "bible review";
+  if (step === "character") return `character proposal${pending.char ? ": " + pending.char : ""}`;
+  if (step === "voice") return `voice sample${pending.char ? ": " + pending.char : ""}`;
+  if (step === "refs") return `reference images${pending.char ? ": " + pending.char : ""}`;
+  if (step === "scene") return `scene${pending.scene ? ": " + pending.scene : pending.id ? " " + pending.id : ""} review`;
+  if (step === "scenes") return "scene registry review";
+  return step || kind || "";
+}
+
+function cardStatusHTML(c, cards, runs, lastReason) {
+  const byId = {};
+  for (const x of (cards || [])) byId[x.id] = x;
+  const deps = c.depends_on || [];
+  const openDeps = deps.filter(d => (byId[d] || {}).state !== "accepted");
+  const pend = pendingDescriptor(c?.result?.pending);
+  const running = (runs || []).find(r => r.state === "running");
+  const lines = [];
+  if (c.state === "planned" || c.state === "inbox") {
+    if (openDeps.length) {
+      const links = openDeps.map(function (d) {
+        const short = String(d).split(".").slice(-2).join(".");
+        const st = (byId[d] || {}).state || "missing";
+        return '<a href="#/card/' + encodeURIComponent(d) + '"><code>' + esc(short) + "</code></a> (" + esc(st) + ")";
+      }).join(", ");
+      lines.push("Waiting on: " + links);
+    } else {
+      lines.push("Queued — a worker will claim it.");
+    }
+  } else if (c.state === "in_work") {
+    lines.push(running
+      ? `Running <code>${esc(running.id)}</code> · ${esc(running.role || "")} · ${esc(running.model || "")} · ${esc(dur(running))} elapsed`
+      : "Claimed by a worker.");
+  } else if (c.state === "agent_verified" || c.state === "reviewing") {
+    lines.push(pend ? `Waiting on: <strong>${esc(pend)}</strong>` : "Ready for review.");
+  } else if (c.state === "retake") {
+    lines.push(`Sent back for rework${lastReason ? ": " + esc(String(lastReason).slice(0, 220)) : "."} The daemon requeues it automatically.`);
+  } else if (c.state === "blocked") {
+    lines.push(`Blocked${lastReason ? ": " + esc(String(lastReason).slice(0, 220)) : "."} Unblock above to retry.`);
+  } else if (c.state === "accepted") {
+    lines.push("Accepted. Downstream stages may proceed.");
+  } else if (c.state === "deferred") {
+    lines.push("Deferred by a human. Resume from the actions above when ready.");
+  }
+  const att = `${c.attempts || 0} / ${c.max_attempts || 0}`;
+  return `<div class="callout ${c.state === "blocked" ? "fail" : c.state === "accepted" ? "ok" : ""}">
+    <strong>${esc(cardTitle(c))}</strong> · ${stateBadge(c.state)} <span class="muted">attempts ${esc(att)} · lane ${esc(c.lane || "—")}</span>
+    ${lines.map(l => `<div style="margin-top:4px">${l}</div>`).join("")}</div>`;
 }
 
 function renderValue(v, depth = 0) {
@@ -924,7 +1143,14 @@ function resultHTML(result) {
   return `<div class="result">${top}${nested}${audio}</div>`;
 }
 
-function artHTML(path, caption, art = null, cardId = "", showId = "") {
+function resolveRetakeTarget(cards, retakeId, excludeId) {
+  if (!retakeId) return null;
+  const t = (cards || []).find(x => x.id === retakeId);
+  if (!t || t.id === excludeId) return null;
+  return t;
+}
+
+function artHTML(path, caption, art = null, cardId = "", showId = "", cards = []) {
   const ext = (path.split(".").pop() || "").toLowerCase();
   const rel = showRelPath(path, showId);
   const showRelative = showId && rel && !/^shows\//.test(String(path))
@@ -939,23 +1165,149 @@ function artHTML(path, caption, art = null, cardId = "", showId = "") {
       : ["wav","mp3","m4a","ogg"].includes(ext)
         ? `<audio controls src="${url}"></audio>`
       : `<div class="empty" style="padding:8px"><a href="${url}" target="_blank">${esc(path.split("/").pop())}</a></div>`;
-  const status = art?.status || "";
-  let actions = "";
-  if (art?.retakeable) {
-    if (status === "rejected" || status === "pending") {
-      actions = art.retake_id
-        ? `<a class="btn sm" href="#/card/${encodeURIComponent(art.retake_id)}">${status === "pending" ? "Review retake" : "Retake queued"}</a>`
-        : "";
-    } else if (cardId) {
-      actions = `<button class="btn sm danger" data-reject-image="${esc(path)}" data-card="${esc(cardId)}">Reject image</button>`;
+    const status = art?.status || "";
+    let actions = "";
+    if (art?.retakeable) {
+      const liveRetake = resolveRetakeTarget(cards, art.retake_id, cardId);
+      if ((status === "rejected" || status === "pending") && liveRetake) {
+        // Only legacy in-flight retakes get a link; current rework happens
+        // on this card, so its own buttons stay available.
+        actions = `<a class="btn sm" href="#/card/${encodeURIComponent(liveRetake.id)}">${status === "pending" ? "Review retake" : "Retake queued"}</a>`;
+      } else if (cardId) {
+        actions = `<button class="btn sm primary" data-approve-image="${esc(path)}" data-card="${esc(cardId)}">Approve</button> <button class="btn sm danger" data-reject-image="${esc(path)}" data-card="${esc(cardId)}">Reject</button>`;
+      }
     }
-  }
   const badge = status
     ? `<span class="badge ${status === "accepted" ? "ok" : status === "rejected" ? "bad" : "warn"}">${esc(status)}</span>`
     : "";
   return `<figure class="art art-${esc(status || "new")}">${body}
     <figcaption class="cap">${badge} ${esc(caption || path)}<br>${esc(path)}</figcaption>
     ${actions ? `<div class="art-actions">${actions}</div>` : ""}</figure>`;
+}
+
+const _chips = arr => (Array.isArray(arr) ? arr : []).map(x => `<span class="tag">${esc(String(x))}</span>`).join(" ");
+const _kv = rows => rows.filter(r => r[1]).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+function formatDoc(path, obj, text, card, approved) {
+  // Per-item buttons only on the owning stage card: a character sheet shown
+  // anywhere else must not approve through the wrong card/domain.
+  const cardId = (card && (card.kind === "gate0_characters" || card.kind === "gate0_scenes") && card.id) || "";
+  const isApproved = (name) => !!(approved && approved[name]);
+  const itemBtns = (name) => cardId && name && !isApproved(name)
+    ? `<div class="actions" style="margin-top:6px"><button class="btn sm primary" data-char-approve="${esc(name)}" data-card="${esc(cardId)}">Approve ${esc(name)}</button> <button class="btn sm danger" data-char-reject="${esc(name)}" data-card="${esc(cardId)}">Reject</button></div>`
+    : (cardId && name && isApproved(name) ? `<div style="margin-top:6px"><span class="badge ok">approved</span></div>` : "");
+  const raw = `<pre class="json-block" style="max-height:50vh;overflow:auto">${esc(text)}</pre>`;
+  if (obj === null || typeof obj !== "object") return raw;
+  // Pitch archive -> pitch tiles.
+  if (Array.isArray(obj.pitches)) {
+    const ap = obj.active || "";
+    return `<div class="grid">${obj.pitches.map(p => pitchTile(p, false, ap, "")).join("")}</div>`;
+  }
+  // Concept -> header card.
+  if (obj.premise && obj.logline && !obj.world) {
+    return `<h3>${esc(obj.title || "Untitled")}</h3><p><em>${esc(obj.logline || "")}</em></p>`
+      + `<p>${esc(obj.premise || "")}</p><p>${_chips(obj.genre)} ${_chips(obj.tone)}</p>`
+      + (obj.hook ? `<p style="font-size:12px"><strong>Hook:</strong> ${esc(obj.hook)}</p>` : "");
+  }
+  // Bible -> sections.
+  if (obj.world || obj.plotlines || obj.overall_plotline) {
+    const w = obj.world || {}, ad = obj.art_direction || {};
+    const pls = Array.isArray(obj.plotlines) ? obj.plotlines : [];
+    const op = obj.overall_plotline || {};
+    return `<h3>${esc(obj.title || "Untitled")}</h3>`
+      + (obj.logline ? `<p><em>${esc(obj.logline)}</em></p>` : "")
+      + `<p>${_chips(obj.genre)} ${_chips(obj.tone)}</p>`
+      + (w.setting ? `<h4>World</h4><p>${esc(w.setting)}</p>` : "")
+      + (w.rules?.length ? `<h4>Rules</h4><ul>${w.rules.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : "")
+      + (w.established_facts?.length ? `<h4>Established facts</h4><ul>${w.established_facts.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : "")
+      + (op.name ? `<h4>Overall: ${esc(op.name)}</h4><p>${esc(op.summary || "")}</p>` : "")
+      + (pls.length ? `<h4>Plotlines</h4><table class="review-table"><thead><tr><th>Name</th><th>Status</th><th>Summary</th></tr></thead><tbody>${pls.map(p => `<tr><td><strong>${esc(p.name || p.id || "")}</strong><div class="muted">${esc((p.characters || []).join(", "))}</div></td><td>${esc(p.status || "")}</td><td class="review-text">${esc(p.summary || "")}</td></tr>`).join("")}</tbody></table>` : "")
+      + (ad.palette || ad.lighting || ad.camera ? `<h4>Art direction</h4><dl class="kv">${_kv([["Palette", esc(ad.palette || "")], ["Lighting", esc(ad.lighting || "")], ["Camera", esc(ad.camera || "")]])}</dl>` : "")
+      + (obj.mature_spec ? `<h4>Mature spec</h4><p style="font-size:12px">${esc(obj.mature_spec)}</p>` : "");
+  }
+  // Character sheet.
+  if (obj.appearance_canonical || obj.identity_canonical) {
+    const voice = obj.voice || {};
+    return `<h3>${esc(obj.name || "Unnamed")}</h3>`
+      + `<dl class="kv">${_kv([["Identity", esc(obj.identity_canonical || "")], ["Appearance", esc(obj.appearance_canonical || "")], ["Wardrobe", esc(obj.wardrobe_canonical || "")], ["Notes", esc(obj.appearance_notes || "")]])}</dl>`
+      + (obj.voice_sample_text ? `<h4>Voice sample</h4><p><em>${esc(obj.voice_sample_text)}</em></p>` : "")
+      + (voice.voice_description ? `<p style="font-size:12px"><strong>Voice:</strong> ${esc(voice.voice_description)}</p>` : "")
+      + itemBtns(obj.name);
+  }
+  const scenes = Array.isArray(obj.scenes) ? obj.scenes : [];
+  // Screenplay (scenes with shots/dialogue).
+  if (scenes.length && scenes[0] && Array.isArray(scenes[0].shots)) {
+    return scenes.map(s => {
+      const shots = (s.shots || []).map(sh => {
+        const dlg = (sh.dialogue || []).map(d => `<div><strong>${esc(d.char || "?")}:</strong> ${esc(d.line || "")}</div>`).join("");
+        return `<li><code>${esc(sh.id || "")}</code>${sh.silence ? ' <span class="badge">silent</span>' : ""}${dlg ? `<div style="margin:4px 0 4px 12px;font-size:12px">${dlg}</div>` : ""}</li>`;
+      }).join("");
+      return `<details open><summary style="cursor:pointer"><strong>${esc(s.id || "")}</strong> <span class="muted">${esc(s.summary || "")}</span></summary><ul>${shots}</ul></details>`;
+    }).join("");
+  }
+  // Single scene location file (what gate0_scenes actually attaches):
+  // detail card with per-scene actions, not raw YAML.
+  const isSceneCard = card && card.kind === "gate0_scenes";
+  if (isSceneCard && obj.id && (obj.description || obj.setting_prompt || obj.location)) {
+    const sid = obj.id;
+    const done = !!(approved && approved[sid]);
+    const btns = card.id && !done
+      ? `<div class="actions" style="margin-top:6px"><button class="btn sm primary" data-scene-approve="${esc(sid)}" data-card="${esc(card.id)}">Approve</button> <button class="btn sm danger" data-scene-reject="${esc(sid)}" data-card="${esc(card.id)}">Reject</button></div>`
+      : (card.id && done ? `<div style="margin-top:6px"><span class="badge ok">approved</span></div>` : "");
+    return `<h3>${esc(obj.name || sid)}</h3>`
+      + (obj.description ? `<p>${esc(obj.description)}</p>` : "")
+      + `<dl class="kv">${_kv([["Location", esc(obj.location || "")], ["Setting", esc(obj.setting_prompt || "")]])}</dl>`
+      + btns;
+  }
+  // Scene registry / scene list.
+  if (scenes.length) {
+    const sid = (card && card.kind === "gate0_scenes" && card.id) || "";
+    const rowBtns = (s) => {
+      if (!sid || !s.id) return "";
+      if (approved && approved[s.id]) return `<span class="badge ok">approved</span>`;
+      return `<button class="btn sm primary" data-scene-approve="${esc(s.id)}" data-card="${esc(sid)}">Approve</button> <button class="btn sm danger" data-scene-reject="${esc(s.id)}" data-card="${esc(sid)}">Reject</button>`;
+    };
+    return `<table class="review-table"><thead><tr><th>Scene</th><th>Location</th><th>Summary</th>${sid ? "<th></th>" : ""}</tr></thead><tbody>${scenes.map(s => `<tr><td><code>${esc(s.id || "")}</code></td><td>${esc(s.location || s.location_id || s.time_of_day || "")}</td><td class="review-text">${esc(s.summary || s.description || "")}</td>${sid ? `<td class="actions">${rowBtns(s)}</td>` : ""}</tr>`).join("")}</tbody></table>`;
+  }
+  // QC / vcheck report ({shot: {qc:{verdict,issues}}}).
+  const vals = Object.values(obj);
+  if (vals.length && vals.every(v => v && typeof v === "object" && (v.qc || v.vcheck || v.verdict))) {
+    return `<table class="review-table"><thead><tr><th>Shot</th><th>QC</th><th>V-check</th><th>Issues</th></tr></thead><tbody>${Object.entries(obj).map(([sid, r]) => {
+      const q = r.qc || {}, v = r.vcheck || {}, verdict = r.verdict || q.verdict || v.verdict || "";
+      const issues = [...(q.issues || []), ...(v.issues || [])];
+      const badge = verdict === "fail" ? "bad" : verdict === "pass" ? "ok" : "warn";
+      return `<tr><td><code>${esc(sid)}</code></td><td><span class="badge ${badge}">${esc(q.verdict || verdict || "?")}</span></td><td><span class="badge ${badge}">${esc(v.verdict || verdict || "?")}</span></td><td class="review-text">${issues.map(esc).join("<br>")}</td></tr>`;
+    }).join("")}</tbody></table>`;
+  }
+  return raw;
+}
+
+function pitchTile(p, pickable, activePitch, showId) {
+  return `<div class="tile">
+      <h3>${pickable ? `<input type="checkbox" class="pick-box" value="${esc(p.id)}" style="margin-right:6px">` : ""}${esc(p.title || p.id)}
+        <span class="badge">${esc(p.status || "")}</span>${p.id === activePitch ? ' <span class="badge">active</span>' : ""}</h3>
+      ${p.show_id ? `<p style="font-size:11px;color:var(--muted)">id: <code>${esc(p.show_id)}</code></p>` : ""}
+      <p><em>${esc(p.logline || "")}</em></p>
+      <p>${esc(p.premise || "")}</p>
+      <p style="font-size:11px;color:var(--muted)">${esc((p.genre || []).join(" / "))} · ${esc((p.tone || []).join(", "))} · hook: ${esc(p.hook || "")}</p>
+      ${!pickable ? `<button class="btn sm" data-reselect="${esc(p.id)}"${showId ? ` data-show="${esc(showId)}"` : ""} ${p.id === activePitch ? "disabled" : ""}>${p.id === activePitch ? "Active concept" : "Select"}</button>` : ""}
+    </div>`;
+}
+
+function ideasSectionHTML(ideas, concept, pickCardId, showId, rePitch) {
+  ideas = ideas || {};
+  const pitches = ideas.pitches || [];
+  if (!pitches.length) return '<div class="empty">No pitches yet — the ideas card has not run.</div>';
+  const activePitch = ideas.active || (concept || {}).picked_from || "";
+  const needPick = pitches.some(p => p.status === "proposed") && !pitches.some(p => p.status === "selected");
+  return `
+    ${needPick && pickCardId ? `<p style="color:var(--muted);font-size:12px">Tick one or more pitches, then approve — the first pick becomes the concept. Everything stays archived and reselectable.</p>
+    <div class="grid">${pitches.filter(p => p.status === "proposed").map(p => pitchTile(p, true, activePitch, showId)).join("")}</div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" data-ideas-approve="${esc(pickCardId)}">Approve selection</button>
+      ${rePitch && showId ? `<button class="btn" data-repitch="${esc(showId)}">Re-pitch (adds 5 more)</button>` : ""}
+    </div>` : ""}
+    <h3>Archive (${pitches.length})</h3>
+    <div class="grid">${pitches.map(p => pitchTile(p, false, activePitch, showId)).join("")}</div>`;
 }
 
 async function renderShows(el) {
@@ -974,11 +1326,20 @@ async function renderShows(el) {
         <div class="row">
           <button class="btn" data-open-show="${esc(s.id)}">Open</button>
           <button class="btn primary" data-ep-show="${esc(s.id)}">Queue episode</button>
+          <button class="btn danger" data-del-show="${esc(s.id)}">Delete</button>
         </div>
       </div>`).join("") : '<div class="empty">No shows yet.</div>'}</div>`;
   $("#new-show")?.addEventListener("click", newShowModal);
   el.querySelectorAll("[data-open-show]").forEach(b => b.addEventListener("click", () => location.hash = "#/show/" + encodeURIComponent(b.dataset.openShow)));
   el.querySelectorAll("[data-ep-show]").forEach(b => b.addEventListener("click", () => queueEpisodeModal(b.dataset.epShow)));
+  el.querySelectorAll("[data-del-show]").forEach(b => b.addEventListener("click", async () => {
+    const sid = b.dataset.delShow;
+    if (!confirm(`Delete show ${sid}? Its folder moves to .trash (recoverable) and its board rows are removed.`)) return;
+    try {
+      await post("/api/show/delete", {show_id: sid});
+      toast(`Deleted ${sid}`); load();
+    } catch (err) { toast(err.message, true); }
+  }));
 }
 
 function statusBadge(v, label) {
@@ -998,6 +1359,13 @@ async function renderShow(el, id) {
   const bible = d.bible || {}, overall = bible.overall_plotline || {}, world = bible.world || {};
   const g = d.gate0 || {}, cont = d.continuity || {};
   const plotlines = d.plotlines || [], seasons = d.seasons || [], scenes = d.scenes || [];
+  const charCard = (d.cards || []).find(c => c.kind === "gate0_characters" && c.state === "reviewing")
+    || (d.cards || []).find(c => c.kind === "gate0_characters");
+  const charCardId = charCard ? charCard.id : "";
+  const charApproved = {};
+  for (const ch of ((d.gate0 || {}).characters || [])) {
+    if (ch.proposal === "approved") charApproved[ch.name] = true;
+  }
   const chars = (d.characters || []).map(c => {
     const name = c.name || c.id || "", cid = c.id || "";
     return `<tr>
@@ -1007,6 +1375,7 @@ async function renderShow(el, id) {
       <td>${statusBadge(c.voice, "voice")}</td>
       <td class="actions">
         <button class="btn sm" data-char-detail="${esc(name)}">Details</button>
+        ${charCardId && !charApproved[name] ? `<button class="btn sm primary" data-char-approve="${esc(name)}" data-card="${esc(charCardId)}">Approve</button><button class="btn sm danger" data-char-reject="${esc(name)}" data-card="${esc(charCardId)}">Reject</button>` : ""}
         <button class="btn sm" data-refs-char="${esc(name)}">View refs</button>
         ${cid ? `<button class="btn sm" data-edit-file="characters/${esc(cid)}.yaml" data-show="${esc(id)}">Edit</button>` : ""}
         <button class="btn sm" data-regen="refs" data-char="${esc(name)}">Regen refs</button>
@@ -1029,30 +1398,11 @@ async function renderShow(el, id) {
   </div>`).join("");
   const cards = (d.cards || []).map(c => `<tr class="click" data-card="${esc(c.id)}">
     <td><code>${esc(c.id)}</code></td><td>${esc(cardTitle(c))}</td><td>${stateBadge(c.state)}</td><td>${esc(c.role)}</td></tr>`).join("");
-  const ideas = d.ideas || {}, pitches = ideas.pitches || [];
+  const ideas = d.ideas || {};
   const ideasCards = (d.cards || []).filter(c => (c.kind || "") === "gate0_ideas");
   const pickCard = ideasCards.find(c => c.state === "reviewing")
     || ideasCards.find(c => c.state === "agent_verified") || null;
-  const activePitch = ideas.active || (d.concept || {}).picked_from || "";
-  const needPick = pitches.some(p => p.status === "proposed") && !pitches.some(p => p.status === "selected");
-  const pitchTile = (p, pickable) => `<div class="tile">
-      <h3>${pickable ? `<input type="checkbox" class="pick-box" value="${esc(p.id)}" style="margin-right:6px">` : ""}${esc(p.title || p.id)}
-        <span class="badge">${esc(p.status || "")}</span>${p.id === activePitch ? ' <span class="badge">active</span>' : ""}</h3>
-      ${p.show_id ? `<p style="font-size:11px;color:var(--muted)">id: <code>${esc(p.show_id)}</code></p>` : ""}
-      <p><em>${esc(p.logline || "")}</em></p>
-      <p>${esc(p.premise || "")}</p>
-      <p style="font-size:11px;color:var(--muted)">${esc((p.genre || []).join(" / "))} · ${esc((p.tone || []).join(", "))} · hook: ${esc(p.hook || "")}</p>
-      ${!pickable ? `<button class="btn sm" data-reselect="${esc(p.id)}" ${p.id === activePitch ? "disabled" : ""}>${p.id === activePitch ? "Active concept" : "Select"}</button>` : ""}
-    </div>`;
-  const ideasHtml = pitches.length ? `
-    ${needPick && pickCard ? `<p style="color:var(--muted);font-size:12px">Tick one or more pitches, then approve — the first pick becomes the concept. Everything stays archived and reselectable.</p>
-    <div class="grid">${pitches.filter(p => p.status === "proposed").map(p => pitchTile(p, true)).join("")}</div>
-    <div class="row" style="margin-top:10px">
-      <button class="btn primary" data-ideas-approve="${esc(pickCard.id)}">Approve selection</button>
-      <button class="btn" data-regen="ideas">Re-pitch (adds 5 more)</button>
-    </div>` : ""}
-    <h3>Archive (${pitches.length})</h3>
-    <div class="grid">${pitches.map(p => pitchTile(p, false)).join("")}</div>` : '<div class="empty">No pitches yet — the ideas card has not run.</div>';
+  const ideasHtml = `<div class="panel" style="margin-top:16px"><h2>Show ideas</h2>${ideasSectionHTML(ideas, d.concept, pickCard ? pickCard.id : null, id, true)}</div>`;
   const charRefs = (d.characters || []).flatMap(c =>
     (c.refs_images || []).map(x => artHTML(x.path, `${c.name} ? ${x.label}`))).join("");
   const sceneRefs = scenes.flatMap(s =>
@@ -1118,7 +1468,7 @@ async function renderShow(el, id) {
         <div class="panel" style="margin-top:16px"><h2>Episodes</h2>
           ${eps ? `<table><thead><tr><th>Episode</th><th>Synopsis</th><th>Artifacts</th><th>Cards</th><th></th></tr></thead><tbody>${eps}</tbody></table>` : '<div class="empty">No episodes yet. Queue one from the header.</div>'}
         </div>
-        <div class="panel" style="margin-top:16px"><h2>Show ideas</h2>${ideasHtml}</div>
+        ${ideasHtml}
         <div class="panel" style="margin-top:16px"><h2>Gate 0</h2>
           <div class="row" style="gap:8px;flex-wrap:wrap">
             <span class="badge ${g.pending_by_domain?.ideas ? "warn" : "ok"}">ideas ${esc(g.pending_by_domain?.ideas?.step || "clear")}</span>
@@ -1167,25 +1517,9 @@ async function renderShow(el, id) {
     </div>`;
   el.querySelector("[data-back-shows]").addEventListener("click", () => location.hash = "#/shows");
   el.querySelector("[data-queue-ep]").addEventListener("click", () => queueEpisodeModal(id));
-  el.querySelectorAll("[data-regen]").forEach(b => b.addEventListener("click", () => regenerate(id, b.dataset.regen, b.dataset.char || "")));
-  el.querySelector("[data-ideas-approve]")?.addEventListener("click", async (e) => {
-    const picks = [...el.querySelectorAll(".pick-box:checked")].map(b => b.value);
-    if (!picks.length) { toast("Select at least one pitch", true); return; }
-    try {
-      const out = await post("/api/gate0/decide", {card_id: e.target.dataset.ideasApprove, action: "approve", picks});
-      toast(`Concept approved from ${picks[0]}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
-      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
-      else load();
-    } catch (err) { toast(err.message, true); }
-  });
-  el.querySelectorAll("[data-reselect]").forEach(b => b.addEventListener("click", async () => {
-    try {
-      const out = await post("/api/show/reselect", {show_id: id, pitch_id: b.dataset.reselect});
-      toast(`Reselected ${b.dataset.reselect}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
-      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
-      else load();
-    } catch (err) { toast(err.message, true); }
-  }));
+  // Ideas actions (approve / reselect / re-pitch with data-show) are handled
+  // by the document-level listener; other regen buttons bind here.
+  el.querySelectorAll("[data-regen]:not([data-show])").forEach(b => b.addEventListener("click", () => regenerate(id, b.dataset.regen, b.dataset.char || "")));
   el.querySelectorAll("[data-edit-file]").forEach(b => b.addEventListener("click", () => editFile(b.dataset.show, b.dataset.editFile)));
   el.querySelectorAll("[data-refs-char]").forEach(b => b.addEventListener("click", () => {
     const c = (d.characters || []).find(x => (x.name || "") === b.dataset.refsChar) || {};
@@ -1283,13 +1617,29 @@ function refsModal(c) {
   $("#refs-close").addEventListener("click", closeModal);
 }
 
-async function regenerate(showId, kind, char = "") {
-  if (!confirm(`Queue ${kind} for ${showId}${char ? " / " + char : ""}?`)) return;
+async function regenerate(showId, kind, char = "", notes = "") {
+  if (!notes && !confirm(`Queue ${kind} for ${showId}${char ? " / " + char : ""}?`)) return;
   try {
-    const r = await post("/api/show/regenerate", {show_id:showId, kind, char});
+    const r = await post("/api/show/regenerate", {show_id:showId, kind, char, notes});
     if (r.card) upsertCard(r.card);
     toast(`Queued ${r.card.id}`);
   } catch (e) { toast(e.message, true); }
+}
+
+function repitchModal(showId) {
+  openModal(`<h2>Re-pitch show ideas</h2>
+  <div class="body">
+    <label>Guidance for this round (optional)<textarea id="rp-notes" placeholder="e.g. less corporate conspiracy, more comedy; drop theChosenOne angle; pitches should feel like cozy mysteries"></textarea></label>
+    <p style="color:var(--muted);font-size:12px">Adds 5 more pitches to the archive without erasing existing ones. Your notes are appended to the brief for this round only.</p>
+  </div><div class="row"><button class="btn" id="rp-cancel">Cancel</button><button class="btn primary" id="rp-create">Re-pitch</button></div>`);
+  $("#rp-cancel").addEventListener("click", closeModal);
+  $("#rp-create").addEventListener("click", async () => {
+    try {
+      const notes = $("#rp-notes").value.trim();
+      await post("/api/show/regenerate", {show_id:showId, kind:"ideas", notes});
+      closeModal(); toast("Re-pitch queued"); load();
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 function modelProvider(m) {
@@ -1397,7 +1747,9 @@ function openModal(html) {
   $("#modal").classList.remove("hidden");
 }
 function closeModal() { S.modal = false; $("#modal").classList.add("hidden"); }
-$("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeModal(); });
+// No backdrop-click dismissal: a stray click off the dialog must never
+// discard in-progress form work. Close only via the dialog's own buttons
+// (Cancel/close) or Escape.
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
 function newShowModal() {
@@ -1455,15 +1807,20 @@ async function runLogModal(id) {
   } catch (e) { toast(e.message, true); }
 }
 
-function rejectModal(id) {
-  openModal(`<h2>Reject card</h2><div class="body"><label>Notes<textarea id="rj-notes" placeholder="What must change?"></textarea></label></div>
-    <div class="row"><button class="btn" id="rj-cancel">Cancel</button><button class="btn danger" id="rj-go">Reject</button></div>`);
+function rejectModal(id, char = "", scene = "", preset = "") {
+  const target = char || scene;
+  openModal(`<h2>Reject ${target ? esc(target) : "card"}</h2><div class="body"><label>Notes<textarea id="rj-notes" placeholder="What must change?">${esc(preset || "")}</textarea></label>
+    <div class="row"><button class="btn" id="rj-cancel">Cancel</button><button class="btn danger" id="rj-go">Reject${target ? " " + esc(target) : ""}</button></div>`);
   $("#rj-cancel").addEventListener("click", closeModal);
   $("#rj-go").addEventListener("click", async () => {
     try {
-      const out = await post("/api/gate0/decide", {card_id:id, action:"reject", notes:$("#rj-notes").value || "rejected"});
-      if (out.card) upsertCard(out.card);
-      closeModal(); toast("Rejected");
+      const out = await post("/api/gate0/decide", {card_id:id, action:"reject", notes:$("#rj-notes").value || "rejected", char, scene});
+      if (out.retake) upsertCard(out.retake);
+      closeModal();
+      if (out.retake?.id) {
+        toast(`Rejected — revision queued: ${out.retake.id}`);
+        location.hash = "#/card/" + encodeURIComponent(out.retake.id);
+      } else { toast("Rejected"); load(); }
     } catch (e) { toast(e.message, true); }
   });
 }
@@ -1480,7 +1837,7 @@ function rejectImageModal(cardId, path, caption) {
       if (out.card) upsertCard(out.card);
       if (out.retake) upsertCard(out.retake);
       closeModal();
-      toast("Retake queued" + (out.retake?.id ? ": " + out.retake.id : ""));
+      toast(out.retake?.id ? "Retake queued: " + out.retake.id : "Reworking on this card");
       load();
     } catch (e) { toast(e.message, true); }
   });
@@ -1542,6 +1899,16 @@ document.addEventListener("click", async e => {
                      name ? name + " voice sample" : "");
     return;
   }
+  const approveImage = e.target.closest("[data-approve-image]");
+  if (approveImage) {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await post("/api/cards/approve_image", {card_id: approveImage.dataset.card, path: approveImage.dataset.approveImage});
+      toast("Image approved"); load();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
   const rejectImage = e.target.closest("[data-reject-image]");
   if (rejectImage) {
     e.preventDefault();
@@ -1563,6 +1930,85 @@ document.addEventListener("click", async e => {
     e.preventDefault();
     e.stopPropagation();
     viewFileModal(viewFile.dataset.show, viewFile.dataset.viewFile);
+    return;
+  }
+  // Ideas actions for both views (buttons carry data-show).
+  const ia = e.target.closest("[data-ideas-approve]");
+  if (ia) {
+    e.preventDefault();
+    const picks = [...document.querySelectorAll(".pick-box:checked")].map(b => b.value);
+    if (!picks.length) { toast("Select at least one pitch", true); return; }
+    try {
+      const out = await post("/api/gate0/decide", {card_id: ia.dataset.ideasApprove, action: "approve", picks});
+      toast(`Concept approved from ${picks[0]}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
+      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
+      else load();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const rs = e.target.closest("[data-reselect]");
+  if (rs && rs.dataset.show) {
+    e.preventDefault();
+    try {
+      const out = await post("/api/show/reselect", {show_id: rs.dataset.show, pitch_id: rs.dataset.reselect});
+      toast(`Reselected ${rs.dataset.reselect}` + (out.renamed ? ` — show is now ${out.show_id}` : ""));
+      if (out.renamed && out.show_id) location.hash = "#/show/" + encodeURIComponent(out.show_id);
+      else load();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const rgn = e.target.closest("[data-regen]");
+  if (rgn && rgn.dataset.show) {
+    e.preventDefault();
+    regenerate(rgn.dataset.show, rgn.dataset.regen, rgn.dataset.char || "");
+    return;
+  }
+  const cap = e.target.closest("[data-char-approve]");
+  if (cap) {
+    e.preventDefault();
+    try {
+      const out = await post("/api/gate0/decide", {card_id: cap.dataset.card, action: "approve", char: cap.dataset.charApprove});
+      toast((out.messages || []).join("; ") || `Approved ${cap.dataset.charApprove}`);
+      load();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const crj = e.target.closest("[data-char-reject]");
+  if (crj) {
+    e.preventDefault();
+    rejectModal(crj.dataset.card, crj.dataset.charReject);
+    return;
+  }
+  const sca = e.target.closest("[data-scene-approve]");
+  if (sca) {
+    e.preventDefault();
+    try {
+      const out = await post("/api/gate0/decide", {card_id: sca.dataset.card, action: "approve", scene: sca.dataset.sceneApprove});
+      toast((out.messages || []).join("; ") || `Approved ${sca.dataset.sceneApprove}`);
+      load();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  const scr = e.target.closest("[data-scene-reject]");
+  if (scr) {
+    e.preventDefault();
+    rejectModal(scr.dataset.card, "", scr.dataset.sceneReject);
+    return;
+  }
+  const mrj = e.target.closest("[data-missing-reject]");
+  if (mrj) {
+    e.preventDefault();
+    const isScene = mrj.dataset.missingReject === "scene";
+    const preset = isScene
+      ? `Regenerate missing scene ref: ${mrj.dataset.name || "?"}. `
+      : `Regenerate missing refs: ${mrj.dataset.name || "?"}. `;
+    rejectModal(mrj.dataset.card, isScene ? "" : (mrj.dataset.name || ""), isScene ? (mrj.dataset.name || "") : "", preset);
+    return;
+  }
+  const rp = e.target.closest("[data-repitch]");
+  if (rp) {
+    e.preventDefault();
+    repitchModal(rp.dataset.repitch);
     return;
   }
   const runFiles = e.target.closest("[data-run-files]");
@@ -1591,8 +2037,11 @@ document.addEventListener("click", async e => {
         await post("/api/cards/review", {id});
         toast("Review queued"); load();
       } else if (act.dataset.act === "approve") {
-        await post("/api/gate0/decide", {card_id:id, action:"approve"});
-        toast("Approved"); load();
+        const out = await post("/api/gate0/decide", {card_id:id, action:"approve"});
+        toast((out.messages || []).join("; ") || "Approved"); load();
+      } else if (act.dataset.act === "approve-all") {
+        const out = await post("/api/gate0/decide", {card_id:id, action:"approve", all:true});
+        toast((out.messages || []).join("; ") || "Approved all"); load();
       } else if (act.dataset.act === "reject") {
         rejectModal(id);
       } else if (act.dataset.act === "back") {
@@ -1782,7 +2231,26 @@ async function refreshBoard() {
   updateChrome();
 }
 
+async function checkVersion() {
+  try {
+    const v = await api("/api/version");
+    const known = S.versions;
+    S.versions = v;
+    if (!known) return;
+    const changed = ["board_js", "api", "daemon"].filter(k => v[k] !== known[k]);
+    if (changed.length && !document.getElementById("verbar")) {
+      const bar = document.createElement("div");
+      bar.id = "verbar";
+      bar.innerHTML = `New dashboard code is available (${changed.join(", ")} changed). <button class="btn sm primary" id="verbar-reload">Reload now</button>`;
+      Object.assign(bar.style, {position:"fixed", bottom:"12px", right:"12px", zIndex: 9999, background:"var(--panel, #222)", border:"2px solid var(--accent, #f90)", padding:"10px 14px", borderRadius:"8px", boxShadow:"0 4px 16px rgba(0,0,0,.4)"});
+      document.body.appendChild(bar);
+      document.getElementById("verbar-reload").addEventListener("click", () => location.reload());
+    }
+  } catch (_) {}
+}
+
 async function render() {
+  checkVersion();
   const hash = location.hash || "#/board";
   const parts = hash.replace(/^#\//, "").split("/").filter(Boolean);
   const page = parts[0] || "board";

@@ -28,7 +28,7 @@ stt:
 # it never contends with H3. Failures auto-feed the Shot gate as rejections (LLM
 # revises the prompt from the VL issues + retake), capped per shot.
 #
-# SERVER NOTE: `lmstudio` (frame-sampling via the local qwen/qwen3-vl-8b row) is
+# SERVER NOTE: `lmstudio` (frame-sampling via the local gemma4-12b row) is
 # the reliably-working path on this machine. `vllm` (native whole-clip video via
 # WSL) requires UVA, which NVIDIA's WSL2 driver does not expose, and the local
 # FP8 checkpoint cannot load there (RuntimeError: UVA is not available); it is
@@ -37,7 +37,7 @@ stt:
 vcheck:
   enabled: true
   server: "lmstudio"           # lmstudio (frame sampling) | vllm (native video, needs UVA-capable host)
-  model: "qwen/qwen3-vl-8b"    # LM Studio model id (frame-sampling path)
+  model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"    # LM Studio model id (frame-sampling path)
   frames: 8                    # frames sampled per clip (evenly spread across the timeline)
   frame_sample_dim: 512        # short-side downscale for sampled frames (keeps more frames in context)
   max_refs: 4                  # up to this many character ref images per call

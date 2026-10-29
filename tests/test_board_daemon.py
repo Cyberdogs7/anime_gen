@@ -40,6 +40,31 @@ def _daemon(store, factory, cfg=None):
     return BoardDaemon(store, cfg, agent_factory=factory)
 
 
+def test_deps_ok_accepts_superseding_revision(tmp_path):
+    store = BoardStore(tmp_path / "b.db")
+    d = _daemon(store, lambda *a: None)
+    cards = [
+        {"id": "g0.alpha.bible", "show_id": "alpha", "kind": "gate0_bible",
+         "state": "blocked"},
+        {"id": "g0.alpha.bible.r1", "show_id": "alpha", "kind": "gate0_bible",
+         "state": "accepted"},
+        {"id": "g0.alpha.characters", "show_id": "alpha",
+         "kind": "gate0_characters", "state": "planned",
+         "depends_on": ["g0.alpha.bible"]},
+    ]
+    nxt = dict(cards[2])
+    assert d._deps_ok(nxt, cards) is True
+    # No accepted sibling anywhere -> still blocked on the dead original.
+    only_dead = [cards[0], dict(cards[2])]
+    assert d._deps_ok(only_dead[1], only_dead) is False
+    # A different show's accepted bible must not satisfy this show.
+    foreign = [cards[0],
+               {"id": "g0.beta.bible", "show_id": "beta",
+                "kind": "gate0_bible", "state": "accepted"},
+               dict(cards[2])]
+    assert d._deps_ok(foreign[2], foreign) is False
+
+
 def test_producer_then_reviewer_accepts(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod, "write_trace", lambda *a, **k: tmp_path)
     store = BoardStore(tmp_path / "b.db")
@@ -154,7 +179,9 @@ def test_request_episode_is_idempotent(tmp_path):
     second = request_episode(store, "demo", 3)
     assert len(first) == len(second) == len(episode_cards("demo", 3))
     assert {c["id"] for c in first} == {c["id"] for c in second}
-    assert store.get("demo.ep03.script")["depends_on"] == ["demo.ep03.outline"]
+    assert store.get("demo.ep03.locations")["depends_on"] == ["demo.ep03.outline"]
+    assert store.get("demo.ep03.h3prompts")["depends_on"] == ["demo.ep03.sound"]
+    assert store.get("demo.ep03.keyframes")["depends_on"] == ["demo.ep03.h3prompts"]
     # No skeleton card exists in the agent-first flow, so the outline must not
     # wait on one.
     assert store.get("demo.ep03.outline")["depends_on"] == []

@@ -103,8 +103,15 @@ def pending_for(state: dict[str, Any] | None, domain: str,
                 return {"step": "character", "char": ch.get("name")}
         return None
     if domain == "scenes":
-        if (st.get("scenes") or {}).get("status") == "pending":
-            return {"step": "scenes"}
+        locs = (st.get("scenes") or {}).get("locations") or {}
+        if not locs:
+            # No per-scene tracking yet (older state): whole-registry step.
+            if (st.get("scenes") or {}).get("status") == "pending":
+                return {"step": "scenes"}
+            return None
+        for sid, s in locs.items():
+            if s != "approved":
+                return {"step": "scene", "scene": sid}
         return None
     if domain == "plan":
         if (st.get("concept") or {}).get("status") == "pending":
@@ -134,6 +141,32 @@ def pending_for(state: dict[str, Any] | None, domain: str,
     return None
 
 
+def _char_refs_note(show, name: str) -> str:
+    """Latest refs.json note for a roster character (e.g. why it's stubbed).
+
+    Resolves the character dir by matching sheet names; returns "" when
+    unknown. Read-only; safe to call on every status evaluation."""
+    try:
+        target = str(name or "").strip().lower()
+        if not target:
+            return ""
+        for _cid in show.list_characters():
+            try:
+                _ch = show.read_character(_cid) or {}
+            except Exception:
+                continue
+            if str(_ch.get("name") or "").strip().lower() != target:
+                continue
+            try:
+                from .. import refs as _refs_mod
+                return str((_refs_mod.load_refs(show, _cid) or {}).get("note") or "")
+            except Exception:
+                return ""
+    except Exception:
+        pass
+    return ""
+
+
 def status(show, domain: str | None = None) -> dict[str, Any]:
     state = show.bootstrap_state() or {}
     try:
@@ -142,11 +175,27 @@ def status(show, domain: str | None = None) -> dict[str, Any]:
         ideas = {}
     domains = {d: pending_for(state, d, ideas) for d in DOMAINS}
     pitches = ideas.get("pitches") or []
+    # Per-scene refs state, so the images card can list exactly which
+    # locations are missing/failed (and why) instead of only surfacing the
+    # first pending one.
+    from .. import scenes as _scenes_mod
+    scene_refs: dict[str, dict[str, str]] = {}
+    try:
+        for _sid in show.list_scenes():
+            try:
+                _sr = _scenes_mod.load_refs(show, _sid) or {}
+            except Exception:
+                _sr = {}
+            _st = str(_sr.get("status") or "")
+            scene_refs[_sid] = {
+                "status": _st if _st else "missing",
+                "note": str(_sr.get("note") or ""),
+            }
+    except Exception:
+        pass
     if domains["images"] is None:
-        from .. import scenes
-        for sid in show.list_scenes():
-            status = str((scenes.load_refs(show, sid) or {}).get("status") or "")
-            if status in ("rejected", "pending"):
+        for sid, _sr in scene_refs.items():
+            if _sr["status"] in ("rejected", "pending"):
                 domains["images"] = {"step": "scene", "scene": sid}
                 break
     pending = domains.get(domain) if domain else (
@@ -160,6 +209,11 @@ def status(show, domain: str | None = None) -> dict[str, Any]:
             name: (state.get(name) or {}).get("status", "")
             for name in ("concept", "bible", "scenes")
         },
+        "locations": [
+            {"id": sid, "status": s}
+            for sid, s in ((state.get("scenes") or {}).get("locations") or {}).items()
+        ],
+        "scene_refs": scene_refs,
         "ideas": {
             "total": len(pitches),
             "proposed": sum(1 for p in pitches if p.get("status") == "proposed"),
@@ -169,7 +223,8 @@ def status(show, domain: str | None = None) -> dict[str, Any]:
         },
         "characters": [
             {"name": c.get("name"), "proposal": c.get("proposal"),
-             "refs": c.get("refs"), "voice": c.get("voice")}
+             "refs": c.get("refs"), "voice": c.get("voice"),
+             "refs_note": _char_refs_note(show, c.get("name"))}
             for c in state.get("characters") or []
         ],
     }

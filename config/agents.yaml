@@ -29,7 +29,7 @@ roles:
   voice_writer:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-writer
     skill: voice-writer
     temperature: 0.8
@@ -42,7 +42,7 @@ roles:
   gate0_plan:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-writer
     skill: show-bootstrap
     temperature: 0.7
@@ -53,17 +53,22 @@ roles:
       Read .agents/skills/show-bootstrap/SKILL.md and build the show artifacts.
 
   gate0_ideas:
-    kind: exec
+    kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-    max_steps: 1
-    tools: [gate0_ideas]
-    prompt: Pitch 5 show ideas off the brief and archive them.
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: show-ideas
+    temperature: 1.15
+    max_steps: 15
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/show-ideas/SKILL.md and pitch 5 show ideas.
 
   gate0_bible:
     kind: exec
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     max_steps: 1
     tools: [gate0_bible]
     prompt: Write the series bible from the approved concept.
@@ -71,7 +76,7 @@ roles:
   gate0_characters:
     kind: exec
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     max_steps: 1
     tools: [gate0_characters]
     prompt: Propose the cast from the approved bible.
@@ -79,7 +84,7 @@ roles:
   gate0_scenes:
     kind: exec
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     max_steps: 1
     tools: [gate0_scenes]
     prompt: Build the scene registry from the approved bible.
@@ -121,7 +126,7 @@ roles:
   storyboard_planner:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-writer
     skill: object-prompts
     temperature: 0.3
@@ -166,7 +171,7 @@ roles:
   fixer:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "cognitivecomputations_dolphin3.0-r1-mistral-24b"
     agent: studio-fixer
     skill: qc-fixer
     temperature: 0.3
@@ -182,7 +187,7 @@ roles:
     lane: llm
     # Legacy staged prep: skeleton + one beats batch per card. The actual
     # outline writing is done by outline_writer_agent (opencode + skill).
-    model: "dolphin-2.9.3-mistral-nemo-12b"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     temperature: 0.7
     max_steps: 8
     timeout_s: 3600
@@ -195,7 +200,7 @@ roles:
     lane: llm
     # Normal opencode agent: writes only outline-changes.json, then runs the
     # apply helper. No board-tool Python jobs and no show-file reads.
-    model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-writer
     skill: outline-writer
     temperature: 0.7
@@ -208,7 +213,7 @@ roles:
   scene_writer:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-writer
     skill: scene-rewriter
     temperature: 0.7
@@ -218,35 +223,22 @@ roles:
     prompt: >
       Read .agents/skills/scene-rewriter/SKILL.md and rewrite the card's scene.
 
-  script_writer:
-    kind: producer
-    lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-    agent: studio-writer
-    skill: script-writer
-    temperature: 0.8
-    max_steps: 80
-    timeout_s: 14400
-    tools: []
-    prompt: >
-      Read .agents/skills/script-writer/SKILL.md and write the episode screenplay.
-
   showrunner:
     kind: producer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     temperature: 0.8
     max_steps: 24
     timeout_s: 14400
     tools: [read_card, read_show, generate_script, revise_script,
             episode_status, add_note, attach_artifact]
     prompt: >
-      Legacy board-tool screenplay path. Prefer the script_writer agent.
+      Legacy board-tool screenplay path.
 
   outline_reviewer:
     kind: reviewer
     lane: llm
-    model: "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     agent: studio-reviewer
     skill: outline-reviewer
     temperature: 0.2
@@ -256,17 +248,280 @@ roles:
     prompt: >
       Read .agents/skills/outline-reviewer/SKILL.md and review the plan.
 
-  script_reviewer:
+  # ---- Episode fragment passes (single-responsibility) ----
+  # Producers write one fragment per plan scene under runs/EPxx/passes/.
+  # Reviewers verdict pass/fail; gated stages carry human_gate on the card.
+  location_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: location-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/location-writer/SKILL.md and write the location fragments.
+
+  cast_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: cast-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/cast-writer/SKILL.md and write the cast fragments.
+
+  outfit_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: outfit-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/outfit-writer/SKILL.md and write the outfit fragments.
+
+  narrative_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: narrative-writer
+    temperature: 0.8
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/narrative-writer/SKILL.md and write the narrative fragments.
+
+  dialogue_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: dialogue-writer
+    temperature: 0.8
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/dialogue-writer/SKILL.md and write the dialogue fragments.
+
+  shot_splitter:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: shot-splitter
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/shot-splitter/SKILL.md and write the shot fragments.
+
+  camera_director:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: camera-director
+    temperature: 0.8
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/camera-director/SKILL.md and write the camera fragments.
+
+  action_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: action-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/action-writer/SKILL.md and write the action fragments.
+
+  sound_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: sound-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/sound-writer/SKILL.md and write the sound fragments.
+
+  h3_writer:
+    kind: producer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-writer
+    skill: h3-writer
+    temperature: 0.7
+    max_steps: 60
+    timeout_s: 14400
+    tools: []
+    prompt: >
+      Read .agents/skills/h3-writer/SKILL.md and merge the fragments, then compile the H3 prompts.
+
+  location_reviewer:
     kind: reviewer
     lane: llm
-    model: "qwen3.8-27b-uncensored-hauhaucs-aggressive-mtp"
-    agent: studio-script-reviewer
-    skill: script-reviewer
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: location-reviewer
     temperature: 0.2
-    max_steps: 20
+    max_steps: 16
     timeout_s: 3600
     tools: []
     prompt: >
-      Read .agents/skills/script-reviewer/SKILL.md and review the screenplay.
+      Read .agents/skills/location-reviewer/SKILL.md and review the location fragments.
+
+  cast_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: cast-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/cast-reviewer/SKILL.md and review the cast fragments.
+
+  outfit_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: outfit-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/outfit-reviewer/SKILL.md and review the outfit fragments.
+
+  object_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: object-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/object-reviewer/SKILL.md and review the object fragments.
+
+  narrative_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: narrative-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/narrative-reviewer/SKILL.md and review the narrative fragments.
+
+  dialogue_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: dialogue-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/dialogue-reviewer/SKILL.md and review the dialogue fragments.
+
+  shot_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: shot-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/shot-reviewer/SKILL.md and review the shot fragments.
+
+  camera_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: camera-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/camera-reviewer/SKILL.md and review the camera fragments.
+
+  action_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: action-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/action-reviewer/SKILL.md and review the action fragments.
+
+  sound_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: sound-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/sound-reviewer/SKILL.md and review the sound fragments.
+
+  h3_reviewer:
+    kind: reviewer
+    lane: llm
+    model: "gemma4-12b-qat-uncensored-hauhaucs-balanced"
+    agent: studio-reviewer
+    skill: h3-reviewer
+    temperature: 0.2
+    max_steps: 16
+    timeout_s: 3600
+    tools: []
+    prompt: >
+      Read .agents/skills/h3-reviewer/SKILL.md and review the compiled H3 prompts.
 
 

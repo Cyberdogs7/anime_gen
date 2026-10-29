@@ -144,7 +144,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "vcheck": {
             "enabled": True,
             "server": "vllm",                 # vllm (native video via WSL) | lmstudio (frame sampling)
-            "model": "qwen/qwen3-vl-8b",      # LM Studio model id (frame-sampling fallback path)
+            "model": "gemma4-12b-qat-uncensored-hauhaucs-balanced",      # LM Studio model id (frame-sampling fallback path)
             "frames": 8,                      # frames sampled per clip (evenly spread)
             "frame_sample_dim": 512,          # short-side downscale for sampled frames (lmstudio path)
             "max_refs": 4,                    # up to this many character refs per call

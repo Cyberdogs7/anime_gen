@@ -39,14 +39,14 @@ def test_vlm_service_type_registered():
 def test_load_vlm_lms_loads_vcheck_model(monkeypatch):
     """_load_vlm issues `lms load <vcheck model>` (after evicting the LLM+Comfy)."""
     cfg = _cfg("lmstudio")
-    cfg.data["qc"]["vcheck"]["model"] = "qwen/qwen3-vl-8b"
+    cfg.data["qc"]["vcheck"]["model"] = "gemma4-12b-qat-uncensored-hauhaucs-balanced"
     vm = GPUManager(cfg)
 
     calls = []
     popens = []
     def fake_run(cmd, **kw):
         calls.append(list(cmd))
-        return type("R", (), {"returncode": 0, "stdout": "qwen/qwen3-vl-8b  IDLE", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": "gemma4-12b-qat-uncensored-hauhaucs-balanced  IDLE", "stderr": ""})()
     monkeypatch.setattr("studio.gpu_manager._run", fake_run)
     monkeypatch.setattr("studio.gpu_manager.subprocess.Popen",
                         lambda args, **kw: popens.append(list(args)) or type("P", (), {"poll": lambda: None})())
@@ -58,7 +58,7 @@ def test_load_vlm_lms_loads_vcheck_model(monkeypatch):
     vm._load_vlm()
     loads = [p for p in popens if p and p[0:2] == ["lms", "load"]]
     assert loads, "expected an `lms load <model>` call (Popen)"
-    assert "qwen/qwen3-vl-8b" in loads[0]
+    assert "gemma4-12b-qat-uncensored-hauhaucs-balanced" in loads[0]
     # eviction: showrunner LLM unloaded before the VLM is loaded
     assert any(c and c[0:2] == ["lms", "unload"] for c in calls)
 
